@@ -1,49 +1,211 @@
-import { attemptReaction } from "./bio.js";
+import { attemptReaction, ENZYME_CLASSES } from "./bio.js";
 
 export class Cell {
-	constructor(genome) {
-		this.genome = genome;
-		this.energy = 0;
-		this.molecules = [];
-		this.timeWithoutFood = 0;
-		this.state = "active";
-	}
+    constructor(genome) {
+        this.genome = genome;
+        this.energy = genome.initialEnergy || 0;
+        this.molecules = [];
+        this.timeWithoutFood = 0;
+        this.state = "active";
+        this.lineageId = genome.lineageId || Math.floor(Math.random() * 1e9);
+        this.birthTime = Date.now();
+    }
 
-	step(env, tile) {
-		if (this.state !== "active") return;
-		let gainedEnergy = 0;
-		for (const enzyme of this.genome.enzymes) {
-			const result = attemptReaction(
-				enzyme,
-				tile.molecules,
-				env
-			);
-			if (result) {
-				gainedEnergy += result.energyDelta;
-				this.consume(tile, result);
-			}
-		}
+    step(env, tile) {
+        if (this.state !== "active") return;
 
-		if (gainedEnergy > 0) {
-			this.energy += gainedEnergy;
-			this.timeWithoutFood = 0;
-		} else {
-			this.timeWithoutFood += env.dt;
-			this.checkStarvation();
-		}
-	}
+        let gainedEnergy = 0;
 
-	consume(tile, reaction) {
-		reaction.consumed.forEach(m => {
-			const idx = tile.molecules.indexOf(m);
-			if (idx >= 0) tile.molecules.splice(idx, 1);
-		});
-		tile.molecules.push(reaction.produced);
-	}
+        for (const enzyme of this.genome.enzymes) {
+            const result = attemptReaction(
+                enzyme,
+                tile.molecules.concat(this.molecules),
+                env
+            );
 
-	checkStarvation() {
-		if (this.timeWithoutFood > this.genome.decayTime) {
-			this.state = Math.random() < 0.5 ? "dead" : "dormant";
-		}
-	}
+            if (result) {
+                const eDelta = result.energyDelta || 0;
+                gainedEnergy += eDelta;
+
+                this.consumeSubstrates(result.consumed, tile);
+
+                if (Math.random() < (enzyme.secretionProb ?? this.genome.defaultSecretionProb)) {
+                    tile.molecules.push(result.produced);
+                } else {
+                    this.molecules.push(result.produced);
+                }
+            }
+        }
+
+        if (gainedEnergy > 0) {
+            this.energy += gainedEnergy;
+            this.timeWithoutFood = 0;
+        } else {
+            this.timeWithoutFood += env.dt;
+            this.checkStarvation();
+        }
+
+        if (this.energy >= this.genome.reproThreshold) {
+            this.divide(tile);
+        }
+    }
+
+    consumeSubstrates(substrates, tile) {
+        substrates.forEach(m => {
+            let idx = tile.molecules.indexOf(m);
+            if (idx >= 0) {
+                tile.molecules.splice(idx, 1);
+                return;
+            }
+            idx = this.molecules.indexOf(m);
+            if (idx >= 0) {
+                this.molecules.splice(idx, 1);
+                return;
+            }
+        });
+    }
+
+    checkStarvation() {
+        if (this.timeWithoutFood > this.genome.decayTime) {
+            if (Math.random() < (this.genome.dormancyBias ?? 0.5)) {
+                this.state = "dormant";
+            } else {
+                this.state = "dead";
+            }
+        }
+    }
+
+    divide(tile) {
+        const childGenome = mutateGenome(this.genome);
+
+        const childEnergy = this.energy * (0.5 + (Math.random() - 0.5) * 0.1);
+        this.energy = Math.max(0, this.energy - childEnergy);
+
+        const childMolecules = [];
+        for (let i = this.molecules.length - 1; i >= 0; i--) {
+            if (Math.random() < 0.5) {
+                childMolecules.push(this.molecules[i]);
+                this.molecules.splice(i, 1);
+            }
+        }
+
+        const child = new Cell(childGenome);
+        child.energy = childEnergy;
+        child.molecules = childMolecules;
+
+        child.lineageId = this.lineageId;
+
+        const maxOffset = 3;
+        let placed = false;
+        for (let attempts = 0; attempts < 6 && !placed; attempts++) {
+            const dx = Math.floor((Math.random() * (maxOffset * 2 + 1)) - maxOffset);
+            const dy = Math.floor((Math.random() * (maxOffset * 2 + 1)) - maxOffset);
+            const px = (tile.__x + dx + this._worldWidth()) % this._worldWidth();
+            const py = (tile.__y + dy + this._worldHeight()) % this._worldHeight();
+            tile.__world.grid[px][py].cells.push(child);
+            placed = true;
+        }
+        if (!placed) {
+            tile.cells.push(child);
+        }
+
+        if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) {
+            this.state = "dead";
+        }
+    }
+
+    getDominantElement() {
+        const counts = {};
+        for (const m of this.molecules) {
+            for (const el in m.composition) {
+                counts[el] = (counts[el] || 0) + m.composition[el];
+            }
+        }
+        let dominant = null;
+        let best = 0;
+        for (const k in counts) {
+            if (counts[k] > best) {
+                best = counts[k];
+                dominant = k;
+            }
+        }
+        return dominant;
+    }
+
+    getAgeMs() {
+        return Date.now() - this.birthTime;
+    }
+
+    _worldWidth() {
+        return this._worldRef ? this._worldRef.width : 200;
+    }
+    _worldHeight() {
+        return this._worldRef ? this._worldRef.height : 200;
+    }
+}
+
+function mutateGenome(genome) {
+    const g = JSON.parse(JSON.stringify(genome));
+
+    const mut = g.mutationRate ?? 0.05;
+
+    if (Math.random() < mut) {
+        g.reproThreshold = Math.max(0.1, g.reproThreshold * (1 + (Math.random() - 0.5) * 0.2));
+    }
+    if (Math.random() < mut) {
+        g.decayTime = Math.max(100, Math.round(g.decayTime * (1 + (Math.random() - 0.5) * 0.2)));
+    }
+    if (Math.random() < mut) {
+        g.defaultSecretionProb = clamp01(g.defaultSecretionProb + (Math.random() - 0.5) * 0.2);
+    }
+
+    for (let i = 0; i < g.enzymes.length; i++) {
+        if (Math.random() < mut) {
+            const en = g.enzymes[i];
+            if (!en.affinity) en.affinity = {};
+            if (Math.random() < 0.5) {
+                const keys = Object.keys(en.affinity);
+                if (keys.length > 0 && Math.random() < 0.7) {
+                    const k = keys[Math.floor(Math.random() * keys.length)];
+                    en.affinity[k] = Math.max(0, en.affinity[k] + (Math.random() - 0.5) * 0.4);
+                } else {
+                    const possible = ["A", "B", "C", "D", "E", "X"];
+                    const k = possible[Math.floor(Math.random() * possible.length)];
+                    en.affinity[k] = (en.affinity[k] || 0) + Math.random();
+                }
+            }
+            if (Math.random() < mut * 0.2) {
+                const classes = Object.keys(ENZYME_CLASSES);
+                en.type = classes[Math.floor(Math.random() * classes.length)];
+            }
+
+            if (Math.random() < mut) en.tOpt = clamp01((en.tOpt ?? 0.5) + (Math.random() - 0.5) * 0.2);
+            if (Math.random() < mut) en.pHOpt = clamp01((en.pHOpt ?? 0.5) + (Math.random() - 0.5) * 0.2);
+            if (Math.random() < mut) en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (Math.random() - 0.5) * 0.2);
+        }
+    }
+
+    if (Math.random() < mut * 0.3 && g.enzymes.length > 0) {
+        const idx = Math.floor(Math.random() * g.enzymes.length);
+        g.enzymes.splice(idx, 1);
+    } else if (Math.random() < mut * 0.3 && g.enzymes.length < 6) {
+        const classes = Object.keys(ENZYME_CLASSES);
+        const type = classes[Math.floor(Math.random() * classes.length)];
+        g.enzymes.push({
+            type,
+            affinity: { B: Math.random(), C: Math.random() },
+            tOpt: Math.random(),
+            pHOpt: Math.random(),
+            secretionProb: Math.random()
+        });
+    }
+
+    g.reproThreshold = Math.max(0.01, g.reproThreshold);
+    g.decayTime = Math.max(50, g.decayTime);
+
+    return g;
+}
+
+function clamp01(v) {
+    return Math.max(0, Math.min(1, v));
 }
