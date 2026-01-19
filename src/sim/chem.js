@@ -7,7 +7,6 @@ export const ELEMENTS = {
     X: { mass: 1.0, polarity: 0.6, energy: -0.2 }
 };
 
-
 export function createMolecule(composition) {
 	let mass = 0;
 	let polarity = 0;

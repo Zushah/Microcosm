@@ -28,8 +28,88 @@ function randomGenome() {
 const canvas = document.getElementById("canvas");
 const renderer = new CanvasRenderer(canvas, world);
 
+const hud = {
+    population: document.getElementById("statPopulation"),
+    avgEnergy: document.getElementById("statAvgEnergy"),
+    lineages: document.getElementById("statLineages"),
+    enzymeDiversity: document.getElementById("statEnzymeDiversity")
+};
+
+let selectedCell = null;
+let selectedTile = null;
+
+renderer.onCellClick = (x, y, tile, topCell) => {
+    selectedCell = topCell;
+    selectedTile = tile;
+    updateInfoPanel();
+};
+
 for (let i = 0; i < 40; i++) {
     world.spawnRandomCell(randomGenome);
+}
+
+function computeStats() {
+    let pop = 0;
+    let totalEnergy = 0;
+    const lineages = new Set();
+    const enzymeSet = new Set();
+
+    for (let x = 0; x < world.width; x++) {
+        for (let y = 0; y < world.height; y++) {
+            const tile = world.grid[x][y];
+            for (const c of tile.cells) {
+                pop++;
+                totalEnergy += c.energy;
+                lineages.add(c.lineageId);
+                for (const e of c.genome.enzymes) {
+                    enzymeSet.add(e.type);
+                }
+            }
+        }
+    }
+
+    const avgEnergy = pop > 0 ? (totalEnergy / pop).toFixed(2) : "—";
+    return {
+        population: pop,
+        avgEnergy,
+        lineageCount: lineages.size,
+        enzymeDiversity: enzymeSet.size
+    };
+}
+
+function updateHud() {
+    const s = computeStats();
+    hud.population.textContent = `Population: ${s.population}`;
+    hud.avgEnergy.textContent = `Avg energy: ${s.avgEnergy}`;
+    hud.lineages.textContent = `Lineages: ${s.lineageCount}`;
+    hud.enzymeDiversity.textContent = `Enzyme diversity: ${s.enzymeDiversity}`;
+}
+
+function updateInfoPanel() {
+    const title = document.getElementById("infoTitle");
+    const body = document.getElementById("infoBody");
+    if (!selectedCell) {
+        title.textContent = "No cell selected";
+        body.innerHTML = `<div class="smallNote">Click a white pixel (cell) to inspect it. Info updates live.</div>`;
+        return;
+    }
+    title.textContent = `Cell — lineage ${selectedCell.lineageId}`;
+    const age = selectedCell.getAgeMs();
+    const dom = selectedCell.getDominantElement() || "none";
+    let enzymesHtml = "<ul style='margin:4px 0 8px 18px;padding:0;'>";
+    for (const e of selectedCell.genome.enzymes) {
+        enzymesHtml += `<li><strong>${e.type}</strong> (tOpt:${(e.tOpt ?? 0.5).toFixed(2)}, pH:${(e.pHOpt ?? 0.5).toFixed(2)}, sec:${(e.secretionProb ?? selectedCell.genome.defaultSecretionProb).toFixed(2)})</li>`;
+    }
+    enzymesHtml += "</ul>";
+    body.innerHTML = `
+        <div><strong>Age:</strong> ${(age/1000).toFixed(1)} s</div>
+        <div><strong>Energy:</strong> ${selectedCell.energy.toFixed(2)}</div>
+        <div><strong>State:</strong> ${selectedCell.state}</div>
+        <div><strong>Dominant internal element:</strong> ${dom}</div>
+        <div style="margin-top:8px"><strong>Enzymes:</strong> ${enzymesHtml}</div>
+        <div><strong>Internal molecule count:</strong> ${selectedCell.molecules.length}</div>
+        <div style="margin-top:6px" class="smallNote">Click other cells to update. Metrics refresh automatically.</div>
+    `;
 }
 
 setInterval(() => {
@@ -38,4 +118,6 @@ setInterval(() => {
     }
     world.step();
     renderer.render();
+    updateHud();
+    updateInfoPanel();
 }, world.dt);

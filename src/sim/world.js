@@ -32,10 +32,12 @@ export class World {
     }
 
     seedMolecules() {
-        return [
-            createMolecule({ A: 1 }),
-            Math.random() < 0.1 ? createMolecule({ B: 1 }) : null
-        ].filter(Boolean);
+        const arr = [];
+        arr.push(createMolecule({ A: 1 }));
+        if (Math.random() < 0.5) arr.push(createMolecule({ B: 1 }));
+        if (Math.random() < 0.25) arr.push(createMolecule({ C: 1 }));
+        if (Math.random() < 0.05) arr.push(createMolecule({ B: 1, C: 1 }));
+        return arr;
     }
 
     spawnRandomCell(genomeFactory) {
@@ -110,5 +112,5 @@ export class World {
 }
 
 function diffusionRate(molecule) {
-    return Math.min(0.08, 0.02 + (1 / (molecule.size + 1)) * molecule.polarity * 0.06);
+    return Math.min(0.04, 0.01 + (1 / (molecule.size + 1)) * molecule.polarity * 0.04);
 }
