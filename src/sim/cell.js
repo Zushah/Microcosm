@@ -10,6 +10,8 @@ export class Cell {
         this.lineageId = genome.lineageId || Math.floor(Math.random() * 1e9);
         this.birthTime = Date.now();
         this._highlight = false;
+        this.reactionLog = [];
+        this.reactionLogMax = 20;
     }
 
     step(env, tile) {
@@ -28,6 +30,8 @@ export class Cell {
 
             const eDelta = result.energyDelta || 0;
             gainedEnergy += eDelta;
+
+            const tBefore = tile.temperature;
 
             this.consumeSubstrates(result.consumed, tile);
 
@@ -49,7 +53,7 @@ export class Cell {
             }
 
             const heat = result.heatDelta || 0;
-            if (Math.abs(heat) > 1e-8 && tile.__world) {
+            if (Math.abs(heat) > 1e-12 && tile.__world) {
                 tile.temperature = Math.max(0, tile.temperature + heat);
                 const neighbors = tile.__world.mooreNeighbors(tile.__x, tile.__y);
                 for (const [nx, ny] of neighbors) {
@@ -59,6 +63,21 @@ export class Cell {
                     );
                 }
             }
+
+            const tAfter = tile.temperature;
+            const deltaT = tAfter - tBefore;
+
+            this._pushReactionLog({
+                time: Date.now(),
+                substrates: (result.consumed || []).map(m => compositionToString(m.composition)),
+                product: result.produced ? compositionToString(result.produced.composition) : "—",
+                byproducts: (result.byproducts || []).map(bp => compositionToString(bp.composition)),
+                deltaE: Number((result.energyDelta || 0).toFixed(4)),
+                deltaT: Number(deltaT.toFixed(6)),
+                tBefore: Number(tBefore.toFixed(6)),
+                tAfter: Number(tAfter.toFixed(6)),
+                enzymeType: enzyme.type
+            });
         }
 
         const internalCount = this.totalInternalAtoms();
@@ -75,6 +94,15 @@ export class Cell {
             this.timeWithoutFood += env.dt;
         }
 
+        const T = tile.temperature;
+        let stressIncrement = 0;
+        for (const en of this.genome.enzymes) {
+            const tOpt = en.tOpt ?? 0.5;
+            const dist = Math.abs(T - tOpt);
+            stressIncrement += Math.pow(dist, 1.6) * (this.genome.tempStressFactor ?? 0.03);
+        }
+        this.timeWithoutFood += stressIncrement;
+
         if (this.timeWithoutFood > this.genome.decayTime) {
             this.state = "dead";
             return;
@@ -83,6 +111,11 @@ export class Cell {
         if (this.energy >= this.genome.reproThreshold) {
             this.divide(tile);
         }
+    }
+
+    _pushReactionLog(entry) {
+        this.reactionLog.unshift(entry);
+        if (this.reactionLog.length > this.reactionLogMax) this.reactionLog.length = this.reactionLogMax;
     }
 
     totalInternalAtoms() {
@@ -233,3 +266,8 @@ function mutateGenome(genome) {
     return g;
 }
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+function compositionToString(comp) {
+    if (!comp) return "—";
+    return Object.entries(comp).map(([k, v]) => `${k}${v}`).join("");
+}

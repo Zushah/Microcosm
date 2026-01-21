@@ -216,6 +216,22 @@ function updateInfoPanel() {
     }
     enzymesHtml += "</ul>";
 
+    let reactionHtml = "";
+    if (!selectedCell.reactionLog || selectedCell.reactionLog.length === 0) {
+        reactionHtml = "<div class='smallNote'>No recent reactions logged for this cell.</div>";
+    } else {
+        reactionHtml = "<table style='width:100%;font-size:12px;border-collapse:collapse;'><thead><tr style='text-align:left;'><th>t(s)</th><th>Reaction</th><th>ΔE</th><th>ΔT</th></tr></thead><tbody>";
+        const slice = selectedCell.reactionLog.slice(0, 10);
+        for (const ev of slice) {
+            const tSec = ((Date.now() - ev.time) / 1000).toFixed(2);
+            const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
+            const byp = ev.byproducts.length === 0 ? "" : "  (+ " + ev.byproducts.join(", ") + ")";
+            const reactionStr = `${left} → ${ev.product}${byp}`;
+            reactionHtml += `<tr><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${tSec}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'><code>${reactionStr}</code></td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaE}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaT}</td></tr>`;
+        }
+        reactionHtml += "</tbody></table>";
+    }
+
     body.innerHTML = `
         <div><strong>Age:</strong> ${(age/1000).toFixed(1)} s</div>
         <div><strong>Energy:</strong> ${selectedCell.energy.toFixed(2)}</div>
@@ -223,7 +239,8 @@ function updateInfoPanel() {
         <div><strong>Dominant internal element:</strong> ${dom}</div>
         <div style="margin-top:8px"><strong>Enzymes (approx reaction):</strong> ${enzymesHtml}</div>
         <div style="margin-top:4px"><strong>Internal molecules:</strong> ${moleculesHtml}</div>
-        <div class="smallNote" style="margin-top:6px">Right-click the cell to highlight its descendants in yellow.</div>
+        <div style="margin-top:8px"><strong>Recent reactions (newest first):</strong> ${reactionHtml}</div>
+        <div class="smallNote" style="margin-top:6px">ΔE = usable energy gained by the cell from the reaction. ΔT ≈ tile temperature change applied by that reaction.</div>
     `;
 }
 

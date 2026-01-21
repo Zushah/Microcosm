@@ -35,8 +35,11 @@ export class World {
     seedMolecules() {
         const arr = [];
         arr.push(createMolecule({ A: 1 }));
-        if (Math.random() < 0.5) arr.push(createMolecule({ B: 1 }));
-        if (Math.random() < 0.25) arr.push(createMolecule({ C: 1 }));
+        if (Math.random() < 0.6) arr.push(createMolecule({ B: 1 }));
+        if (Math.random() < 0.45) arr.push(createMolecule({ C: 1 }));
+        if (Math.random() < 0.12) arr.push(createMolecule({ D: 1 }));
+        if (Math.random() < 0.08) arr.push(createMolecule({ E: 1 }));
+        if (Math.random() < 0.05) arr.push(createMolecule({ X: 1 }));
         if (Math.random() < 0.05) arr.push(createMolecule({ B: 1, C: 1 }));
         return arr;
     }
@@ -133,8 +136,8 @@ export class World {
 
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
-                this.grid[x][y].temperature = tNext[x][y];
-                this.grid[x][y].solute = sNext[x][y];
+                this.grid[x][y].temperature = Math.max(0, Math.min(5, tNext[x][y]));
+                this.grid[x][y].solute = Math.max(0, Math.min(1, sNext[x][y]));
             }
         }
     }

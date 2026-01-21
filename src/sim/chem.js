@@ -1,9 +1,9 @@
 export const ELEMENTS = {
-    A: { mass: 1.0, polarity: 0.9, energy: 0.8 },
-    B: { mass: 1.2, polarity: 0.4, energy: 1.2 },
-    C: { mass: 1.4, polarity: 0.2, energy: 1.1 },
-    D: { mass: 1.8, polarity: 0.1, energy: 1.4 },
-    E: { mass: 0.8, polarity: 1.0, energy: 0.6 },
+    A: { mass: 1.0, polarity: 0.9, energy: 0.5 },
+    B: { mass: 1.2, polarity: 0.4, energy: 1.0 },
+    C: { mass: 1.4, polarity: 0.2, energy: 0.9 },
+    D: { mass: 1.8, polarity: 0.1, energy: 2.2 },
+    E: { mass: 0.8, polarity: 1.0, energy: 1.6 },
     X: { mass: 1.0, polarity: 0.6, energy: -0.2 }
 };
 
