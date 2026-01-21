@@ -7,6 +7,9 @@ export class World {
         this.height = height;
         this.dt = 10;
 
+        this.baseTemperature = 0.45 + Math.random() * 0.1;
+        this.baseSolute = 0.2 + Math.random() * 0.2;
+
         this.grid = [];
         for (let x = 0; x < width; x++) {
             this.grid[x] = [];
@@ -21,13 +24,11 @@ export class World {
     }
 
     createTile() {
-        const baseTemp = 0.5;
-        const basePH = 0.5;
         return {
             molecules: this.seedMolecules(),
             cells: [],
-            temperature: baseTemp + (Math.random() - 0.5) * 0.04,
-            pH: basePH + (Math.random() - 0.5) * 0.04
+            temperature: this.baseTemperature,
+            solute: this.baseSolute
         };
     }
 
@@ -56,7 +57,7 @@ export class World {
                 const tile = this.grid[x][y];
                 const env = {
                     temperature: tile.temperature,
-                    pH: tile.pH,
+                    pH: 0.5,
                     dt: this.dt
                 };
 
@@ -69,6 +70,8 @@ export class World {
                 tile.cells = tile.cells.filter(c => c.state !== "dead");
             }
         }
+
+        this.diffuseScalars();
     }
 
     diffuseMolecules() {
@@ -77,7 +80,6 @@ export class World {
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
                 const tile = this.grid[x][y];
-
                 tile.molecules.forEach(molecule => {
                     const rate = diffusionRate(molecule);
                     if (Math.random() < rate) {
@@ -97,6 +99,65 @@ export class World {
                 dst.push(t.molecule);
             }
         });
+    }
+
+    diffuseScalars() {
+        const tNext = [];
+        const sNext = [];
+        for (let x = 0; x < this.width; x++) {
+            tNext[x] = [];
+            sNext[x] = [];
+            for (let y = 0; y < this.height; y++) {
+                tNext[x][y] = this.grid[x][y].temperature;
+                sNext[x][y] = this.grid[x][y].solute;
+            }
+        }
+
+        const alpha = 0.2;
+        for (let x = 0; x < this.width; x++) {
+            for (let y = 0; y < this.height; y++) {
+                const neighbors = this.mooreNeighbors(x, y);
+                let tSum = this.grid[x][y].temperature;
+                let sSum = this.grid[x][y].solute;
+                for (const [nx, ny] of neighbors) {
+                    tSum += this.grid[nx][ny].temperature;
+                    sSum += this.grid[nx][ny].solute;
+                }
+                const count = neighbors.length + 1;
+                const tAvg = tSum / count;
+                const sAvg = sSum / count;
+                tNext[x][y] = this.grid[x][y].temperature * (1 - alpha) + tAvg * alpha;
+                sNext[x][y] = this.grid[x][y].solute * (1 - alpha) + sAvg * alpha;
+            }
+        }
+
+        for (let x = 0; x < this.width; x++) {
+            for (let y = 0; y < this.height; y++) {
+                this.grid[x][y].temperature = tNext[x][y];
+                this.grid[x][y].solute = sNext[x][y];
+            }
+        }
+    }
+
+    addProductAround(centerX, centerY, product) {
+        const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
+        const k = 1 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < k; i++) {
+            const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
+            this.grid[nx][ny].molecules.push(product);
+            this.grid[nx][ny].solute = Math.min(1, this.grid[nx][ny].solute + 0.01);
+        }
+    }
+
+    mooreNeighbors(x, y) {
+        const out = [];
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) continue;
+                out.push([(x + dx + this.width) % this.width, (y + dy + this.height) % this.height]);
+            }
+        }
+        return out;
     }
 
     randomNeighbor(x, y) {

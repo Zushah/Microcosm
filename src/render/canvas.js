@@ -12,6 +12,7 @@ export class CanvasRenderer {
         this.lastMouse = null;
 
         this.onCellClick = null;
+        this.onCellRightClick = null;
 
         this.setupMouse();
         this.resize();
@@ -80,9 +81,25 @@ export class CanvasRenderer {
             const tile = this.world.grid[x][y];
             const topCell = tile.cells.length > 0 ? tile.cells[tile.cells.length - 1] : null;
 
-            if (this.onCellClick) {
-                this.onCellClick(x, y, tile, topCell);
-            }
+            if (this.onCellClick) this.onCellClick(x, y, tile, topCell);
+        });
+
+        this.canvas.addEventListener("contextmenu", e => {
+            e.preventDefault();
+            const rect = this.canvas.getBoundingClientRect();
+            const cx = e.clientX - rect.left;
+            const cy = e.clientY - rect.top;
+
+            const gx = Math.floor((cx - this.offsetX) / this.scale);
+            const gy = Math.floor((cy - this.offsetY) / this.scale);
+
+            const x = ((gx % this.world.width) + this.world.width) % this.world.width;
+            const y = ((gy % this.world.height) + this.world.height) % this.world.height;
+
+            const tile = this.world.grid[x][y];
+            const topCell = tile.cells.length > 0 ? tile.cells[tile.cells.length - 1] : null;
+
+            if (this.onCellRightClick) this.onCellRightClick(x, y, tile, topCell);
         });
     }
 
@@ -135,6 +152,11 @@ export class CanvasRenderer {
                             ctx.fillStyle = this.withAlpha(color, 0.6);
                             ctx.fillRect(x + 0.15 * i, y + 0.15 * i, 0.7, 0.7);
                         }
+                        if (cell._highlight) {
+                            ctx.strokeStyle = "rgba(255, 220, 80, 0.65)";
+                            ctx.lineWidth = 0.08;
+                            ctx.strokeRect(x + 0.03, y + 0.03, 0.94, 0.94);
+                        }
                     }
                 }
             }
@@ -146,16 +168,17 @@ export class CanvasRenderer {
     drawTile(x, y, tile) {
         const ctx = this.ctx;
 
-        const noise = ((x * 73856093) ^ (y * 19349663)) % 100 / 1000;
-        const moleculeDensity = Math.min(1, tile.molecules.length / 6);
-        const t = tile.temperature;
+        const t = Math.max(0, Math.min(1, tile.temperature));
+        const s = Math.max(0, Math.min(1, tile.solute));
 
         const cool = Math.max(0, 0.5 - t);
         const warm = Math.max(0, t - 0.5);
 
-        const r = Math.floor(250 - 20 * moleculeDensity + 50 * warm + 5 * noise);
-        const g = Math.floor(250 - 60 * moleculeDensity + 30 * cool);
-        const b = Math.floor(250 - 40 * moleculeDensity + 40 * cool + 5 * noise);
+        const soluteDark = Math.min(0.4, s * 0.6);
+
+        const r = Math.floor(250 - 10 * soluteDark + 50 * warm);
+        const g = Math.floor(250 - 20 * soluteDark - 10 * warm + 20 * cool);
+        const b = Math.floor(250 - 15 * soluteDark + 40 * cool);
 
         ctx.fillStyle = `rgb(${r},${g},${b})`;
         ctx.fillRect(x, y, 1, 1);
