@@ -47,9 +47,12 @@ export class World {
     spawnRandomCell(genomeFactory) {
         const x = Math.floor(Math.random() * this.width);
         const y = Math.floor(Math.random() * this.height);
-        this.grid[x][y].cells.push(new Cell(genomeFactory()));
-        const cell = this.grid[x][y].cells[this.grid[x][y].cells.length - 1];
+        const cell = new Cell(genomeFactory());
+        this.grid[x][y].cells.push(cell);
+        cell.birthSimTime = window.SIM_TIME ?? 0;
         cell._worldRef = this;
+        cell._tileX = x;
+        cell._tileY = y;
     }
 
     step() {

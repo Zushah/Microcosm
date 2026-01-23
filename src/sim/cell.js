@@ -8,7 +8,8 @@ export class Cell {
         this.timeWithoutFood = 0;
         this.state = "active";
         this.lineageId = genome.lineageId || Math.floor(Math.random() * 1e9);
-        this.birthTime = Date.now();
+        this.birthSimTime = this.birthSimTime ?? (window.SIM_TIME || 0);
+        this.deathSimTime = null;
         this._highlight = false;
         this.reactionLog = [];
         this.reactionLogMax = 20;
@@ -66,17 +67,21 @@ export class Cell {
 
             const tAfter = tile.temperature;
             const deltaT = tAfter - tBefore;
+            const nowSim = window.SIM_TIME || 0;
+            const ageAtEventSec = Number((nowSim - (this.birthSimTime || 0)).toFixed(4));
 
             this._pushReactionLog({
-                time: Date.now(),
+                timeSim: nowSim,
+                ageAtEventSec,
                 substrates: (result.consumed || []).map(m => compositionToString(m.composition)),
                 product: result.produced ? compositionToString(result.produced.composition) : "—",
                 byproducts: (result.byproducts || []).map(bp => compositionToString(bp.composition)),
-                deltaE: Number((result.energyDelta || 0).toFixed(4)),
+                deltaE: Number((result.energyDelta || 0).toFixed(6)),
                 deltaT: Number(deltaT.toFixed(6)),
-                tBefore: Number(tBefore.toFixed(6)),
-                tAfter: Number(tAfter.toFixed(6)),
-                enzymeType: enzyme.type
+                enzymeType: enzyme.type,
+                substrateAtomEnergy: Number((result.substrateAtomEnergy || 0).toFixed(6)),
+                productAtomEnergy: Number((result.productAtomEnergy || 0).toFixed(6)),
+                rawDelta: Number((result.rawDelta || 0).toFixed(6))
             });
         }
 
@@ -104,7 +109,7 @@ export class Cell {
         this.timeWithoutFood += stressIncrement;
 
         if (this.timeWithoutFood > this.genome.decayTime) {
-            this.state = "dead";
+            this._dieAndRelease(tile);
             return;
         }
 
@@ -172,6 +177,7 @@ export class Cell {
         }
 
         const child = new Cell(childGenome);
+        child.birthSimTime = window.SIM_TIME || 0;
         child.energy = childEnergy;
         child.molecules = childMolecules;
         child.lineageId = this.lineageId;
@@ -190,7 +196,7 @@ export class Cell {
         if (!placed) tile.cells.push(child);
 
         if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) {
-            this.state = "dead";
+            this._dieAndRelease(tile);
         }
     }
 
@@ -210,6 +216,17 @@ export class Cell {
     getAgeMs() { return Date.now() - this.birthTime; }
     _worldWidth() { return this._worldRef ? this._worldRef.width : 200; }
     _worldHeight() { return this._worldRef ? this._worldRef.height : 200; }
+    _dieAndRelease(tile) {
+        if (tile && tile.__world) {
+            for (const m of this.molecules) {
+                tile.molecules.push(m);
+            }
+        }
+        this.molecules = [];
+        this.deathSimTime = window.SIM_TIME || 0;
+        this._dieAndReleaseCalled = true;
+        this.state = "dead";
+    }
 }
 
 import { ENZYME_CLASSES } from "./bio.js";
