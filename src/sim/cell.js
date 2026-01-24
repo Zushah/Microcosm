@@ -1,4 +1,5 @@
 import { attemptReaction } from "./bio.js";
+import { createMolecule } from "./chem.js";
 
 export class Cell {
     constructor(genome) {
@@ -12,7 +13,7 @@ export class Cell {
         this.deathSimTime = null;
         this._highlight = false;
         this.reactionLog = [];
-        this.reactionLogMax = 20;
+        this.reactionLogMax = 40;
     }
 
     step(env, tile) {
@@ -20,13 +21,10 @@ export class Cell {
 
         let gainedEnergy = 0;
 
-        for (const enzyme of this.genome.enzymes) {
-            const result = attemptReaction(
-                enzyme,
-                tile.molecules.concat(this.molecules),
-                env
-            );
+        const localPool = tile.molecules.concat(this.molecules);
 
+        for (const enzyme of this.genome.enzymes) {
+            const result = attemptReaction(enzyme, localPool, env, this, tile);
             if (!result) continue;
 
             const eDelta = result.energyDelta || 0;
@@ -36,21 +34,18 @@ export class Cell {
 
             this.consumeSubstrates(result.consumed, tile);
 
-            const keepPrimary = !this.shouldSecrete(result.produced, enzyme);
-            if (keepPrimary) {
+            const keepPrimary = result.produced && !this.shouldSecrete(result.produced, enzyme);
+            if (keepPrimary && result.produced) {
                 this.molecules.push(result.produced);
-            } else {
-                if (tile.__world) {
-                    tile.__world.addProductAround(tile.__x, tile.__y, result.produced);
-                } else {
-                    tile.molecules.push(result.produced);
-                }
+            } else if (result.produced) {
+                if (tile.__world) tile.__world.addProductAround(tile.__x, tile.__y, result.produced);
+                else tile.molecules.push(result.produced);
             }
 
             if (result.byproducts && result.byproducts.length > 0 && tile.__world) {
-                for (const bp of result.byproducts) {
-                    tile.__world.addProductAround(tile.__x, tile.__y, bp);
-                }
+                for (const bp of result.byproducts) tile.__world.addProductAround(tile.__x, tile.__y, bp);
+            } else if (result.byproducts && result.byproducts.length > 0) {
+                for (const bp of result.byproducts) tile.molecules.push(bp);
             }
 
             const heat = result.heatDelta || 0;
@@ -58,18 +53,15 @@ export class Cell {
                 tile.temperature = Math.max(0, tile.temperature + heat);
                 const neighbors = tile.__world.mooreNeighbors(tile.__x, tile.__y);
                 for (const [nx, ny] of neighbors) {
-                    tile.__world.grid[nx][ny].temperature = Math.max(
-                        0,
-                        tile.__world.grid[nx][ny].temperature + heat * 0.2
-                    );
+                    tile.__world.grid[nx][ny].temperature = Math.max(0, tile.__world.grid[nx][ny].temperature + heat * 0.18);
                 }
             }
 
             const tAfter = tile.temperature;
             const deltaT = tAfter - tBefore;
+
             const nowSim = window.SIM_TIME || 0;
             const ageAtEventSec = Number((nowSim - (this.birthSimTime || 0)).toFixed(4));
-
             this._pushReactionLog({
                 timeSim: nowSim,
                 ageAtEventSec,
@@ -104,7 +96,7 @@ export class Cell {
         for (const en of this.genome.enzymes) {
             const tOpt = en.tOpt ?? 0.5;
             const dist = Math.abs(T - tOpt);
-            stressIncrement += Math.pow(dist, 1.6) * (this.genome.tempStressFactor ?? 0.03);
+            stressIncrement += Math.pow(dist, 1.6) * (this.genome.tempStressFactor ?? 0.02);
         }
         this.timeWithoutFood += stressIncrement;
 
@@ -118,6 +110,15 @@ export class Cell {
         }
     }
 
+    _dieAndRelease(tile) {
+        if (tile && tile.__world) {
+            for (const m of this.molecules) tile.molecules.push(m);
+        }
+        this.molecules = [];
+        this.deathSimTime = window.SIM_TIME || 0;
+        this.state = "dead";
+    }
+
     _pushReactionLog(entry) {
         this.reactionLog.unshift(entry);
         if (this.reactionLog.length > this.reactionLogMax) this.reactionLog.length = this.reactionLogMax;
@@ -125,9 +126,7 @@ export class Cell {
 
     totalInternalAtoms() {
         let s = 0;
-        for (const m of this.molecules) {
-            s += m.size || 0;
-        }
+        for (const m of this.molecules) s += m.size || 0;
         return s;
     }
 
@@ -148,18 +147,13 @@ export class Cell {
     }
 
     consumeSubstrates(substrates, tile) {
-        substrates.forEach(m => {
+        if (!substrates) return;
+        for (const m of substrates) {
             let idx = tile.molecules.indexOf(m);
-            if (idx >= 0) {
-                tile.molecules.splice(idx, 1);
-                return;
-            }
+            if (idx >= 0) { tile.molecules.splice(idx, 1); continue; }
             idx = this.molecules.indexOf(m);
-            if (idx >= 0) {
-                this.molecules.splice(idx, 1);
-                return;
-            }
-        });
+            if (idx >= 0) { this.molecules.splice(idx, 1); continue; }
+        }
     }
 
     divide(tile) {
@@ -177,56 +171,43 @@ export class Cell {
         }
 
         const child = new Cell(childGenome);
-        child.birthSimTime = window.SIM_TIME || 0;
         child.energy = childEnergy;
         child.molecules = childMolecules;
         child.lineageId = this.lineageId;
+        child.birthSimTime = window.SIM_TIME || 0;
 
         const maxOffset = 3;
         let placed = false;
-        for (let attempts = 0; attempts < 8 && !placed; attempts++) {
+        for (let attempts = 0; attempts < 12 && !placed; attempts++) {
             const dx = Math.floor(Math.random() * (maxOffset * 2 + 1)) - maxOffset;
             const dy = Math.floor(Math.random() * (maxOffset * 2 + 1)) - maxOffset;
             const px = (tile.__x + dx + this._worldWidth()) % this._worldWidth();
             const py = (tile.__y + dy + this._worldHeight()) % this._worldHeight();
-
-            tile.__world.grid[px][py].cells.push(child);
+            this._worldRef.grid[px][py].cells.push(child);
             placed = true;
         }
         if (!placed) tile.cells.push(child);
 
-        if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) {
-            this._dieAndRelease(tile);
-        }
+        if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) this._dieAndRelease(tile);
     }
 
     getDominantElement() {
         const counts = {};
-        for (const m of this.molecules) {
-            for (const el in m.composition) counts[el] = (counts[el] || 0) + m.composition[el];
-        }
+        for (const m of this.molecules) for (const el in m.composition) counts[el] = (counts[el] || 0) + m.composition[el];
         let dominant = null;
         let best = 0;
-        for (const k in counts) {
-            if (counts[k] > best) { best = counts[k]; dominant = k; }
-        }
+        for (const k in counts) if (counts[k] > best) { best = counts[k]; dominant = k; }
         return dominant;
     }
 
-    getAgeMs() { return Date.now() - this.birthTime; }
+    getAgeSecSim() {
+        const b = this.birthSimTime || 0;
+        const d = this.deathSimTime != null ? this.deathSimTime : (window.SIM_TIME || 0);
+        return (d - b);
+    }
+
     _worldWidth() { return this._worldRef ? this._worldRef.width : 200; }
     _worldHeight() { return this._worldRef ? this._worldRef.height : 200; }
-    _dieAndRelease(tile) {
-        if (tile && tile.__world) {
-            for (const m of this.molecules) {
-                tile.molecules.push(m);
-            }
-        }
-        this.molecules = [];
-        this.deathSimTime = window.SIM_TIME || 0;
-        this._dieAndReleaseCalled = true;
-        this.state = "dead";
-    }
 }
 
 import { ENZYME_CLASSES } from "./bio.js";
@@ -241,16 +222,10 @@ function mutateGenome(genome) {
         if (Math.random() < mut) {
             const en = g.enzymes[i];
             if (!en.affinity) en.affinity = {};
-            if (Math.random() < 0.5) {
-                const keys = Object.keys(en.affinity);
-                if (keys.length > 0 && Math.random() < 0.7) {
-                    const k = keys[Math.floor(Math.random() * keys.length)];
-                    en.affinity[k] = Math.max(0, en.affinity[k] + (Math.random() - 0.5) * 0.4);
-                } else {
-                    const possible = ["A", "B", "C", "D", "E", "X"];
-                    const k = possible[Math.floor(Math.random() * possible.length)];
-                    en.affinity[k] = (en.affinity[k] || 0) + Math.random();
-                }
+            if (Math.random() < mut) {
+                const possible = ["A","B","C","D","E","X"];
+                const k = possible[Math.floor(Math.random() * possible.length)];
+                en.affinity[k] = (en.affinity[k] || 0) + Math.random();
             }
             if (Math.random() < mut * 0.2) {
                 const classes = Object.keys(ENZYME_CLASSES);
@@ -270,7 +245,7 @@ function mutateGenome(genome) {
         const type = classes[Math.floor(Math.random() * classes.length)];
         g.enzymes.push({
             type,
-            affinity: { B: Math.random(), C: Math.random() },
+            affinity: { A: Math.random(), B: Math.random(), C: Math.random(), D: Math.random() },
             tOpt: Math.random(),
             pHOpt: Math.random(),
             secretionProb: Math.random()

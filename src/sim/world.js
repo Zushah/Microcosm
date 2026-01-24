@@ -66,13 +66,11 @@ export class World {
                     pH: 0.5,
                     dt: this.dt
                 };
-
                 const cells = tile.cells.slice();
                 for (const cell of cells) {
                     cell._worldRef = this;
                     cell.step(env, tile);
                 }
-
                 tile.cells = tile.cells.filter(c => c.state !== "dead");
             }
         }
@@ -82,7 +80,6 @@ export class World {
 
     diffuseMolecules() {
         const transfers = [];
-
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
                 const tile = this.grid[x][y];
@@ -95,7 +92,6 @@ export class World {
                 });
             }
         }
-
         transfers.forEach(t => {
             const src = this.grid[t.x][t.y].molecules;
             const dst = this.grid[t.nx][t.ny].molecules;
@@ -119,7 +115,7 @@ export class World {
             }
         }
 
-        const alpha = 0.2;
+        const alpha = 0.18;
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
                 const neighbors = this.mooreNeighbors(x, y);
@@ -167,14 +163,9 @@ export class World {
     }
 
     randomNeighbor(x, y) {
-        const dirs = [
-            [1, 0], [-1, 0], [0, 1], [0, -1]
-        ];
+        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
         const [dx, dy] = dirs[Math.floor(Math.random() * dirs.length)];
-        return [
-            (x + dx + this.width) % this.width,
-            (y + dy + this.height) % this.height
-        ];
+        return [(x + dx + this.width) % this.width, (y + dy + this.height) % this.height];
     }
 }
 
