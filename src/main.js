@@ -86,6 +86,42 @@ function createPlayPauseButton() {
 }
 createPlayPauseButton();
 
+function createCopyReactionsButton() {
+    const btn = document.createElement("button");
+    btn.id = "copyReactionsBtn";
+    btn.textContent = "Copy reactions";
+    btn.style.position = "fixed";
+    btn.style.top = "50px";
+    btn.style.right = "10px";
+    btn.style.zIndex = 10000;
+    btn.style.padding = "6px 10px";
+    btn.style.background = "#fff";
+    btn.style.border = "1px solid rgba(0,0,0,0.12)";
+    btn.style.borderRadius = "6px";
+    btn.style.cursor = "pointer";
+    document.body.appendChild(btn);
+
+    btn.addEventListener("click", async () => {
+        if (!selectedCell || !selectedCell.reactionLog) return;
+        const slice = selectedCell.reactionLog.slice(0, 20);
+        const lines = slice.map(ev => {
+            const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
+            const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
+            const byp = ev.byproducts.length === 0 ? "" : " (+ " + ev.byproducts.join(", ") + ")";
+            return `[t=${time}s] ${left} → ${ev.product}${byp} | ΔE=${ev.deltaE} | ΔT=${ev.deltaT} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
+        }).join("\n");
+        try {
+            await navigator.clipboard.writeText(lines);
+            btn.textContent = "Copied ✓";
+            setTimeout(() => btn.textContent = "Copy reactions", 900);
+        } catch (e) {
+            console.warn("copy failed", e);
+            alert("Copy failed — select and press Ctrl+C as fallback.");
+        }
+    });
+}
+createCopyReactionsButton();
+
 for (let i = 0; i < 32; i++) world.spawnRandomCell(randomGenome);
 
 function computeElementTotals() {
@@ -107,6 +143,14 @@ function computeElementTotals() {
     return totals;
 }
 
+function enzymeSignature(e) {
+    const type = e.type || "any";
+    const affinityKeys = e.affinity ? Object.keys(e.affinity).sort().join(",") : "any";
+    const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
+    const tp = (typeof e.transmuteProb === "number") ? e.transmuteProb.toFixed(2) : "tpX";
+    return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}`;
+}
+
 function computeStats() {
     let pop = 0;
     let totalEnergy = 0;
@@ -121,8 +165,7 @@ function computeStats() {
                 totalEnergy += c.energy;
                 lineages.add(c.lineageId);
                 for (const e of c.genome.enzymes) {
-                    const keys = e.affinity ? Object.keys(e.affinity).sort() : ["any"];
-                    functionalSet.add(keys.join("|"));
+                    functionalSet.add(enzymeSignature(e));
                 }
             }
         }
@@ -130,6 +173,16 @@ function computeStats() {
 
     const avgEnergy = pop > 0 ? (totalEnergy / pop).toFixed(2) : "—";
     return { population: pop, avgEnergy, lineageCount: lineages.size, enzymeFunctionalDiversity: functionalSet.size };
+}
+
+function isSelectingInInfoPanel() {
+    const sel = window.getSelection();
+    if (!sel) return false;
+    if (sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    const info = document.getElementById("infoBody");
+    if (!info) return false;
+    return info.contains(range.commonAncestorContainer);
 }
 
 function updateHud() {
@@ -228,10 +281,13 @@ function updateInfoPanel() {
         reactionHtml += "</tbody></table>";
     }
 
+    const internalMolEnergy = selectedCell.molecules.reduce((s,m) => s + (m.energy || 0), 0);
+    const totalStoredEnergy = (selectedCell.energy || 0) + internalMolEnergy;
     const deathNote = (selectedCell.deathSimTime !== null && selectedCell.deathSimTime !== undefined) ? " (dead)" : "";
     document.getElementById("infoBody").innerHTML = `
         <div><strong>Age:</strong> ${ageSstr} s${deathNote}</div>
-        <div><strong>Energy:</strong> ${selectedCell.energy.toFixed(2)}</div>
+        <div><strong>Cell energy:</strong> ${selectedCell.energy.toFixed(3)} (metabolic)</div>
+        <div><strong>Total stored chemical energy:</strong> ${totalStoredEnergy.toFixed(3)} (cell + molecules)</div>
         <div><strong>State:</strong> ${selectedCell.state}</div>
         <div><strong>Dominant internal element:</strong> ${dom}</div>
         <div style="margin-top:8px"><strong>Enzymes (approx reaction):</strong> ${enzymesHtml}</div>
@@ -258,28 +314,55 @@ function clearAllHighlights() {
 }
 
 function spawnChanceBasedOnPopulation(pop) {
-    const carryingCapacity = world.width * world.height * 0.18;
-    const baseSpawn = 0.02;
-    const minSpawn = 0.0005;
+    const carryingCapacity = world.width * world.height * 0.30;
+    const baseSpawn = 0.005;
+    const minSpawn = 0.0002;
     const frac = Math.min(1, pop / Math.max(1, carryingCapacity));
     return Math.max(minSpawn, baseSpawn * (1 - frac));
 }
 
-setInterval(() => {
+let lastWallTimeMs = performance.now();
+let accumulatorMs = 0;
+function mainLoop() {
+    const nowMs = performance.now();
+    let frameElapsedMs = nowMs - lastWallTimeMs;
+    lastWallTimeMs = nowMs;
+
+    if (frameElapsedMs > 200) frameElapsedMs = 200;
+
     if (paused) {
         renderer.render();
         updateHud();
-        updateInfoPanel();
+        if (!isSelectingInInfoPanel()) updateInfoPanel();
+        accumulatorMs = 0;
+        requestAnimationFrame(mainLoop);
         return;
     }
-    simTime += world.dt / 1000;
-    window.SIM_TIME = simTime;
-    const stats = computeStats();
-    const spawnProb = spawnChanceBasedOnPopulation(stats.population);
-    if (Math.random() < spawnProb) world.spawnRandomCell(randomGenome);
-    resetReactionCounter();
-    world.step();
+
+    accumulatorMs += frameElapsedMs;
+
+    const stepMs = world.dt;
+    let steps = 0;
+    while (accumulatorMs >= stepMs && steps < 100) {
+        simTime += stepMs / 1000;
+        window.SIM_TIME = simTime;
+
+        const stats = computeStats();
+        const spawnProb = spawnChanceBasedOnPopulation(stats.population);
+        if (Math.random() < spawnProb) world.spawnRandomCell(randomGenome);
+
+        resetReactionCounter();
+        world.step();
+
+        accumulatorMs -= stepMs;
+        steps++;
+    }
+
     renderer.render();
     updateHud();
-    updateInfoPanel();
-}, world.dt);
+    if (!isSelectingInInfoPanel()) updateInfoPanel();
+
+    requestAnimationFrame(mainLoop);
+}
+lastWallTimeMs = performance.now();
+requestAnimationFrame(mainLoop);

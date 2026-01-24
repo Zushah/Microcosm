@@ -64,7 +64,7 @@ export class World {
                 const env = {
                     temperature: tile.temperature,
                     pH: 0.5,
-                    dt: this.dt
+                    dt: this.dt / 1000
                 };
                 const cells = tile.cells.slice();
                 for (const cell of cells) {
@@ -146,7 +146,9 @@ export class World {
         const k = 1 + Math.floor(Math.random() * 3);
         for (let i = 0; i < k; i++) {
             const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
-            this.grid[nx][ny].molecules.push(product);
+            const cloneComp = Object.assign({}, product.composition || {});
+            const clone = createMolecule(cloneComp, product.bondMultiplier || 1.0);
+            this.grid[nx][ny].molecules.push(clone);
             this.grid[nx][ny].solute = Math.min(1, this.grid[nx][ny].solute + 0.01);
         }
     }

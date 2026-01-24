@@ -43,9 +43,15 @@ export class Cell {
             }
 
             if (result.byproducts && result.byproducts.length > 0 && tile.__world) {
-                for (const bp of result.byproducts) tile.__world.addProductAround(tile.__x, tile.__y, bp);
+                for (const bp of result.byproducts) {
+                    const cloneBP = createMolecule(Object.assign({}, bp.composition || {}), bp.bondMultiplier || 1.0);
+                    tile.__world.addProductAround(tile.__x, tile.__y, cloneBP);
+                }
             } else if (result.byproducts && result.byproducts.length > 0) {
-                for (const bp of result.byproducts) tile.molecules.push(bp);
+                for (const bp of result.byproducts) {
+                    const cloneBP = createMolecule(Object.assign({}, bp.composition || {}), bp.bondMultiplier || 1.0);
+                    tile.molecules.push(cloneBP);
+                }
             }
 
             const heat = result.heatDelta || 0;
@@ -147,12 +153,80 @@ export class Cell {
     }
 
     consumeSubstrates(substrates, tile) {
-        if (!substrates) return;
-        for (const m of substrates) {
-            let idx = tile.molecules.indexOf(m);
-            if (idx >= 0) { tile.molecules.splice(idx, 1); continue; }
-            idx = this.molecules.indexOf(m);
-            if (idx >= 0) { this.molecules.splice(idx, 1); continue; }
+        if (!substrates || substrates.length === 0) return;
+
+        function sameComp(a, b) {
+            const ka = Object.keys(a || {}).filter(k => (a[k]||0) > 0).sort();
+            const kb = Object.keys(b || {}).filter(k => (b[k]||0) > 0).sort();
+            if (ka.length !== kb.length) return false;
+            for (let i = 0; i < ka.length; i++) {
+                if (ka[i] !== kb[i]) return false;
+                if ((a[ka[i]] || 0) !== (b[kb[i]] || 0)) return false;
+            }
+            return true;
+        }
+
+        for (const sub of substrates) {
+            if (!sub || !sub.composition) continue;
+            let removed = false;
+
+            for (let i = 0; i < tile.molecules.length && !removed; i++) {
+                const m = tile.molecules[i];
+                if (sameComp(m.composition, sub.composition)) {
+                    tile.molecules.splice(i, 1);
+                    removed = true;
+                }
+            }
+
+            for (let i = 0; i < this.molecules.length && !removed; i++) {
+                const m = this.molecules[i];
+                if (sameComp(m.composition, sub.composition)) {
+                    this.molecules.splice(i, 1);
+                    removed = true;
+                }
+            }
+
+            if (!removed) {
+                for (let i = 0; i < tile.molecules.length && !removed; i++) {
+                    const m = tile.molecules[i];
+                    if (!m || !m.composition) continue;
+                    let ok = true;
+                    for (const el in sub.composition) {
+                        if ((m.composition[el] || 0) < sub.composition[el]) { ok = false; break; }
+                    }
+                    if (!ok) continue;
+                    for (const el in sub.composition) {
+                        m.composition[el] -= sub.composition[el];
+                        if (m.composition[el] <= 0) delete m.composition[el];
+                    }
+                    if (Object.keys(m.composition).length === 0) {
+                        tile.molecules.splice(i, 1);
+                        i--;
+                    }
+                    removed = true;
+                }
+            }
+
+            if (!removed) {
+                for (let i = 0; i < this.molecules.length && !removed; i++) {
+                    const m = this.molecules[i];
+                    if (!m || !m.composition) continue;
+                    let ok = true;
+                    for (const el in sub.composition) {
+                        if ((m.composition[el] || 0) < sub.composition[el]) { ok = false; break; }
+                    }
+                    if (!ok) continue;
+                    for (const el in sub.composition) {
+                        m.composition[el] -= sub.composition[el];
+                        if (m.composition[el] <= 0) delete m.composition[el];
+                    }
+                    if (Object.keys(m.composition).length === 0) {
+                        this.molecules.splice(i, 1);
+                        i--;
+                    }
+                    removed = true;
+                }
+            }
         }
     }
 
