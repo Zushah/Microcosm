@@ -8,11 +8,43 @@ const world = new World(160, 120);
 let simTime = 0.0;
 window.SIM_TIME = simTime;
 
+function currentAverageTemperature() {
+    let sum = 0;
+    for (let x = 0; x < world.width; x++) {
+        for (let y = 0; y < world.height; y++) {
+            sum += world.grid[x][y].temperature;
+        }
+    }
+    const count = world.width * world.height;
+    if (count === 0) {
+        return world.baseTemperature ?? 0.5;
+    }
+    return sum / count;
+}
+
 function randomGenome() {
+    const avgT = currentAverageTemperature();
+    const opt = Math.max(0, Math.min(1, avgT + (Math.random() - 0.5) * 0.10));
+
     return {
+        optimalTemp: opt,
         enzymes: [
-            { type: "anabolase", affinity: { A: 1, B: 0.5 }, tOpt: Math.random(), pHOpt: Math.random(), bondMultiplier: 1.15, secretionProb: 0.12 },
-            { type: "catabolase", affinity: { A: 1, B: 0.5 }, tOpt: Math.random(), pHOpt: Math.random(), transmuteProb: 0.35, harvestFraction: 0.8 }
+            {
+                type: "anabolase",
+                affinity: { A: 1, B: 0.5, C: 0.3 },
+                tOpt: opt,
+                pHOpt: Math.random(),
+                bondMultiplier: 1.15,
+                secretionProb: 0.12
+            },
+            {
+                type: "catabolase",
+                affinity: { D: 1, E: 1 },
+                tOpt: opt,
+                pHOpt: Math.random(),
+                transmuteProb: 0.35,
+                harvestFraction: 0.8
+            }
         ],
         reproThreshold: 2 + Math.random() * 6,
         initialEnergy: 1.2 + Math.random() * 1.8,
@@ -21,6 +53,7 @@ function randomGenome() {
         mutationRate: 0.06,
         postDivideMortality: 0.0,
         desiredElementReserve: 2,
+        tempStressFactor: 0.02,
         lineageId: Math.floor(Math.random() * 1e9)
     };
 }
@@ -86,42 +119,6 @@ function createPlayPauseButton() {
 }
 createPlayPauseButton();
 
-function createCopyReactionsButton() {
-    const btn = document.createElement("button");
-    btn.id = "copyReactionsBtn";
-    btn.textContent = "Copy reactions";
-    btn.style.position = "fixed";
-    btn.style.top = "50px";
-    btn.style.right = "10px";
-    btn.style.zIndex = 10000;
-    btn.style.padding = "6px 10px";
-    btn.style.background = "#fff";
-    btn.style.border = "1px solid rgba(0,0,0,0.12)";
-    btn.style.borderRadius = "6px";
-    btn.style.cursor = "pointer";
-    document.body.appendChild(btn);
-
-    btn.addEventListener("click", async () => {
-        if (!selectedCell || !selectedCell.reactionLog) return;
-        const slice = selectedCell.reactionLog.slice(0, 20);
-        const lines = slice.map(ev => {
-            const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
-            const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
-            const byp = ev.byproducts.length === 0 ? "" : " (+ " + ev.byproducts.join(", ") + ")";
-            return `[t=${time}s] ${left} → ${ev.product}${byp} | ΔE=${ev.deltaE} | ΔT=${ev.deltaT} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
-        }).join("\n");
-        try {
-            await navigator.clipboard.writeText(lines);
-            btn.textContent = "Copied ✓";
-            setTimeout(() => btn.textContent = "Copy reactions", 900);
-        } catch (e) {
-            console.warn("copy failed", e);
-            alert("Copy failed — select and press Ctrl+C as fallback.");
-        }
-    });
-}
-createCopyReactionsButton();
-
 for (let i = 0; i < 32; i++) world.spawnRandomCell(randomGenome);
 
 function computeElementTotals() {
@@ -175,16 +172,6 @@ function computeStats() {
     return { population: pop, avgEnergy, lineageCount: lineages.size, enzymeFunctionalDiversity: functionalSet.size };
 }
 
-function isSelectingInInfoPanel() {
-    const sel = window.getSelection();
-    if (!sel) return false;
-    if (sel.rangeCount === 0) return false;
-    const range = sel.getRangeAt(0);
-    const info = document.getElementById("infoBody");
-    if (!info) return false;
-    return info.contains(range.commonAncestorContainer);
-}
-
 function updateHud() {
     const s = computeStats();
     const totals = computeElementTotals();
@@ -230,6 +217,26 @@ function enzymeEquationString(enzyme) {
     return `${left} → ${prod}`;
 }
 
+function formatReactionExpression(ev) {
+    const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
+    let right;
+    if (ev.product && ev.product !== "—") {
+        right = ev.product;
+        if (ev.byproducts.length > 0) {
+            right += " (+ " + ev.byproducts.join(", ") + ")";
+        }
+    } else {
+        if (ev.byproducts.length === 0) {
+            right = "—";
+        } else if (ev.byproducts.length === 1) {
+            right = ev.byproducts[0];
+        } else {
+            right = ev.byproducts.join(" + ");
+        }
+    }
+    return `${left} → ${right}`;
+}
+
 function updateInfoPanel() {
     const title = document.getElementById("infoTitle");
     const body = document.getElementById("infoBody");
@@ -244,6 +251,8 @@ function updateInfoPanel() {
     const deathSim = selectedCell.deathSimTime ?? null;
     const ageS = deathSim !== null ? (deathSim - birthSim) : ((window.SIM_TIME || 0) - birthSim);
     const ageSstr = Number(ageS).toFixed(2);
+    const internalMolEnergy = selectedCell.molecules.reduce((s,m) => s + (m.energy || 0), 0);
+    const totalStoredEnergy = (selectedCell.energy || 0) + internalMolEnergy;
 
     const dom = selectedCell.getDominantElement() || "none";
 
@@ -273,29 +282,66 @@ function updateInfoPanel() {
         const slice = selectedCell.reactionLog.slice(0, 12);
         for (const ev of slice) {
             const tAtEvt = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
-            const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
-            const byp = ev.byproducts.length === 0 ? "" : "  (+ " + ev.byproducts.join(", ") + ")";
-            const reactionStr = `${left} → ${ev.product}${byp}`;
+            const reactionStr = formatReactionExpression(ev);
             reactionHtml += `<tr><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${tAtEvt}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'><code>${reactionStr}</code></td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaE}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaT}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.substrateAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.productAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.rawDelta ?? "—"}</td></tr>`;
         }
         reactionHtml += "</tbody></table>";
     }
 
-    const internalMolEnergy = selectedCell.molecules.reduce((s,m) => s + (m.energy || 0), 0);
-    const totalStoredEnergy = (selectedCell.energy || 0) + internalMolEnergy;
     const deathNote = (selectedCell.deathSimTime !== null && selectedCell.deathSimTime !== undefined) ? " (dead)" : "";
     document.getElementById("infoBody").innerHTML = `
-        <div><strong>Age:</strong> ${ageSstr} s${deathNote}</div>
-        <div><strong>Cell energy:</strong> ${selectedCell.energy.toFixed(3)} (metabolic)</div>
-        <div><strong>Total stored chemical energy:</strong> ${totalStoredEnergy.toFixed(3)} (cell + molecules)</div>
-        <div><strong>State:</strong> ${selectedCell.state}</div>
-        <div><strong>Dominant internal element:</strong> ${dom}</div>
-        <div style="margin-top:8px"><strong>Enzymes (approx reaction):</strong> ${enzymesHtml}</div>
-        <div style="margin-top:4px"><strong>Internal molecules:</strong> ${moleculesHtml}</div>
-        <div style="margin-top:8px"><strong>Recent reactions (newest first):</strong> ${reactionHtml}</div>
-        <div class="smallNote" style="margin-top:6px">ΔE = usable energy gained by the cell. ΔT ≈ immediate local tile temperature change. Es/Ep = substrate/product atom energies. rawΔ = Es−Ep−enzymeCost.</div>
+        <div><strong>Age:</strong> ${ageSstr}s${deathNote}</div>
+        <div><strong>Energy:</strong> ${selectedCell.energy.toFixed(3)} (total stored: ${totalStoredEnergy.toFixed(3)})</div>
+        <div><strong>Dominant element:</strong> ${dom}</div>
+        <div style="margin-top:6px;"><strong>Internal molecules</strong>${moleculesHtml}</div>
+        <div style="margin-top:6px;"><strong>Enzymes</strong>${enzymesHtml}</div>
+        <div style="margin-top:6px;"><strong>Recent reactions</strong>${reactionHtml}</div>
     `;
 }
+
+function isSelectingInInfoPanel() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    const panel = document.getElementById("infoPanel");
+    if (!panel) return false;
+    return panel.contains(range.commonAncestorContainer);
+}
+
+function createCopyReactionsButton() {
+    const btn = document.createElement("button");
+    btn.id = "copyReactionsBtn";
+    btn.textContent = "Copy reactions";
+    btn.style.position = "fixed";
+    btn.style.bottom = "10px";
+    btn.style.right = "10px";
+    btn.style.zIndex = 10000;
+    btn.style.padding = "6px 10px";
+    btn.style.background = "#fff";
+    btn.style.border = "1px solid rgba(0,0,0,0.12)";
+    btn.style.borderRadius = "6px";
+    btn.style.cursor = "pointer";
+    document.body.appendChild(btn);
+
+    btn.addEventListener("click", async () => {
+        if (!selectedCell || !selectedCell.reactionLog) return;
+        const slice = selectedCell.reactionLog.slice(0, 20);
+        const lines = slice.map(ev => {
+            const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
+            const reactionStr = formatReactionExpression(ev);
+            return `[t=${time}s] ${reactionStr} | ΔE=${ev.deltaE} | ΔT=${ev.deltaT} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
+        }).join("\n");
+        try {
+            await navigator.clipboard.writeText(lines);
+            btn.textContent = "Copied ✓";
+            setTimeout(() => btn.textContent = "Copy reactions", 900);
+        } catch (e) {
+            console.warn("copy failed", e);
+            alert("Copy failed — select and press Ctrl+C as fallback.");
+        }
+    });
+}
+createCopyReactionsButton();
 
 function markDescendants(lineageId) {
     for (let x = 0; x < world.width; x++) {

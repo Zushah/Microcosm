@@ -1,9 +1,9 @@
 import { createMolecule, ELEMENTS } from "./chem.js";
 
 export const ENZYME_CLASSES = {
-    anabolase: { maxInputs: 3, baseRate: 0.85, energyCost: 0.005 },
-    catabolase: { maxInputs: 1, baseRate: 0.95, energyCost: 0.008 },
-    transportase: { maxInputs: 0, baseRate: 0.9, energyCost: 0.02 }
+    anabolase:  { maxInputs: 3, baseRate: 0.85, energyCost: 0.005 },
+    catabolase:{ maxInputs: 1, baseRate: 0.98, energyCost: 0.006 },
+    transportase: { maxInputs: 0, baseRate: 0.90, energyCost: 0.010 }
 };
 
 export let reactionsThisTick = 0;
@@ -47,25 +47,38 @@ export function attemptReaction(enzyme, localMolecules, env, cell = null, tile =
     if (result) {
         const subTotal = {};
         (result.consumed || []).forEach(m => {
-            for (const el in m.composition) subTotal[el] = (subTotal[el] || 0) + m.composition[el];
+            for (const el in m.composition) {
+                subTotal[el] = (subTotal[el] || 0) + m.composition[el];
+            }
         });
         const prodTotal = {};
         if (result.produced && result.produced.composition) {
-            for (const el in result.produced.composition) prodTotal[el] = (prodTotal[el] || 0) + result.produced.composition[el];
+            for (const el in result.produced.composition) {
+                prodTotal[el] = (prodTotal[el] || 0) + result.produced.composition[el];
+            }
         }
         (result.byproducts || []).forEach(bp => {
-            for (const el in bp.composition) prodTotal[el] = (prodTotal[el] || 0) + bp.composition[el];
+            for (const el in bp.composition) {
+                prodTotal[el] = (prodTotal[el] || 0) + bp.composition[el];
+            }
         });
+
         let sameComposition = true;
         const keys = new Set([...Object.keys(subTotal), ...Object.keys(prodTotal)]);
         for (const k of keys) {
-            if ((subTotal[k] || 0) !== (prodTotal[k] || 0)) { sameComposition = false; break; }
+            if ((subTotal[k] || 0) !== (prodTotal[k] || 0)) {
+                sameComposition = false;
+                break;
+            }
         }
+
         const raw = (typeof result.rawDelta === "number") ? result.rawDelta : NaN;
         const ENERGY_NOISE = 1e-2;
+
         if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE) {
             return null;
         }
+
         if (enzyme.type === "catabolase") {
             const usable = result.energyDelta || 0;
             if (usable <= 0) return null;
@@ -78,6 +91,7 @@ export function attemptReaction(enzyme, localMolecules, env, cell = null, tile =
 
 function doAnabolase(enzyme, substrates, cls, cell, tile, env) {
     if (!substrates || substrates.length === 0) return null;
+    if (substrates.length < 2) return null;
 
     let elementalSum = 0;
     const compTotal = {};
@@ -88,7 +102,7 @@ function doAnabolase(enzyme, substrates, cls, cell, tile, env) {
         }
     }
 
-    const bondMultiplier = enzyme.bondMultiplier ?? 1.10;
+    const bondMultiplier = enzyme.bondMultiplier ?? 1.05;
     const productEnergy = elementalSum * bondMultiplier;
     const delta = productEnergy - elementalSum;
     const totalCost = delta + (cls.energyCost || 0);
@@ -122,7 +136,7 @@ function doCatabolase(enzyme, substrates, cls, cell, tile, env) {
 
     const rawBondEnergy = productEnergy - productElementSum;
 
-    const transmuteProb = enzyme.transmuteProb ?? 0.60;
+    const transmuteProb = enzyme.transmuteProb ?? 0.75;
     let transmutedEnergyGain = 0;
     const newComp = Object.assign({}, mol.composition);
     if (Math.random() < transmuteProb) {
@@ -142,7 +156,7 @@ function doCatabolase(enzyme, substrates, cls, cell, tile, env) {
 
     const rawDelta = rawBondEnergy + transmutedEnergyGain - (cls.energyCost || 0);
 
-    const harvestFraction = enzyme.harvestFraction ?? 0.75;
+    const harvestFraction = enzyme.harvestFraction ?? 0.85;
     const usableEnergy = Math.max(0, rawDelta * harvestFraction);
     const heatDelta = rawDelta - usableEnergy;
 
@@ -262,7 +276,18 @@ function genericTransform(enzyme, substrates, cls) {
 }
 
 function enzymeAccepts(enzyme, molecule) {
-    if (!enzyme || !enzyme.affinity) return true;
+    if (!enzyme) return true;
+
+    if (enzyme.type === "catabolase") {
+        const bm = molecule.bondMultiplier || 1.0;
+        const size = molecule.size || 0;
+        if (bm > 1.0 + 1e-6 && size > 1) {
+            return true;
+        }
+    }
+
+    if (!enzyme.affinity) return true;
+
     for (const el in enzyme.affinity) {
         if (molecule.composition && molecule.composition[el]) return true;
     }

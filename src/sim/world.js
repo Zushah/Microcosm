@@ -9,6 +9,7 @@ export class World {
 
         this.baseTemperature = 0.45 + Math.random() * 0.1;
         this.baseSolute = 0.2 + Math.random() * 0.2;
+        this.temperatureRelaxation = 0.0015;
 
         this.grid = [];
         for (let x = 0; x < width; x++) {
@@ -45,10 +46,25 @@ export class World {
     }
 
     spawnRandomCell(genomeFactory) {
-        const x = Math.floor(Math.random() * this.width);
-        const y = Math.floor(Math.random() * this.height);
+        const maxAttempts = 50;
+        let x = -1;
+        let y = -1;
+
+        for (let attempts = 0; attempts < maxAttempts; attempts++) {
+            const rx = Math.floor(Math.random() * this.width);
+            const ry = Math.floor(Math.random() * this.height);
+            if (this.grid[rx][ry].cells.length === 0) {
+                x = rx;
+                y = ry;
+                break;
+            }
+        }
+
+        if (x < 0 || y < 0) return;
+
         const cell = new Cell(genomeFactory());
-        this.grid[x][y].cells.push(cell);
+        const tile = this.grid[x][y];
+        tile.cells.push(cell);
         cell.birthSimTime = window.SIM_TIME ?? 0;
         cell._worldRef = this;
         cell._tileX = x;
@@ -116,6 +132,9 @@ export class World {
         }
 
         const alpha = 0.18;
+        const relaxRatePerSecond = 0.02;
+        const relax = relaxRatePerSecond * (this.dt / 1000);
+
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
                 const neighbors = this.mooreNeighbors(x, y);
@@ -128,7 +147,10 @@ export class World {
                 const count = neighbors.length + 1;
                 const tAvg = tSum / count;
                 const sAvg = sSum / count;
-                tNext[x][y] = this.grid[x][y].temperature * (1 - alpha) + tAvg * alpha;
+
+                const tDiffused = this.grid[x][y].temperature * (1 - alpha) + tAvg * alpha;
+                tNext[x][y] = tDiffused + (this.baseTemperature - tDiffused) * relax;
+
                 sNext[x][y] = this.grid[x][y].solute * (1 - alpha) + sAvg * alpha;
             }
         }
@@ -143,14 +165,11 @@ export class World {
 
     addProductAround(centerX, centerY, product) {
         const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
-        const k = 1 + Math.floor(Math.random() * 3);
-        for (let i = 0; i < k; i++) {
-            const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
-            const cloneComp = Object.assign({}, product.composition || {});
-            const clone = createMolecule(cloneComp, product.bondMultiplier || 1.0);
-            this.grid[nx][ny].molecules.push(clone);
-            this.grid[nx][ny].solute = Math.min(1, this.grid[nx][ny].solute + 0.01);
-        }
+        const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
+        const cloneComp = Object.assign({}, product.composition || {});
+        const clone = createMolecule(cloneComp, product.bondMultiplier || 1.0);
+        this.grid[nx][ny].molecules.push(clone);
+        this.grid[nx][ny].solute = Math.min(1, this.grid[nx][ny].solute + 0.01);
     }
 
     mooreNeighbors(x, y) {
