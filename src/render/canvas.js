@@ -13,6 +13,7 @@ export class CanvasRenderer {
 
         this.onCellClick = null;
         this.onCellRightClick = null;
+        this.lineageColorCache = new Map();
 
         this.setupMouse();
         this.resize();
@@ -20,7 +21,7 @@ export class CanvasRenderer {
     }
 
     resize() {
-        const dpr = window.devicePixelRatio || 1;
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
         this.canvas.width = Math.floor(window.innerWidth * dpr);
         this.canvas.height = Math.floor(window.innerHeight * dpr);
         this.canvas.style.width = `${window.innerWidth}px`;
@@ -153,9 +154,12 @@ export class CanvasRenderer {
                             ctx.fillRect(x + 0.15 * i, y + 0.15 * i, 0.7, 0.7);
                         }
                         if (cell._highlight) {
-                            ctx.strokeStyle = "rgba(255, 220, 80, 0.65)";
-                            ctx.lineWidth = 0.08;
-                            ctx.strokeRect(x + 0.03, y + 0.03, 0.94, 0.94);
+                            ctx.strokeStyle = "rgba(255, 240, 140, 0.95)";
+                            ctx.lineWidth = 0.16;
+                            ctx.strokeRect(x + 0.02, y + 0.02, 0.96, 0.96);
+                            ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+                            ctx.lineWidth = 0.06;
+                            ctx.strokeRect(x + 0.08, y + 0.08, 0.84, 0.84);
                         }
                     }
                 }
@@ -184,30 +188,27 @@ export class CanvasRenderer {
         ctx.fillRect(x, y, 1, 1);
     }
 
+    lineageColor(lineageId) {
+        if (this.lineageColorCache.has(lineageId)) {
+            return this.lineageColorCache.get(lineageId);
+        }
+        
+        let x = (lineageId | 0) ^ 0x9e3779b9;
+        x = Math.imul(x ^ (x >>> 16), 0x85ebca6b);
+        x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+        x = (x ^ (x >>> 16)) >>> 0;
+
+        const hue = x % 360;
+        const sat = 70;
+        const light = 55;
+
+        const col = `hsl(${hue}, ${sat}%, ${light}%)`;
+        this.lineageColorCache.set(lineageId, col);
+        return col;
+    }
+
     colorForCell(cell) {
-        const counts = {};
-        for (const m of cell.molecules) {
-            for (const el in m.composition) {
-                counts[el] = (counts[el] || 0) + m.composition[el];
-            }
-        }
-        let dominant = null;
-        let best = 0;
-        for (const k in counts) {
-            if (counts[k] > best) {
-                best = counts[k];
-                dominant = k;
-            }
-        }
-
-        if (!dominant) {
-            const e = Math.max(0, Math.min(1, cell.energy / 10));
-            const v = Math.floor(180 + 60 * Math.min(1, e));
-            return `rgb(${v},${v},${v})`;
-        }
-
-        const col = this.elementColor(dominant);
-        return `rgb(${col[0]},${col[1]},${col[2]})`;
+        return this.lineageColor(cell.lineageId || 0);
     }
 
     withAlpha(rgbString, alpha) {

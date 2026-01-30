@@ -61,7 +61,21 @@ function randomGenome() {
 const canvas = document.getElementById("canvas");
 const renderer = new CanvasRenderer(canvas, world);
 
+let fpsFrames = 0;
+let fpsLastSampleMs = performance.now();
+let fpsValue = 0;
+let tpsTicks = 0;
+let tpsLastSampleSim = simTime;
+let tpsValue = 0;
+
+let lastHudUpdateMs = performance.now();
+const HUD_UPDATE_INTERVAL_MS = 200;
+let lastInfoUpdateMs = performance.now();
+const INFO_UPDATE_INTERVAL_MS = 100;
+
 const hud = {
+    fps: document.getElementById("statFPS"),
+    tps: document.getElementById("statTPS"),
     population: document.getElementById("statPopulation"),
     avgEnergy: document.getElementById("statAvgEnergy"),
     lineages: document.getElementById("statLineages"),
@@ -84,6 +98,7 @@ renderer.onCellClick = (x, y, tile, topCell) => {
     selectedCell = topCell;
     selectedTile = tile;
     updateInfoPanel();
+    lastInfoUpdateMs = performance.now();
 };
 
 renderer.onCellRightClick = (x, y, tile, topCell) => {
@@ -176,6 +191,8 @@ function updateHud() {
     const s = computeStats();
     const totals = computeElementTotals();
 
+    if (hud.fps) hud.fps.textContent = `FPS: ${fpsValue.toFixed(0)}`;
+    if (hud.tps) hud.tps.textContent = `TPS: ${tpsValue.toFixed(0)}`;
     hud.population.textContent = `Population: ${s.population}`;
     hud.avgEnergy.textContent = `Avg energy: ${s.avgEnergy}`;
     hud.lineages.textContent = `Lineages: ${s.lineageCount}`;
@@ -378,8 +395,14 @@ function mainLoop() {
 
     if (paused) {
         renderer.render();
-        updateHud();
-        if (!isSelectingInInfoPanel()) updateInfoPanel();
+        if (nowMs - lastHudUpdateMs >= HUD_UPDATE_INTERVAL_MS) {
+            updateHud();
+            lastHudUpdateMs = nowMs;
+        }
+        if (!isSelectingInInfoPanel() && (nowMs - lastInfoUpdateMs >= INFO_UPDATE_INTERVAL_MS)) {
+            updateInfoPanel();
+            lastInfoUpdateMs = nowMs;
+        }
         accumulatorMs = 0;
         requestAnimationFrame(mainLoop);
         return;
@@ -388,8 +411,11 @@ function mainLoop() {
     accumulatorMs += frameElapsedMs;
 
     const stepMs = world.dt;
+    const MAX_ACCUMULATED_MS = stepMs * 4;
+    if (accumulatorMs > MAX_ACCUMULATED_MS) accumulatorMs = MAX_ACCUMULATED_MS;
+    const MAX_STEPS_PER_FRAME = 6;
     let steps = 0;
-    while (accumulatorMs >= stepMs && steps < 100) {
+    while (accumulatorMs >= stepMs && steps < MAX_STEPS_PER_FRAME) {
         simTime += stepMs / 1000;
         window.SIM_TIME = simTime;
 
@@ -399,14 +425,38 @@ function mainLoop() {
 
         resetReactionCounter();
         world.step();
+        tpsTicks++;
 
         accumulatorMs -= stepMs;
         steps++;
     }
 
+    const simElapsed = simTime - tpsLastSampleSim;
+    if (simElapsed >= 0.5) {
+        tpsValue = tpsTicks / simElapsed;
+        tpsTicks = 0;
+        tpsLastSampleSim = simTime;
+    }
+
+    if (accumulatorMs >= stepMs) accumulatorMs = 0;
     renderer.render();
-    updateHud();
-    if (!isSelectingInInfoPanel()) updateInfoPanel();
+    if (nowMs - lastHudUpdateMs >= HUD_UPDATE_INTERVAL_MS) {
+        updateHud();
+        lastHudUpdateMs = nowMs;
+    }
+    if (!isSelectingInInfoPanel() && (nowMs - lastInfoUpdateMs >= INFO_UPDATE_INTERVAL_MS)) {
+        updateInfoPanel();
+        lastInfoUpdateMs = nowMs;
+    }
+
+    fpsFrames++;
+    const now = performance.now();
+    const fpsElapsed = now - fpsLastSampleMs;
+    if (fpsElapsed >= 500) {
+        fpsValue = (fpsFrames * 1000) / fpsElapsed;
+        fpsFrames = 0;
+        fpsLastSampleMs = now;
+    }
 
     requestAnimationFrame(mainLoop);
 }
