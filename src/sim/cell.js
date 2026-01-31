@@ -157,6 +157,9 @@ export class Cell {
         this.molecules = [];
         this.deathSimTime = window.SIM_TIME || 0;
         this.state = "dead";
+        if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") {
+            window.__recordLineageDeath(this.lineageId);
+        }
     }
 
     _pushReactionLog(entry) {
@@ -190,8 +193,8 @@ export class Cell {
         if (!substrates || substrates.length === 0) return;
 
         function sameComp(a, b) {
-            const ka = Object.keys(a || {}).filter(k => (a[k]||0) > 0).sort();
-            const kb = Object.keys(b || {}).filter(k => (b[k]||0) > 0).sort();
+            const ka = Object.keys(a || {}).filter(k => (a[k] || 0) > 0).sort();
+            const kb = Object.keys(b || {}).filter(k => (b[k] || 0) > 0).sort();
             if (ka.length !== kb.length) return false;
             for (let i = 0; i < ka.length; i++) {
                 if (ka[i] !== kb[i]) return false;
@@ -219,6 +222,7 @@ export class Cell {
                     removed = true;
                 }
             }
+
             if (!removed) {
                 for (let i = 0; i < tile.molecules.length && !removed; i++) {
                     const m = tile.molecules[i];
@@ -285,6 +289,8 @@ export class Cell {
 
         const world = this._worldRef;
 
+        let placed = false;
+
         if (world && tile && typeof tile.__x === "number" && typeof tile.__y === "number") {
             const radius = 2;
             const candidates = [];
@@ -311,14 +317,20 @@ export class Cell {
             child._worldRef = world;
             child._tileX = px;
             child._tileY = py;
+            placed = true;
         } else {
             if (tile && tile.cells && tile.cells.length === 0) {
                 tile.cells.push(child);
+                placed = true;
             } else if (tile && tile.cells) {
                 this.energy += childEnergy;
                 for (const m of childMolecules) this.molecules.push(m);
                 return;
             }
+        }
+
+        if (placed && typeof window !== "undefined" && typeof window.__recordLineageBirth === "function") {
+            window.__recordLineageBirth(child.lineageId);
         }
 
         if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) this._dieAndRelease(tile);
