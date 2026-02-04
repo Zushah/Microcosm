@@ -72,9 +72,9 @@ export class Cell {
             this._pushReactionLog({
                 timeSim: nowSim,
                 ageAtEventSec,
-                substrates: (result.consumed || []).map(m => compositionToString(m.composition)),
+                substrates: (result.consumed || []).map((m) => compositionToString(m.composition)),
                 product: result.produced ? compositionToString(result.produced.composition) : "—",
-                byproducts: (result.byproducts || []).map(bp => compositionToString(bp.composition)),
+                byproducts: (result.byproducts || []).map((bp) => compositionToString(bp.composition)),
                 deltaE: Number((result.energyDelta || 0).toFixed(6)),
                 deltaT: Number(deltaT.toFixed(6)),
                 enzymeType: enzyme.type,
@@ -184,24 +184,22 @@ export class Cell {
     }
 
     countInternalElement(el) {
-        let s = 0;
-        for (const m of this.molecules) s += m.composition[el] || 0;
-        return s;
+        return Chalkboard.stat.sum(this.molecules.map((m) => (m.composition[el] || 0)));
     }
 
     consumeSubstrates(substrates, tile) {
         if (!substrates || substrates.length === 0) return;
 
-        function sameComp(a, b) {
-            const ka = Object.keys(a || {}).filter(k => (a[k] || 0) > 0).sort();
-            const kb = Object.keys(b || {}).filter(k => (b[k] || 0) > 0).sort();
+        const sameComp = (a, b) => {
+            const ka = Object.keys(a || {}).filter((k) => (a[k] || 0) > 0).sort();
+            const kb = Object.keys(b || {}).filter((k) => (b[k] || 0) > 0).sort();
             if (ka.length !== kb.length) return false;
             for (let i = 0; i < ka.length; i++) {
                 if (ka[i] !== kb[i]) return false;
                 if ((a[ka[i]] || 0) !== (b[kb[i]] || 0)) return false;
             }
             return true;
-        }
+        };
 
         for (const sub of substrates) {
             if (!sub || !sub.composition) continue;
@@ -355,7 +353,7 @@ export class Cell {
     _worldHeight() { return this._worldRef ? this._worldRef.height : 200; }
 }
 
-function mutateGenome(genome) {
+const mutateGenome = (genome) => {
     const g = JSON.parse(JSON.stringify(genome));
     const mut = g.mutationRate ?? 0.05;
 
@@ -430,21 +428,21 @@ function mutateGenome(genome) {
     g.decayTime = Math.max(50, g.decayTime);
 
     return g;
-}
+};
 
-function clamp01(v) {
+const clamp01 = (v) => {
     return Math.max(0, Math.min(1, v));
-}
+};
 
-function biasedPerturb01(value, maxDelta) {
+const biasedPerturb01 = (value, maxDelta) => {
     const r = Math.random();
     if (r < 0.5) return clamp01(value);
     const delta = maxDelta * Math.random();
     let v = value + (r < 0.75 ? -delta : delta);
     return clamp01(v);
-}
+};
 
-function compositionToString(comp) {
+const compositionToString = (comp) => {
     if (!comp) return "—";
     return Object.entries(comp).map(([k, v]) => `${k}${v}`).join("");
-}
+};

@@ -7,7 +7,7 @@ export const ELEMENTS = {
     X: { mass: 1.0, polarity: 0.6, energy: -0.2 }
 };
 
-export function createMolecule(composition, bondMultiplier = 1.0) {
+export const createMolecule = (composition, bondMultiplier = 1.0) => {
     const comp = Object.assign({}, composition);
     let size = 0;
     let polarity = 0;
@@ -28,8 +28,6 @@ export function createMolecule(composition, bondMultiplier = 1.0) {
         bondMultiplier,
         energy
     };
-}
+};
 
-export function computeStability(size, polarity) {
-    return Math.max(0, 1.0 - 0.08 * size - Math.abs(polarity - 0.5));
-}
+export const computeStability = (size, polarity) => Math.max(0, 1.0 - 0.08 * size - Math.abs(polarity - 0.5));

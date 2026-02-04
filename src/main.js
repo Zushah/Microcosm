@@ -15,25 +15,23 @@ let lineageRateLastSampleSim = 0;
 const lineageRateCached = new Map();
 const LINEAGE_RATE_WINDOW_SEC = 2.0;
 
-function ensureLineageEvents(lineageId) {
-    if (!lineageEvents.has(lineageId)) {
-        lineageEvents.set(lineageId, { births: 0, deaths: 0 });
-    }
+const ensureLineageEvents = (lineageId) => {
+    if (!lineageEvents.has(lineageId)) lineageEvents.set(lineageId, { births: 0, deaths: 0 });
     return lineageEvents.get(lineageId);
-}
+};
 
-function recordLineageBirth(lineageId) {
+const recordLineageBirth = (lineageId) => {
     ensureLineageEvents(lineageId).births++;
-}
+};
 
-function recordLineageDeath(lineageId) {
+const recordLineageDeath = (lineageId) => {
     ensureLineageEvents(lineageId).deaths++;
-}
+};
 
 window.__recordLineageBirth = recordLineageBirth;
 window.__recordLineageDeath = recordLineageDeath;
 
-function refreshLineageRateSnapshots() {
+const refreshLineageRateSnapshots = () => {
     const elapsed = simTime - lineageRateLastSampleSim;
     if (elapsed < LINEAGE_RATE_WINDOW_SEC) return;
     for (const [id, current] of lineageEvents.entries()) {
@@ -51,9 +49,9 @@ function refreshLineageRateSnapshots() {
     for (const [id, counters] of lineageEvents.entries()) {
         lineageRateLastSnapshot.set(id, { ...counters });
     }
-}
+};
 
-function computeLineageRates(lineageId) {
+const computeLineageRates = (lineageId) => {
     const totals = lineageEvents.get(lineageId) || { births: 0, deaths: 0 };
     const cached = lineageRateCached.get(lineageId) || { birthsPerSec: 0, deathsPerSec: 0, netGrowthPerSec: 0 };
     return {
@@ -62,9 +60,9 @@ function computeLineageRates(lineageId) {
         netGrowthPerSec: cached.netGrowthPerSec,
         totals
     };
-}
+};
 
-function currentAverageTemperature() {
+const currentAverageTemperature = () => {
     let sum = 0;
     for (let x = 0; x < world.width; x++) {
         for (let y = 0; y < world.height; y++) {
@@ -74,9 +72,9 @@ function currentAverageTemperature() {
     const count = world.width * world.height;
     if (count === 0) return world.baseTemperature ?? 0.5;
     return sum / count;
-}
+};
 
-function randomGenome() {
+const randomGenome = () => {
     const avgT = currentAverageTemperature();
     const opt = Math.max(0, Math.min(1, avgT + (Math.random() - 0.5) * 0.10));
 
@@ -110,7 +108,7 @@ function randomGenome() {
         tempStressFactor: 0.02,
         lineageId: Math.floor(Math.random() * 1e9)
     };
-}
+};
 
 const canvas = document.getElementById("canvas");
 const renderer = new CanvasRenderer(canvas, world);
@@ -168,7 +166,7 @@ renderer.onCellRightClick = (x, y, tile, topCell) => {
 };
 
 let paused = false;
-function createPlayPauseButton() {
+const createPlayPauseButton = () => {
     const btn = document.createElement("button");
     btn.id = "playPauseBtn";
     btn.textContent = "Pause";
@@ -187,12 +185,12 @@ function createPlayPauseButton() {
         paused = !paused;
         btn.textContent = paused ? "Play" : "Pause";
     });
-}
+};
 createPlayPauseButton();
 
 for (let i = 0; i < 32; i++) world.spawnRandomCell(randomGenome);
 
-function computeElementTotals() {
+const computeElementTotals = () => {
     const totals = {};
     for (const k in ELEMENTS) totals[k] = 0;
     for (let x = 0; x < world.width; x++) {
@@ -209,39 +207,41 @@ function computeElementTotals() {
         }
     }
     return totals;
-}
+};
 
-function enzymeSignature(e) {
+const enzymeSignature = (e) => {
     const type = e.type || "any";
     const affinityKeys = e.affinity ? Object.keys(e.affinity).sort().join(",") : "any";
     const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
     const tp = (typeof e.transmuteProb === "number") ? e.transmuteProb.toFixed(2) : "tpX";
     return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}`;
-}
+};
 
-function computeStats() {
-    let pop = 0;
-    let totalEnergy = 0;
-    const lineages = new Set();
-    const functionalSet = new Set();
+const computeStats = () => {
+    const energies = [];
+    const lineageIds = [];
+    const enzymeSigs = [];
 
     for (let x = 0; x < world.width; x++) {
         for (let y = 0; y < world.height; y++) {
             const tile = world.grid[x][y];
             for (const c of tile.cells) {
-                pop++;
-                totalEnergy += c.energy;
-                lineages.add(c.lineageId);
-                for (const e of c.genome.enzymes) functionalSet.add(enzymeSignature(e));
+                energies.push(c.energy);
+                lineageIds.push(c.lineageId);
+                for (const e of c.genome.enzymes) enzymeSigs.push(enzymeSignature(e));
             }
         }
     }
 
-    const avgEnergy = pop > 0 ? (totalEnergy / pop).toFixed(2) : "—";
-    return { population: pop, avgEnergy, lineageCount: lineages.size, enzymeFunctionalDiversity: functionalSet.size };
-}
+    const population = energies.length;
+    const avgEnergy = population > 0 ? Chalkboard.stat.mean(energies).toFixed(2) : "—";
+    const lineageCount = Chalkboard.stat.unique(lineageIds).length;
+    const enzymeFunctionalDiversity = Chalkboard.stat.unique(enzymeSigs).length;
 
-function computeLineageSnapshot(lineageId) {
+    return { population, avgEnergy, lineageCount, enzymeFunctionalDiversity };
+};
+
+const computeLineageSnapshot = (lineageId) => {
     let count = 0;
     let totalEnergy = 0;
     let totalAge = 0;
@@ -284,9 +284,9 @@ function computeLineageSnapshot(lineageId) {
         enzymeFunctionalDiversity: enzymeSet.size,
         topEnzymeTypes
     };
-}
+};
 
-function updateHud() {
+const updateHud = () => {
     const s = computeStats();
     const totals = computeElementTotals();
 
@@ -308,9 +308,9 @@ function updateHud() {
     const avgTemp = (tsum / (world.width * world.height)).toFixed(3);
     parts.push(`T_avg:${avgTemp}`);
     elementsDiv.textContent = parts.join("  •  ");
-}
+};
 
-function enzymeEquationString(enzyme) {
+const enzymeEquationString = (enzyme) => {
     const keys = enzyme.affinity ? Object.keys(enzyme.affinity).sort() : [];
     if (keys.length === 0) {
         if (enzyme.type === "anabolase") return "a + b → ab";
@@ -331,9 +331,9 @@ function enzymeEquationString(enzyme) {
     const left = keys.slice(0, 2).join(" + ");
     const prod = keys.slice(0, 2).join("");
     return `${left} → ${prod}`;
-}
+};
 
-function formatReactionExpression(ev) {
+const formatReactionExpression = (ev) => {
     const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
     let right;
     if (ev.product && ev.product !== "—") {
@@ -345,9 +345,9 @@ function formatReactionExpression(ev) {
         else right = ev.byproducts.join(" + ");
     }
     return `${left} → ${right}`;
-}
+};
 
-function buildCellInfoHtml(cell) {
+const buildCellInfoHtml = (cell) => {
     if (!cell) {
         return {
             title: "No cell selected",
@@ -410,9 +410,9 @@ function buildCellInfoHtml(cell) {
             <div style="margin-top:6px;"><strong>Recent reactions</strong>${reactionHtml}</div>
         `
     };
-}
+};
 
-function buildLineageInfoHtml(lineageId) {
+const buildLineageInfoHtml = (lineageId) => {
     if (lineageId == null) {
         return "";
     }
@@ -450,9 +450,9 @@ function buildLineageInfoHtml(lineageId) {
         <div>Enzyme diversity (functional): ${snap.enzymeFunctionalDiversity}</div>
         <div>Top enzyme types: ${topTypes}</div>
     `;
-}
+};
 
-function updateInfoPanel() {
+const updateInfoPanel = () => {
     const titleEl = document.getElementById("infoTitle");
     const bodyEl = document.getElementById("infoBody");
 
@@ -460,18 +460,18 @@ function updateInfoPanel() {
     titleEl.textContent = cellSection.title;
 
     bodyEl.innerHTML = cellSection.body + buildLineageInfoHtml(selectedLineageId);
-}
+};
 
-function isSelectingInInfoPanel() {
+const isSelectingInInfoPanel = () => {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return false;
     const range = sel.getRangeAt(0);
     const panel = document.getElementById("infoPanel");
     if (!panel) return false;
     return panel.contains(range.commonAncestorContainer);
-}
+};
 
-function createCopyReactionsButton() {
+const createCopyReactionsButton = () => {
     const btn = document.createElement("button");
     btn.id = "copyReactionsBtn";
     btn.textContent = "Copy reactions";
@@ -489,7 +489,7 @@ function createCopyReactionsButton() {
     btn.addEventListener("click", async () => {
         if (!selectedCell || !selectedCell.reactionLog) return;
         const slice = selectedCell.reactionLog.slice(0, 20);
-        const lines = slice.map(ev => {
+        const lines = slice.map((ev) => {
             const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
             const reactionStr = formatReactionExpression(ev);
             return `[t=${time}s] ${reactionStr} | ΔE=${ev.deltaE} | ΔT=${ev.deltaT} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
@@ -503,20 +503,20 @@ function createCopyReactionsButton() {
             alert("Copy failed — select and press Ctrl+C as fallback.");
         }
     });
-}
+};
 createCopyReactionsButton();
 
-function spawnChanceBasedOnPopulation(pop) {
+const spawnChanceBasedOnPopulation = (pop) => {
     const carryingCapacity = world.width * world.height * 0.30;
     const baseSpawn = 0.005;
     const minSpawn = 0.0002;
     const frac = Math.min(1, pop / Math.max(1, carryingCapacity));
     return Math.max(minSpawn, baseSpawn * (1 - frac));
-}
+};
 
 let lastWallTimeMs = performance.now();
 let accumulatorMs = 0;
-function mainLoop() {
+const main = () => {
     const nowMs = performance.now();
     let frameElapsedMs = nowMs - lastWallTimeMs;
     lastWallTimeMs = nowMs;
@@ -535,7 +535,7 @@ function mainLoop() {
             lastInfoUpdateMs = nowMs;
         }
         accumulatorMs = 0;
-        requestAnimationFrame(mainLoop);
+        requestAnimationFrame(main);
         return;
     }
 
@@ -590,7 +590,7 @@ function mainLoop() {
         fpsLastSampleMs = fpsNow;
     }
 
-    requestAnimationFrame(mainLoop);
-}
+    requestAnimationFrame(main);
+};
 lastWallTimeMs = performance.now();
-requestAnimationFrame(mainLoop);
+requestAnimationFrame(main);

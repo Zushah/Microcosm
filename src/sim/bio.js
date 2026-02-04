@@ -7,13 +7,13 @@ export const ENZYME_CLASSES = {
 };
 
 export let reactionsThisTick = 0;
-export function resetReactionCounter() { reactionsThisTick = 0; }
+export const resetReactionCounter = () => { reactionsThisTick = 0; };
 
-export function attemptReaction(enzyme, localMolecules, env, cell = null, tile = null) {
+export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile = null) => {
     const cls = ENZYME_CLASSES[enzyme.type];
     if (!cls) return null;
 
-    const candidates = localMolecules.filter(m => enzymeAccepts(enzyme, m));
+    let candidates = localMolecules.filter((m) => enzymeAccepts(enzyme, m));
     if (candidates.length === 0) {
         if (enzyme.type === "transportase") {
         } else {
@@ -21,7 +21,7 @@ export function attemptReaction(enzyme, localMolecules, env, cell = null, tile =
         }
     }
 
-    shuffleArray(candidates);
+    candidates = Chalkboard.stat.shuffle(candidates);
     const substrates = candidates.slice(0, cls.maxInputs || 1);
 
     const T = env.temperature ?? 0.5;
@@ -46,21 +46,15 @@ export function attemptReaction(enzyme, localMolecules, env, cell = null, tile =
 
     if (result) {
         const subTotal = {};
-        (result.consumed || []).forEach(m => {
-            for (const el in m.composition) {
-                subTotal[el] = (subTotal[el] || 0) + m.composition[el];
-            }
+        (result.consumed || []).forEach((m) => {
+            for (const el in m.composition) subTotal[el] = (subTotal[el] || 0) + m.composition[el];
         });
         const prodTotal = {};
         if (result.produced && result.produced.composition) {
-            for (const el in result.produced.composition) {
-                prodTotal[el] = (prodTotal[el] || 0) + result.produced.composition[el];
-            }
+            for (const el in result.produced.composition) prodTotal[el] = (prodTotal[el] || 0) + result.produced.composition[el];
         }
-        (result.byproducts || []).forEach(bp => {
-            for (const el in bp.composition) {
-                prodTotal[el] = (prodTotal[el] || 0) + bp.composition[el];
-            }
+        (result.byproducts || []).forEach((bp) => {
+            for (const el in bp.composition) prodTotal[el] = (prodTotal[el] || 0) + bp.composition[el];
         });
 
         let sameComposition = true;
@@ -75,9 +69,7 @@ export function attemptReaction(enzyme, localMolecules, env, cell = null, tile =
         const raw = (typeof result.rawDelta === "number") ? result.rawDelta : NaN;
         const ENERGY_NOISE = 1e-2;
 
-        if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE) {
-            return null;
-        }
+        if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE) return null;
 
         if (enzyme.type === "catabolase") {
             const usable = result.energyDelta || 0;
@@ -87,9 +79,9 @@ export function attemptReaction(enzyme, localMolecules, env, cell = null, tile =
 
     if (result) reactionsThisTick++;
     return result;
-}
+};
 
-function doAnabolase(enzyme, substrates, cls, cell, tile, env) {
+const doAnabolase = (enzyme, substrates, cls, cell, tile, env) => {
     if (!substrates || substrates.length === 0) return null;
     if (substrates.length < 2) return null;
 
@@ -125,9 +117,9 @@ function doAnabolase(enzyme, substrates, cls, cell, tile, env) {
         productAtomEnergy: productEnergy,
         rawDelta: -totalCost
     };
-}
+};
 
-function doCatabolase(enzyme, substrates, cls, cell, tile, env) {
+const doCatabolase = (enzyme, substrates, cls, cell, tile, env) => {
     if (!substrates || substrates.length === 0) return null;
     const mol = substrates[0];
 
@@ -170,9 +162,9 @@ function doCatabolase(enzyme, substrates, cls, cell, tile, env) {
         productAtomEnergy: productElementSum + rawBondEnergy - transmutedEnergyGain,
         rawDelta
     };
-}
+};
 
-function doTransportase(enzyme, cls, cell, tile, env) {
+const doTransportase = (enzyme, cls, cell, tile, env) => {
     if (!cell || !tile) return null;
     const wanted = ["D", "E"];
     let moved = 0;
@@ -207,9 +199,9 @@ function doTransportase(enzyme, cls, cell, tile, env) {
         productAtomEnergy: 0,
         rawDelta: -cost
     };
-}
+};
 
-function genericTransform(enzyme, substrates, cls) {
+const genericTransform = (enzyme, substrates, cls) => {
     const totalComp = {};
     let substrateAtomEnergy = 0;
     let totalAtoms = 0;
@@ -222,11 +214,11 @@ function genericTransform(enzyme, substrates, cls) {
     }
     if (totalAtoms === 0) return null;
 
-    const atomList = [];
+    let atomList = [];
     for (const el in totalComp) {
         for (let i = 0; i < totalComp[el]; i++) atomList.push(el);
     }
-    shuffleArray(atomList);
+    atomList = Chalkboard.stat.shuffle(atomList);
     const primaryCount = Math.max(1, Math.round(atomList.length * 0.7));
     const pAtoms = atomList.slice(0, primaryCount);
     const rAtoms = atomList.slice(primaryCount);
@@ -273,9 +265,9 @@ function genericTransform(enzyme, substrates, cls) {
         productAtomEnergy,
         rawDelta
     };
-}
+};
 
-function enzymeAccepts(enzyme, molecule) {
+const enzymeAccepts = (enzyme, molecule) => {
     if (!enzyme) return true;
 
     if (enzyme.type === "catabolase") {
@@ -292,14 +284,14 @@ function enzymeAccepts(enzyme, molecule) {
         if (molecule.composition && molecule.composition[el]) return true;
     }
     return false;
-}
+};
 
-function fragmentComposition(comp) {
-    const atoms = [];
+const fragmentComposition = (comp) => {
+    let atoms = [];
     for (const el in comp) {
         for (let i = 0; i < comp[el]; i++) atoms.push(el);
     }
-    shuffleArray(atoms);
+    atoms = Chalkboard.stat.shuffle(atoms);
     const firstCount = Math.ceil(atoms.length * 0.6);
     const a1 = {};
     for (let i = 0; i < firstCount; i++) a1[atoms[i]] = (a1[atoms[i]] || 0) + 1;
@@ -309,17 +301,10 @@ function fragmentComposition(comp) {
     if (Object.keys(a1).length > 0) out.push(createMolecule(a1, 1.0));
     if (Object.keys(a2).length > 0) out.push(createMolecule(a2, 1.0));
     return out;
-}
+};
 
-function calcElementalSum(mol) {
+const calcElementalSum = (mol) => {
     let s = 0;
     for (const el in mol.composition) s += (ELEMENTS[el].energy || 0) * mol.composition[el];
     return s;
-}
-
-function shuffleArray(arr) {
-    for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-}
+};

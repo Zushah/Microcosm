@@ -87,7 +87,7 @@ export class World {
                     cell._worldRef = this;
                     cell.step(env, tile);
                 }
-                tile.cells = tile.cells.filter(c => c.state !== "dead");
+                tile.cells = tile.cells.filter((c) => c.state !== "dead");
             }
         }
 
@@ -99,7 +99,7 @@ export class World {
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
                 const tile = this.grid[x][y];
-                tile.molecules.forEach(molecule => {
+                tile.molecules.forEach((molecule) => {
                     const rate = diffusionRate(molecule);
                     if (Math.random() < rate) {
                         const [nx, ny] = this.randomNeighbor(x, y);
@@ -108,7 +108,7 @@ export class World {
                 });
             }
         }
-        transfers.forEach(t => {
+        transfers.forEach((t) => {
             const src = this.grid[t.x][t.y].molecules;
             const dst = this.grid[t.nx][t.ny].molecules;
             const idx = src.indexOf(t.molecule);
@@ -190,6 +190,4 @@ export class World {
     }
 }
 
-function diffusionRate(molecule) {
-    return Math.min(0.04, 0.01 + (1 / (molecule.size + 1)) * molecule.polarity * 0.04);
-}
+const diffusionRate = (molecule) => Math.min(0.04, 0.01 + (1 / (molecule.size + 1)) * molecule.polarity * 0.04);

@@ -30,7 +30,7 @@ export class CanvasRenderer {
     }
 
     setupMouse() {
-        this.canvas.addEventListener("mousedown", e => {
+        this.canvas.addEventListener("mousedown", (e) => {
             this.isDragging = true;
             this.canvas.style.cursor = "grabbing";
             this.lastMouse = { x: e.clientX, y: e.clientY };
@@ -42,7 +42,7 @@ export class CanvasRenderer {
             this.lastMouse = null;
         });
 
-        window.addEventListener("mousemove", e => {
+        window.addEventListener("mousemove", (e) => {
             if (!this.isDragging) return;
             const dx = e.clientX - this.lastMouse.x;
             const dy = e.clientY - this.lastMouse.y;
@@ -51,7 +51,7 @@ export class CanvasRenderer {
             this.lastMouse = { x: e.clientX, y: e.clientY };
         });
 
-        this.canvas.addEventListener("wheel", e => {
+        this.canvas.addEventListener("wheel", (e) => {
             e.preventDefault();
             const rect = this.canvas.getBoundingClientRect();
             const cx = e.clientX - rect.left;
@@ -68,7 +68,7 @@ export class CanvasRenderer {
             this.scale = newScale;
         }, { passive: false });
 
-        this.canvas.addEventListener("click", e => {
+        this.canvas.addEventListener("click", (e) => {
             const rect = this.canvas.getBoundingClientRect();
             const cx = e.clientX - rect.left;
             const cy = e.clientY - rect.top;
@@ -85,7 +85,7 @@ export class CanvasRenderer {
             if (this.onCellClick) this.onCellClick(x, y, tile, topCell);
         });
 
-        this.canvas.addEventListener("contextmenu", e => {
+        this.canvas.addEventListener("contextmenu", (e) => {
             e.preventDefault();
             const rect = this.canvas.getBoundingClientRect();
             const cx = e.clientX - rect.left;
@@ -176,22 +176,20 @@ export class CanvasRenderer {
         const s = Math.max(0, Math.min(1, tile.solute));
 
         const cool = Math.max(0, 0.5 - t);
-        const warm = Math.max(0, t - 0.5);
+        const warm = Math.max(0, t - 0.1);
 
         const soluteDark = Math.min(0.4, s * 0.6);
 
-        const r = Math.floor(250 - 10 * soluteDark + 50 * warm);
+        const r = Math.floor(250 - 1 * soluteDark + 100 * warm);
         const g = Math.floor(250 - 20 * soluteDark - 10 * warm + 20 * cool);
-        const b = Math.floor(250 - 15 * soluteDark + 40 * cool);
+        const b = Math.floor(250 - 15 * soluteDark + 50 * cool);
 
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
         ctx.fillRect(x, y, 1, 1);
     }
 
     lineageColor(lineageId) {
-        if (this.lineageColorCache.has(lineageId)) {
-            return this.lineageColorCache.get(lineageId);
-        }
+        if (this.lineageColorCache.has(lineageId)) return this.lineageColorCache.get(lineageId);
         
         let x = (lineageId | 0) ^ 0x9e3779b9;
         x = Math.imul(x ^ (x >>> 16), 0x85ebca6b);
