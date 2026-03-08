@@ -20,13 +20,15 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
     }
     polarity = size > 0 ? polarity / size : 0;
     const energy = elementalEnergySum * bondMultiplier;
+    const diffusionRate = Math.min(0.04, 0.01 + (1 / (size + 1)) * polarity * 0.04);
     return {
         composition: comp,
         size,
         polarity,
         elementalEnergySum,
         bondMultiplier,
-        energy
+        energy,
+        diffusionRate
     };
 };
 
