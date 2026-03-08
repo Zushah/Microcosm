@@ -22,6 +22,10 @@ export class World {
                 this.grid[x][y] = tile;
             }
         }
+
+        const tileCount = this.width * this.height;
+        this.temperatureSum = this.baseTemperature * tileCount;
+        this.avgTemperature = tileCount > 0 ? (this.temperatureSum / tileCount) : (this.baseTemperature ?? 0.5);
     }
 
     createTile() {
@@ -69,6 +73,10 @@ export class World {
         cell._worldRef = this;
         cell._tileX = x;
         cell._tileY = y;
+
+        if (typeof window !== "undefined" && typeof window.__recordCellBirth === "function") {
+            window.__recordCellBirth(cell);
+        }
     }
 
     step() {
@@ -155,12 +163,19 @@ export class World {
             }
         }
 
+        let sumT = 0;
         for (let x = 0; x < this.width; x++) {
             for (let y = 0; y < this.height; y++) {
-                this.grid[x][y].temperature = Math.max(0, Math.min(5, tNext[x][y]));
-                this.grid[x][y].solute = Math.max(0, Math.min(1, sNext[x][y]));
+                const t = Math.max(0, Math.min(5, tNext[x][y]));
+                const s = Math.max(0, Math.min(1, sNext[x][y]));
+                this.grid[x][y].temperature = t;
+                this.grid[x][y].solute = s;
+                sumT += t;
             }
         }
+        this.temperatureSum = sumT;
+        const tileCount = this.width * this.height;
+        this.avgTemperature = tileCount > 0 ? (sumT / tileCount) : (this.baseTemperature ?? 0.5);
     }
 
     addProductAround(centerX, centerY, product) {

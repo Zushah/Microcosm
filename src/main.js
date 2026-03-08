@@ -63,6 +63,7 @@ const computeLineageRates = (lineageId) => {
 };
 
 const currentAverageTemperature = () => {
+    if (Number.isFinite(world.avgTemperature)) return world.avgTemperature;
     let sum = 0;
     for (let x = 0; x < world.width; x++) {
         for (let y = 0; y < world.height; y++) {
@@ -190,24 +191,47 @@ createPlayPauseButton();
 
 for (let i = 0; i < 32; i++) world.spawnRandomCell(randomGenome);
 
-const computeElementTotals = () => {
+const elementTotals = (() => {
     const totals = {};
     for (const k in ELEMENTS) totals[k] = 0;
+    return totals;
+})();
+
+const rebuildElementTotals = () => {
+    for (const k in elementTotals) elementTotals[k] = 0;
     for (let x = 0; x < world.width; x++) {
         for (let y = 0; y < world.height; y++) {
             const tile = world.grid[x][y];
-            for (const m of tile.molecules) {
-                for (const el in m.composition) totals[el] = (totals[el] || 0) + m.composition[el];
+            const tileMolecules = tile.molecules;
+            for (let i = 0; i < tileMolecules.length; i++) {
+                const comp = tileMolecules[i].composition;
+                for (const el in comp) elementTotals[el] = (elementTotals[el] || 0) + comp[el];
             }
-            for (const c of tile.cells) {
-                for (const m of c.molecules) {
-                    for (const el in m.composition) totals[el] = (totals[el] || 0) + m.composition[el];
+            const cells = tile.cells;
+            for (let ci = 0; ci < cells.length; ci++) {
+                const cellMolecules = cells[ci].molecules;
+                for (let mi = 0; mi < cellMolecules.length; mi++) {
+                    const comp = cellMolecules[mi].composition;
+                    for (const el in comp) elementTotals[el] = (elementTotals[el] || 0) + comp[el];
                 }
             }
         }
     }
-    return totals;
 };
+
+const applyElementDelta = (delta) => {
+    if (!delta) return;
+    for (const el in delta) {
+        const d = delta[el] || 0;
+        if (d !== 0) elementTotals[el] = (elementTotals[el] || 0) + d;
+    }
+};
+
+window.__recordElementDelta = applyElementDelta;
+
+rebuildElementTotals();
+
+const computeElementTotals = () => elementTotals;
 
 const enzymeSignature = (e) => {
     const type = e.type || "any";
@@ -217,64 +241,129 @@ const enzymeSignature = (e) => {
     return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}`;
 };
 
-const computeStats = () => {
-    const energies = [];
-    const lineageIds = [];
-    const enzymeSigs = [];
+const livingCells = new Set();
+const lineageCounts = new Map();
+const lineageCells = new Map();
+const enzymeSignatureCounts = new Map();
 
+const getOrCreateSet = (map, key) => {
+    if (!map.has(key)) map.set(key, new Set());
+    return map.get(key);
+};
+
+const bumpCounter = (map, key, delta) => {
+    const next = (map.get(key) || 0) + delta;
+    if (next <= 0) {
+        map.delete(key);
+        return 0;
+    }
+    map.set(key, next);
+    return next;
+};
+
+const trackCellBirth = (cell) => {
+    if (!cell) return;
+    if (cell.state === "dead") return;
+    if (livingCells.has(cell)) return;
+    livingCells.add(cell);
+    const lineageId = cell.lineageId;
+    bumpCounter(lineageCounts, lineageId, 1);
+    getOrCreateSet(lineageCells, lineageId).add(cell);
+    if (cell.genome && Array.isArray(cell.genome.enzymes)) {
+        for (const e of cell.genome.enzymes) {
+            const sig = enzymeSignature(e);
+            bumpCounter(enzymeSignatureCounts, sig, 1);
+        }
+    }
+};
+
+const trackCellDeath = (cell) => {
+    if (!cell) return;
+    if (!livingCells.has(cell)) return;
+    livingCells.delete(cell);
+    const lineageId = cell.lineageId;
+    bumpCounter(lineageCounts, lineageId, -1);
+    const set = lineageCells.get(lineageId);
+    if (set) {
+        set.delete(cell);
+        if (set.size === 0) lineageCells.delete(lineageId);
+    }
+    if (cell.genome && Array.isArray(cell.genome.enzymes)) {
+        for (const e of cell.genome.enzymes) {
+            const sig = enzymeSignature(e);
+            bumpCounter(enzymeSignatureCounts, sig, -1);
+        }
+    }
+};
+
+window.__recordCellBirth = trackCellBirth;
+window.__recordCellDeath = trackCellDeath;
+
+const rebuildStatsIndex = () => {
+    livingCells.clear();
+    lineageCounts.clear();
+    lineageCells.clear();
+    enzymeSignatureCounts.clear();
     for (let x = 0; x < world.width; x++) {
         for (let y = 0; y < world.height; y++) {
             const tile = world.grid[x][y];
-            for (const c of tile.cells) {
-                energies.push(c.energy);
-                lineageIds.push(c.lineageId);
-                for (const e of c.genome.enzymes) enzymeSigs.push(enzymeSignature(e));
-            }
+            for (const c of tile.cells) trackCellBirth(c);
         }
     }
+};
 
-    const population = energies.length;
-    const avgEnergy = population > 0 ? Chalkboard.stat.mean(energies).toFixed(2) : "—";
-    const lineageCount = Chalkboard.stat.unique(lineageIds).length;
-    const enzymeFunctionalDiversity = Chalkboard.stat.unique(enzymeSigs).length;
+rebuildStatsIndex();
 
+const computeStats = () => {
+    const population = livingCells.size;
+    let avgEnergy = "—";
+    if (population > 0) {
+        let sum = 0;
+        for (const c of livingCells) {
+            const e = (typeof c.energy === "number") ? c.energy : 0;
+            sum += e;
+        }
+        avgEnergy = (sum / population).toFixed(2);
+    }
+    const lineageCount = lineageCounts.size;
+    const enzymeFunctionalDiversity = enzymeSignatureCounts.size;
     return { population, avgEnergy, lineageCount, enzymeFunctionalDiversity };
 };
 
 const computeLineageSnapshot = (lineageId) => {
-    let count = 0;
+    const cells = lineageCells.get(lineageId);
+    if (!cells || cells.size === 0) {
+        return {
+            lineageId,
+            population: 0,
+            avgEnergy: 0,
+            avgAgeSec: 0,
+            maxAgeSec: 0,
+            enzymeFunctionalDiversity: 0,
+            topEnzymeTypes: []
+        };
+    }
     let totalEnergy = 0;
     let totalAge = 0;
     let maxAge = 0;
-
     const enzymeSet = new Set();
     const enzymeTypeCounts = new Map();
-
-    for (let x = 0; x < world.width; x++) {
-        for (let y = 0; y < world.height; y++) {
-            for (const c of world.grid[x][y].cells) {
-                if (c.lineageId !== lineageId) continue;
-                count++;
-                totalEnergy += (c.energy || 0);
-
-                const age = c.getAgeSecSim ? c.getAgeSecSim() : 0;
-                totalAge += age;
-                if (age > maxAge) maxAge = age;
-
-                if (c.genome && c.genome.enzymes) {
-                    for (const e of c.genome.enzymes) {
-                        enzymeSet.add(enzymeSignature(e));
-                        enzymeTypeCounts.set(e.type, (enzymeTypeCounts.get(e.type) || 0) + 1);
-                    }
-                }
+    for (const c of cells) {
+        totalEnergy += (c.energy || 0);
+        const age = c.getAgeSecSim ? c.getAgeSecSim() : 0;
+        totalAge += age;
+        if (age > maxAge) maxAge = age;
+        if (c.genome && c.genome.enzymes) {
+            for (const e of c.genome.enzymes) {
+                enzymeSet.add(enzymeSignature(e));
+                enzymeTypeCounts.set(e.type, (enzymeTypeCounts.get(e.type) || 0) + 1);
             }
         }
     }
-
     const topEnzymeTypes = [...enzymeTypeCounts.entries()]
         .sort((a, b) => b[1] - a[1])
         .slice(0, 4);
-
+    const count = cells.size;
     return {
         lineageId,
         population: count,
@@ -303,10 +392,8 @@ const updateHud = () => {
         const avgPerTile = (total / (world.width * world.height)).toFixed(2);
         parts.push(`${k}:${total} (avg:${avgPerTile})`);
     }
-    let tsum = 0;
-    for (let x = 0; x < world.width; x++) for (let y = 0; y < world.height; y++) tsum += world.grid[x][y].temperature;
-    const avgTemp = (tsum / (world.width * world.height)).toFixed(3);
-    parts.push(`T_avg:${avgTemp}`);
+    const avgT = Number.isFinite(world.avgTemperature) ? world.avgTemperature : (world.baseTemperature ?? 0.5);
+    parts.push(`T_avg:${avgT.toFixed(3)}`);
     elementsDiv.textContent = parts.join("  •  ");
 };
 
@@ -550,8 +637,7 @@ const main = () => {
         simTime += stepMs / 1000;
         window.SIM_TIME = simTime;
 
-        const stats = computeStats();
-        const spawnProb = spawnChanceBasedOnPopulation(stats.population);
+        const spawnProb = spawnChanceBasedOnPopulation(livingCells.size);
         if (Math.random() < spawnProb) world.spawnRandomCell(randomGenome);
 
         resetReactionCounter();

@@ -58,13 +58,19 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
         });
 
         let sameComposition = true;
+        let elementDelta = null;
         const keys = new Set([...Object.keys(subTotal), ...Object.keys(prodTotal)]);
         for (const k of keys) {
-            if ((subTotal[k] || 0) !== (prodTotal[k] || 0)) {
+            const sub = subTotal[k] || 0;
+            const prod = prodTotal[k] || 0;
+            if (sub !== prod) {
                 sameComposition = false;
-                break;
+                const d = prod - sub;
+                if (!elementDelta) elementDelta = {};
+                elementDelta[k] = d;
             }
         }
+        if (elementDelta) result.elementDelta = elementDelta;
 
         const raw = (typeof result.rawDelta === "number") ? result.rawDelta : NaN;
         const ENERGY_NOISE = 1e-2;

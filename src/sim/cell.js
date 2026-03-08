@@ -28,6 +28,10 @@ export class Cell {
             const result = attemptReaction(enzyme, localPool, env, this, tile);
             if (!result) continue;
 
+            if (result.elementDelta && typeof window !== "undefined" && typeof window.__recordElementDelta === "function") {
+                window.__recordElementDelta(result.elementDelta);
+            }
+
             const eDelta = result.energyDelta || 0;
             gainedEnergy += eDelta;
 
@@ -159,6 +163,9 @@ export class Cell {
         this.state = "dead";
         if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") {
             window.__recordLineageDeath(this.lineageId);
+        }
+        if (typeof window !== "undefined" && typeof window.__recordCellDeath === "function") {
+            window.__recordCellDeath(this);
         }
     }
 
@@ -329,6 +336,10 @@ export class Cell {
 
         if (placed && typeof window !== "undefined" && typeof window.__recordLineageBirth === "function") {
             window.__recordLineageBirth(child.lineageId);
+        }
+
+        if (placed && typeof window !== "undefined" && typeof window.__recordCellBirth === "function") {
+            window.__recordCellBirth(child);
         }
 
         if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) this._dieAndRelease(tile);
