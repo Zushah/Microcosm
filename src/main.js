@@ -3,7 +3,7 @@ import { CanvasRenderer } from "./render/canvas.js";
 import { resetReactionCounter } from "./sim/bio.js";
 import { ELEMENTS } from "./sim/chem.js";
 
-const world = new World(160, 120);
+const world = new World(320, 240);
 
 let simTime = 0.0;
 window.SIM_TIME = simTime;
