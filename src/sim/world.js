@@ -104,24 +104,34 @@ export class World {
 
     step() {
         this.diffuseMolecules();
-
+        const dtSec = this.dt / 1000;
+        const grid = this.grid;
+        const env = this._sharedEnv || (this._sharedEnv = { temperature: 0, pH: 0.5, dt: dtSec });
+        env.pH = 0.5;
+        env.dt = dtSec;
         for (let x = 0; x < this.width; x++) {
+            const col = grid[x];
             for (let y = 0; y < this.height; y++) {
-                const tile = this.grid[x][y];
-                const env = {
-                    temperature: tile.temperature,
-                    pH: 0.5,
-                    dt: this.dt / 1000
-                };
-                const cells = tile.cells.slice();
-                for (const cell of cells) {
-                    cell._worldRef = this;
+                const tile = col[y];
+                const cells = tile.cells;
+                if (!cells || cells.length === 0) continue;
+                env.temperature = tile.temperature;
+                for (let i = 0; i < cells.length; i++) {
+                    const cell = cells[i];
+                    if (cell._worldRef !== this) cell._worldRef = this;
                     cell.step(env, tile);
                 }
-                tile.cells = tile.cells.filter((c) => c.state !== "dead");
+                let write = 0;
+                for (let i = 0; i < cells.length; i++) {
+                    const c = cells[i];
+                    if (c.state !== "dead") {
+                        if (write !== i) cells[write] = c;
+                        write++;
+                    }
+                }
+                if (write !== cells.length) cells.length = write;
             }
         }
-
         this.diffuseScalars();
     }
 
