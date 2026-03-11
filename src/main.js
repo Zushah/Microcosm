@@ -564,7 +564,7 @@ const buildLineageInfoHtml = (lineageId) => {
         <div>Net/s: ${netPerSec.toFixed(2)}</div>
 
         <div style="margin-top:6px;"><strong>Totals</strong></div>
-        <div>Births: ${rates.totals.births}</div>
+        <div>Births: ${rates.totals.births + 1}</div>
         <div>Deaths: ${rates.totals.deaths}</div>
 
         <div style="margin-top:6px;"><strong>Genetics</strong></div>
