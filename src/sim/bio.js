@@ -207,6 +207,7 @@ const doCatabolase = (enzyme, substrates, cls, cell, tile, env) => {
 
 const doTransportase = (enzyme, cls, cell, tile, env) => {
     if (!cell || !tile) return null;
+    const world = tile.__world;
     const wanted = ["D", "E"];
     let moved = 0;
     const maxToMove = Math.max(1, Math.floor((enzyme.transportRate || 0.4) * 2));
@@ -220,8 +221,13 @@ const doTransportase = (enzyme, cls, cell, tile, env) => {
                 cell.molecules.push(taken);
                 moved++;
                 if (Object.keys(m.composition).length === 0) {
-                    tile.molecules.splice(i, 1);
-                    i--;
+                    if (world && typeof world._removeMoleculeFromTile === "function") {
+                        world._removeMoleculeFromTile(tile, i);
+                        i--;
+                    } else {
+                        tile.molecules.splice(i, 1);
+                        i--;
+                    }
                 }
             }
         }
