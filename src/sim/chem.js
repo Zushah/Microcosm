@@ -12,11 +12,20 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
     let size = 0;
     let polarity = 0;
     let elementalEnergySum = 0;
+    let elementMask = 0;
     for (const el in comp) {
         const count = comp[el];
         size += count;
         polarity += (ELEMENTS[el].polarity || 0) * count;
         elementalEnergySum += (ELEMENTS[el].energy || 0) * count;
+        if (count > 0) {
+            if (el === "A") elementMask |= 1;
+            else if (el === "B") elementMask |= 2;
+            else if (el === "C") elementMask |= 4;
+            else if (el === "D") elementMask |= 8;
+            else if (el === "E") elementMask |= 16;
+            else if (el === "X") elementMask |= 32;
+        }
     }
     polarity = size > 0 ? polarity / size : 0;
     const energy = elementalEnergySum * bondMultiplier;
@@ -28,7 +37,8 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
         elementalEnergySum,
         bondMultiplier,
         energy,
-        diffusionRate
+        diffusionRate,
+        elementMask
     };
 };
 

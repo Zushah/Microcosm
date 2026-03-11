@@ -7,32 +7,68 @@ export const ENZYME_CLASSES = {
 };
 
 export let reactionsThisTick = 0;
-export const resetReactionCounter = () => { reactionsThisTick = 0; };
+export const resetReactionCounter = () => reactionsThisTick = 0;
 
-export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile = null) => {
+const _elementDeltaScratch = new Int32Array(6);
+
+const _accumulateCompDelta = (scratch, comp, sign) => {
+    if (!comp) return;
+    for (const el in comp) {
+        const v = comp[el] || 0;
+        if (v === 0) continue;
+        if (el === "A") scratch[0] += sign * v;
+        else if (el === "B") scratch[1] += sign * v;
+        else if (el === "C") scratch[2] += sign * v;
+        else if (el === "D") scratch[3] += sign * v;
+        else if (el === "E") scratch[4] += sign * v;
+        else if (el === "X") scratch[5] += sign * v;
+    }
+};
+
+const _sampleAcceptedSubstrates = (enzyme, poolA, poolB, maxCount) => {
+    const out = [];
+    let seen = 0;
+    const rand = Math.random;
+    const scan = (arr) => {
+        for (let i = 0; i < arr.length; i++) {
+            const m = arr[i];
+            if (!enzymeAccepts(enzyme, m)) continue;
+            seen++;
+            if (out.length < maxCount) {
+                out.push(m);
+            } else {
+                const j = (rand() * seen) | 0;
+                if (j < maxCount) out[j] = m;
+            }
+        }
+    };
+    if (poolA && poolA.length) scan(poolA);
+    if (poolB && poolB.length) scan(poolB);
+    return out;
+};
+
+export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile = null, cellMolecules = null) => {
     const cls = ENZYME_CLASSES[enzyme.type];
     if (!cls) return null;
-
-    let candidates = localMolecules.filter((m) => enzymeAccepts(enzyme, m));
-    if (candidates.length === 0) {
-        if (enzyme.type === "transportase") {
-        } else {
-            return null;
-        }
-    }
-
-    candidates = Chalkboard.stat.shuffle(candidates);
-    const substrates = candidates.slice(0, cls.maxInputs || 1);
-
     const T = env.temperature ?? 0.5;
     const tOpt = enzyme.tOpt ?? 0.5;
     const tempSigma = enzyme.tempSigma ?? 0.18;
-    const tempFactor = Math.exp(-Math.pow(T - tOpt, 2) / (2 * tempSigma * tempSigma));
+    const dT = T - tOpt;
+    const denom = 2 * tempSigma * tempSigma;
+    const tempFactor = Math.exp(-(dT * dT) / denom);
     const pHFactor = Math.exp(-Math.abs((env.pH ?? 0.5) - (enzyme.pHOpt ?? 0.5)));
-
-    const rate = Math.min(1, (cls.baseRate || 0.8) * 1.2) * tempFactor * pHFactor;
+    const baseRate = (typeof cls.baseRate === "number") ? cls.baseRate : 0.8;
+    const rate = Math.min(1, baseRate * 1.2) * tempFactor * pHFactor;
     if (Math.random() > rate) return null;
-
+    let substrates = [];
+    if (enzyme.type !== "transportase") {
+        const maxInputs = (typeof cls.maxInputs === "number" && cls.maxInputs > 0) ? cls.maxInputs : 1;
+        const poolA = localMolecules;
+        const poolB = cellMolecules;
+        substrates = _sampleAcceptedSubstrates(enzyme, poolA, poolB, maxInputs);
+        if (substrates.length === 0) return null;
+        if (enzyme.type === "anabolase" && substrates.length < 2) return null;
+    }
     let result = null;
     if (enzyme.type === "anabolase") {
         result = doAnabolase(enzyme, substrates, cls, cell, tile, env);
@@ -43,47 +79,46 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
     } else {
         result = genericTransform(enzyme, substrates, cls);
     }
-
-    if (result) {
-        const subTotal = {};
-        (result.consumed || []).forEach((m) => {
-            for (const el in m.composition) subTotal[el] = (subTotal[el] || 0) + m.composition[el];
-        });
-        const prodTotal = {};
-        if (result.produced && result.produced.composition) {
-            for (const el in result.produced.composition) prodTotal[el] = (prodTotal[el] || 0) + result.produced.composition[el];
-        }
-        (result.byproducts || []).forEach((bp) => {
-            for (const el in bp.composition) prodTotal[el] = (prodTotal[el] || 0) + bp.composition[el];
-        });
-
-        let sameComposition = true;
-        let elementDelta = null;
-        const keys = new Set([...Object.keys(subTotal), ...Object.keys(prodTotal)]);
-        for (const k of keys) {
-            const sub = subTotal[k] || 0;
-            const prod = prodTotal[k] || 0;
-            if (sub !== prod) {
-                sameComposition = false;
-                const d = prod - sub;
-                if (!elementDelta) elementDelta = {};
-                elementDelta[k] = d;
-            }
-        }
-        if (elementDelta) result.elementDelta = elementDelta;
-
-        const raw = (typeof result.rawDelta === "number") ? result.rawDelta : NaN;
-        const ENERGY_NOISE = 1e-2;
-
-        if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE) return null;
-
-        if (enzyme.type === "catabolase") {
-            const usable = result.energyDelta || 0;
-            if (usable <= 0) return null;
-        }
+    if (!result) return null;
+    const scratch = _elementDeltaScratch;
+    scratch[0] = 0;
+    scratch[1] = 0;
+    scratch[2] = 0;
+    scratch[3] = 0;
+    scratch[4] = 0;
+    scratch[5] = 0;
+    const consumed = result.consumed || [];
+    for (let i = 0; i < consumed.length; i++) {
+        const m = consumed[i];
+        if (!m || !m.composition) continue;
+        _accumulateCompDelta(scratch, m.composition, -1);
     }
-
-    if (result) reactionsThisTick++;
+    if (result.produced && result.produced.composition) {
+        _accumulateCompDelta(scratch, result.produced.composition, 1);
+    }
+    const byps = result.byproducts || [];
+    for (let i = 0; i < byps.length; i++) {
+        const bp = byps[i];
+        if (!bp || !bp.composition) continue;
+        _accumulateCompDelta(scratch, bp.composition, 1);
+    }
+    let elementDelta = null;
+    let sameComposition = true;
+    if (scratch[0] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).A = scratch[0]; }
+    if (scratch[1] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).B = scratch[1]; }
+    if (scratch[2] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).C = scratch[2]; }
+    if (scratch[3] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).D = scratch[3]; }
+    if (scratch[4] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).E = scratch[4]; }
+    if (scratch[5] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).X = scratch[5]; }
+    if (elementDelta) result.elementDelta = elementDelta;
+    const raw = (typeof result.rawDelta === "number") ? result.rawDelta : NaN;
+    const ENERGY_NOISE = 1e-2;
+    if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE) return null;
+    if (enzyme.type === "catabolase") {
+        const usable = result.energyDelta || 0;
+        if (usable <= 0) return null;
+    }
+    reactionsThisTick++;
     return result;
 };
 
@@ -275,7 +310,6 @@ const genericTransform = (enzyme, substrates, cls) => {
 
 const enzymeAccepts = (enzyme, molecule) => {
     if (!enzyme) return true;
-
     if (enzyme.type === "catabolase") {
         const bm = molecule.bondMultiplier || 1.0;
         const size = molecule.size || 0;
@@ -283,11 +317,29 @@ const enzymeAccepts = (enzyme, molecule) => {
             return true;
         }
     }
-
-    if (!enzyme.affinity) return true;
-
-    for (const el in enzyme.affinity) {
-        if (molecule.composition && molecule.composition[el]) return true;
+    const affinity = enzyme.affinity;
+    if (!affinity) return true;
+    let affinityMask = enzyme._affinityMask;
+    if (affinityMask == null) {
+        affinityMask = 0;
+        for (const el in affinity) {
+            if (el === "A") affinityMask |= 1;
+            else if (el === "B") affinityMask |= 2;
+            else if (el === "C") affinityMask |= 4;
+            else if (el === "D") affinityMask |= 8;
+            else if (el === "E") affinityMask |= 16;
+            else if (el === "X") affinityMask |= 32;
+        }
+        enzyme._affinityMask = affinityMask;
+    }
+    const mMask = molecule.elementMask;
+    if (typeof mMask === "number") {
+        return (mMask & affinityMask) !== 0;
+    }
+    if (molecule.composition) {
+        for (const el in affinity) {
+            if (molecule.composition[el]) return true;
+        }
     }
     return false;
 };
