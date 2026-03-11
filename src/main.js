@@ -420,16 +420,50 @@ const enzymeEquationString = (enzyme) => {
     return `${left} → ${prod}`;
 };
 
+const compositionToString = (comp) => {
+    if (!comp) return "—";
+    return Object.entries(comp).map(([k, v]) => `${k}${v}`).join("");
+};
+
+const moleculeLikeToString = (v) => {
+    if (v == null) return "—";
+    if (typeof v === "string") return v;
+    if (typeof v === "object") {
+        if (v.composition) return compositionToString(v.composition);
+        if (typeof v.product === "string") return v.product;
+    }
+    return "—";
+};
+
+const ensureArray = (v) => {
+    if (Array.isArray(v)) return v;
+    if (v == null) return [];
+    return [v];
+};
+
+const normalizeReactionEventForDisplay = (ev) => {
+    const src = ev || {};
+    const substratesRaw = (src.substrates !== undefined) ? src.substrates : src.consumed;
+    const byproductsRaw = (src.byproducts !== undefined) ? src.byproducts : src.byproduct;
+    const substrates = ensureArray(substratesRaw).map((x) => moleculeLikeToString(x));
+    const byproducts = ensureArray(byproductsRaw).map((x) => moleculeLikeToString(x));
+    let product = "—";
+    if (typeof src.product === "string") product = src.product;
+    else if (src.produced !== undefined) product = moleculeLikeToString(src.produced);
+    return { substrates, product, byproducts };
+};
+
 const formatReactionExpression = (ev) => {
-    const left = ev.substrates.length === 0 ? "—" : ev.substrates.join(" + ");
+    const norm = normalizeReactionEventForDisplay(ev);
+    const left = norm.substrates.length === 0 ? "—" : norm.substrates.join(" + ");
     let right;
-    if (ev.product && ev.product !== "—") {
-        right = ev.product;
-        if (ev.byproducts.length > 0) right += " (+ " + ev.byproducts.join(", ") + ")";
+    if (norm.product && norm.product !== "—") {
+        right = norm.product;
+        if (norm.byproducts.length > 0) right += " (+ " + norm.byproducts.join(", ") + ")";
     } else {
-        if (ev.byproducts.length === 0) right = "—";
-        else if (ev.byproducts.length === 1) right = ev.byproducts[0];
-        else right = ev.byproducts.join(" + ");
+        if (norm.byproducts.length === 0) right = "—";
+        else if (norm.byproducts.length === 1) right = norm.byproducts[0];
+        else right = norm.byproducts.join(" + ");
     }
     return `${left} → ${right}`;
 };

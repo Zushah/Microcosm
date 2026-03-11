@@ -22,10 +22,12 @@ export class Cell {
 
         let gainedEnergy = 0;
 
-        for (const enzyme of this.genome.enzymes) {
-            const localPool = tile.molecules.concat(this.molecules);
+        const tileMolecules = tile.molecules;
+        const internalMolecules = this.molecules;
+        const world = tile.__world;
 
-            const result = attemptReaction(enzyme, localPool, env, this, tile);
+        for (const enzyme of this.genome.enzymes) {
+            const result = attemptReaction(enzyme, tileMolecules, env, this, tile, internalMolecules);
             if (!result) continue;
 
             if (result.elementDelta && typeof window !== "undefined" && typeof window.__recordElementDelta === "function") {
@@ -39,77 +41,78 @@ export class Cell {
 
             this.consumeSubstrates(result.consumed, tile);
 
-            const keepPrimary = result.produced && !this.shouldSecrete(result.produced, enzyme);
-            if (keepPrimary && result.produced) {
-                this.molecules.push(result.produced);
-            } else if (result.produced) {
-                if (tile.__world) tile.__world.addProductAround(tile.__x, tile.__y, result.produced);
-                else tile.molecules.push(result.produced);
+            if (result.produced) {
+                if (this.shouldSecrete(result.produced, enzyme)) {
+                    if (world) world.addProductAround(tile.__x, tile.__y, result.produced);
+                    else tileMolecules.push(result.produced);
+                } else internalMolecules.push(result.produced);
             }
 
-            if (result.byproducts && result.byproducts.length > 0 && tile.__world) {
-                for (const bp of result.byproducts) {
-                    const cloneBP = createMolecule(Object.assign({}, bp.composition || {}), bp.bondMultiplier || 1.0);
-                    tile.__world.addProductAround(tile.__x, tile.__y, cloneBP);
-                }
-            } else if (result.byproducts && result.byproducts.length > 0) {
-                for (const bp of result.byproducts) {
-                    const cloneBP = createMolecule(Object.assign({}, bp.composition || {}), bp.bondMultiplier || 1.0);
-                    tile.molecules.push(cloneBP);
-                }
+            if (result.byproducts && result.byproducts.length > 0) {
+                if (world) for (const bp of result.byproducts) world.addProductAround(tile.__x, tile.__y, bp);
+                else for (const bp of result.byproducts) tileMolecules.push(bp);
             }
 
             const heat = result.heatDelta || 0;
-            if (Math.abs(heat) > 1e-12 && tile.__world) {
+            if (heat !== 0 && world) {
                 tile.temperature = Math.max(0, tile.temperature + heat);
-                const neighbors = tile.__world.mooreNeighbors(tile.__x, tile.__y);
-                for (const [nx, ny] of neighbors) {
-                    tile.__world.grid[nx][ny].temperature = Math.max(0, tile.__world.grid[nx][ny].temperature + heat * 0.18);
-                }
+                const hx = heat * 0.18;
+                const x = tile.__x;
+                const y = tile.__y;
+                const xL = world._xPrev[x];
+                const xR = world._xNext[x];
+                const yU = world._yPrev[y];
+                const yD = world._yNext[y];
+                const grid = world.grid;
+                const colL = grid[xL];
+                const col = grid[x];
+                const colR = grid[xR];
+                colL[yU].temperature = Math.max(0, colL[yU].temperature + hx);
+                colL[y].temperature = Math.max(0, colL[y].temperature + hx);
+                colL[yD].temperature = Math.max(0, colL[yD].temperature + hx);
+                col[yU].temperature = Math.max(0, col[yU].temperature + hx);
+                col[yD].temperature = Math.max(0, col[yD].temperature + hx);
+                colR[yU].temperature = Math.max(0, colR[yU].temperature + hx);
+                colR[y].temperature = Math.max(0, colR[y].temperature + hx);
+                colR[yD].temperature = Math.max(0, colR[yD].temperature + hx);
             }
 
             const tAfter = tile.temperature;
             const deltaT = tAfter - tBefore;
+            const ageAtEvent = (typeof this.getAgeSecSim === "function") ? this.getAgeSecSim() : 0;
 
-            const nowSim = window.SIM_TIME || 0;
-            const ageAtEventSec = Number((nowSim - (this.birthSimTime || 0)).toFixed(4));
             this._pushReactionLog({
-                timeSim: nowSim,
-                ageAtEventSec,
-                substrates: (result.consumed || []).map((m) => compositionToString(m.composition)),
-                product: result.produced ? compositionToString(result.produced.composition) : "—",
-                byproducts: (result.byproducts || []).map((bp) => compositionToString(bp.composition)),
-                deltaE: Number((result.energyDelta || 0).toFixed(6)),
-                deltaT: Number(deltaT.toFixed(6)),
-                enzymeType: enzyme.type,
-                substrateAtomEnergy: Number((result.substrateAtomEnergy || 0).toFixed(6)),
-                productAtomEnergy: Number((result.productAtomEnergy || 0).toFixed(6)),
-                rawDelta: Number((result.rawDelta || 0).toFixed(6))
+                enzymeType: enzyme.type || "unknown",
+                affinity: enzyme.affinity || null,
+                consumed: result.consumed || [],
+                produced: result.produced || null,
+                byproducts: result.byproducts || [],
+                deltaE: Number((result.energyDelta || 0).toFixed(3)),
+                deltaT: Number(deltaT.toFixed(4)),
+                substrateAtomEnergy: Number((result.substrateAtomEnergy || 0).toFixed(3)),
+                productAtomEnergy: Number((result.productAtomEnergy || 0).toFixed(3)),
+                rawDelta: Number((result.rawDelta || 0).toFixed(3)),
+                ageAtEventSec: Number(ageAtEvent.toFixed(3)),
+                simTime: window.SIM_TIME || 0
             });
         }
 
-        const internalCount = this.totalInternalAtoms();
-        if (internalCount < (this.genome.desiredElementReserve * 2) && tile.molecules.length > 0) {
-            const idx = Math.floor(Math.random() * tile.molecules.length);
-            const taken = tile.molecules.splice(idx, 1)[0];
-            if (taken) this.molecules.push(taken);
-        }
-
-        if (gainedEnergy > 0) {
+        if (gainedEnergy > 1e-6) {
             this.energy += gainedEnergy;
-            this.timeWithoutFood = 0;
+            this.timeWithoutFood = Math.max(0, this.timeWithoutFood - gainedEnergy * 0.2);
         } else {
             this.timeWithoutFood += env.dt;
         }
 
-        const maintRate = this.genome.maintenanceCostPerSec ?? this.maintenanceCostPerSec ?? 0.05;
-        const maintLoss = maintRate * env.dt;
-        if (maintLoss > 0) {
-            this.energy -= maintLoss;
-            if (this.energy <= 0) {
-                this.energy = 0;
-                this._dieAndRelease(tile);
-                return;
+        this.energy = Math.max(0, this.energy - this.maintenanceCostPerSec * env.dt);
+
+        const internalCount = this.totalInternalAtoms();
+        if (internalCount < (this.genome.desiredElementReserve * 2) && tileMolecules.length > 0) {
+            const idx = Math.floor(Math.random() * tileMolecules.length);
+            const take = tileMolecules[idx];
+            if (take) {
+                tileMolecules.splice(idx, 1);
+                internalMolecules.push(take);
             }
         }
 
@@ -191,84 +194,52 @@ export class Cell {
     }
 
     countInternalElement(el) {
-        return Chalkboard.stat.sum(this.molecules.map((m) => (m.composition[el] || 0)));
+        const arr = [];
+        for (let i = 0; i < this.molecules.length; i++) arr.push(this.molecules[i].composition[el] || 0);
+        return Chalkboard.stat.sum(arr);
     }
 
     consumeSubstrates(substrates, tile) {
         if (!substrates || substrates.length === 0) return;
-
-        const sameComp = (a, b) => {
-            const ka = Object.keys(a || {}).filter((k) => (a[k] || 0) > 0).sort();
-            const kb = Object.keys(b || {}).filter((k) => (b[k] || 0) > 0).sort();
-            if (ka.length !== kb.length) return false;
-            for (let i = 0; i < ka.length; i++) {
-                if (ka[i] !== kb[i]) return false;
-                if ((a[ka[i]] || 0) !== (b[kb[i]] || 0)) return false;
+        const tilePool = tile && tile.molecules ? tile.molecules : null;
+        const cellPool = this.molecules;
+        const subtractFromPool = (pool, subComp) => {
+            if (!pool) return false;
+            for (let i = 0; i < pool.length; i++) {
+                const m = pool[i];
+                if (!m || !m.composition) continue;
+                let ok = true;
+                for (const el in subComp) {
+                    if ((m.composition[el] || 0) < subComp[el]) { ok = false; break; }
+                }
+                if (!ok) continue;
+                for (const el in subComp) {
+                    m.composition[el] -= subComp[el];
+                    if (m.composition[el] <= 0) delete m.composition[el];
+                }
+                if (Object.keys(m.composition).length === 0) {
+                    pool.splice(i, 1);
+                }
+                return true;
             }
-            return true;
+            return false;
         };
-
-        for (const sub of substrates) {
+        for (let si = 0; si < substrates.length; si++) {
+            const sub = substrates[si];
             if (!sub || !sub.composition) continue;
-            let removed = false;
-
-            for (let i = 0; i < tile.molecules.length && !removed; i++) {
-                const m = tile.molecules[i];
-                if (sameComp(m.composition, sub.composition)) {
-                    tile.molecules.splice(i, 1);
-                    removed = true;
+            if (tilePool) {
+                const idx = tilePool.indexOf(sub);
+                if (idx !== -1) {
+                    tilePool.splice(idx, 1);
+                    continue;
                 }
             }
-
-            for (let i = 0; i < this.molecules.length && !removed; i++) {
-                const m = this.molecules[i];
-                if (sameComp(m.composition, sub.composition)) {
-                    this.molecules.splice(i, 1);
-                    removed = true;
-                }
+            const idx2 = cellPool.indexOf(sub);
+            if (idx2 !== -1) {
+                cellPool.splice(idx2, 1);
+                continue;
             }
-
-            if (!removed) {
-                for (let i = 0; i < tile.molecules.length && !removed; i++) {
-                    const m = tile.molecules[i];
-                    if (!m || !m.composition) continue;
-                    let ok = true;
-                    for (const el in sub.composition) {
-                        if ((m.composition[el] || 0) < sub.composition[el]) { ok = false; break; }
-                    }
-                    if (!ok) continue;
-                    for (const el in sub.composition) {
-                        m.composition[el] -= sub.composition[el];
-                        if (m.composition[el] <= 0) delete m.composition[el];
-                    }
-                    if (Object.keys(m.composition).length === 0) {
-                        tile.molecules.splice(i, 1);
-                        i--;
-                    }
-                    removed = true;
-                }
-            }
-
-            if (!removed) {
-                for (let i = 0; i < this.molecules.length && !removed; i++) {
-                    const m = this.molecules[i];
-                    if (!m || !m.composition) continue;
-                    let ok = true;
-                    for (const el in sub.composition) {
-                        if ((m.composition[el] || 0) < sub.composition[el]) { ok = false; break; }
-                    }
-                    if (!ok) continue;
-                    for (const el in sub.composition) {
-                        m.composition[el] -= sub.composition[el];
-                        if (m.composition[el] <= 0) delete m.composition[el];
-                    }
-                    if (Object.keys(m.composition).length === 0) {
-                        this.molecules.splice(i, 1);
-                        i--;
-                    }
-                    removed = true;
-                }
-            }
+            if (!subtractFromPool(tilePool, sub.composition)) subtractFromPool(cellPool, sub.composition);
         }
     }
 
