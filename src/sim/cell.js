@@ -117,9 +117,10 @@ export class Cell {
         const internalCount = this.totalInternalAtoms();
         if (internalCount < (this.genome.desiredElementReserve * 2) && tileMolecules.length > 0) {
             const idx = Math.floor(Math.random() * tileMolecules.length);
-            const take = tileMolecules[idx];
+            let take = tileMolecules[idx];
             if (take) {
-                tileMolecules.splice(idx, 1);
+                if (world && typeof world._removeMoleculeFromTile === "function") take = world._removeMoleculeFromTile(tile, idx) || take;
+                else tileMolecules.splice(idx, 1);
                 internalMolecules.push(take);
             }
         }
@@ -166,9 +167,10 @@ export class Cell {
     }
 
     _dieAndRelease(tile) {
-        if (tile && tile.__world) {
-            for (const m of this.molecules) tile.molecules.push(m);
-        }
+        if (tile && tile.__world && typeof tile.__world._addMoleculeToTile === "function") {
+            const world = tile.__world;
+            for (const m of this.molecules) world._addMoleculeToTile(tile, m);
+        } else if (tile && tile.molecules) for (const m of this.molecules) tile.molecules.push(m);
         this.molecules = [];
         this.deathSimTime = window.SIM_TIME || 0;
         this.state = "dead";
@@ -211,22 +213,22 @@ export class Cell {
         if (!substrates || substrates.length === 0) return;
         const tilePool = tile && tile.molecules ? tile.molecules : null;
         const cellPool = this.molecules;
+        const world = tile && tile.__world;
         const subtractFromPool = (pool, subComp) => {
             if (!pool) return false;
             for (let i = 0; i < pool.length; i++) {
                 const m = pool[i];
                 if (!m || !m.composition) continue;
                 let ok = true;
-                for (const el in subComp) {
-                    if ((m.composition[el] || 0) < subComp[el]) { ok = false; break; }
-                }
+                for (const el in subComp) if ((m.composition[el] || 0) < subComp[el]) { ok = false; break; }
                 if (!ok) continue;
                 for (const el in subComp) {
                     m.composition[el] -= subComp[el];
                     if (m.composition[el] <= 0) delete m.composition[el];
                 }
                 if (Object.keys(m.composition).length === 0) {
-                    pool.splice(i, 1);
+                    if (pool === tilePool && world && typeof world._removeMoleculeFromTile === "function" && m.__tile === tile) world._removeMoleculeFromTile(tile, i);
+                    else pool.splice(i, 1);
                 }
                 return true;
             }
@@ -236,9 +238,14 @@ export class Cell {
             const sub = substrates[si];
             if (!sub || !sub.composition) continue;
             if (tilePool) {
+                if (world && typeof world._removeMoleculeFromTile === "function" && sub.__tile === tile) {
+                    world._removeMoleculeFromTile(tile, sub.__tileIndex);
+                    continue;
+                }
                 const idx = tilePool.indexOf(sub);
                 if (idx !== -1) {
-                    tilePool.splice(idx, 1);
+                    if (world && typeof world._removeMoleculeFromTile === "function") world._removeMoleculeFromTile(tile, idx);
+                    else tilePool.splice(idx, 1);
                     continue;
                 }
             }
