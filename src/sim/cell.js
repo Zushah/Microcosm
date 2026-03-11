@@ -104,7 +104,15 @@ export class Cell {
             this.timeWithoutFood += env.dt;
         }
 
-        this.energy = Math.max(0, this.energy - this.maintenanceCostPerSec * env.dt);
+        const loss = this.maintenanceCostPerSec * env.dt;
+        if (loss > 0) {
+            this.energy -= loss;
+            if (!(this.energy > 0)) {
+                this.energy = 0;
+                this._dieAndRelease(tile);
+                return;
+            }
+        }
 
         const internalCount = this.totalInternalAtoms();
         if (internalCount < (this.genome.desiredElementReserve * 2) && tileMolecules.length > 0) {
