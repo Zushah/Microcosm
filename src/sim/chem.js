@@ -30,6 +30,7 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
     polarity = size > 0 ? polarity / size : 0;
     const energy = elementalEnergySum * bondMultiplier;
     const diffusionRate = Math.min(0.04, 0.01 + (1 / (size + 1)) * polarity * 0.04);
+    const diffusionThreshold = Math.min(0xFFFFFFFF, Math.max(0, Math.floor(diffusionRate * 4294967296)));
     return {
         composition: comp,
         size,
@@ -38,6 +39,7 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
         bondMultiplier,
         energy,
         diffusionRate,
+        diffusionThreshold,
         elementMask
     };
 };

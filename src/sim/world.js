@@ -6,6 +6,10 @@ export class World {
         this.width = width;
         this.height = height;
         this.dt = 10;
+        this._rngState = ((Math.random() * 0xFFFFFFFF) >>> 0) || 0xA5A5A5A5;
+
+        this._tileCount = this.width * this.height;
+        this._tilesFlat = new Array(this._tileCount);
 
         this.baseTemperature = 0.45 + Math.random() * 0.1;
         this.baseSolute = 0.2 + Math.random() * 0.2;
@@ -19,11 +23,12 @@ export class World {
                 tile.__x = x;
                 tile.__y = y;
                 tile.__world = this;
+                const idx = x * height + y;
+                tile.__i = idx;
+                this._tilesFlat[idx] = tile;
                 this.grid[x][y] = tile;
             }
         }
-
-        this._tileCount = this.width * this.height;
 
         this._xPrev = new Int32Array(this.width);
         this._xNext = new Int32Array(this.width);
@@ -150,31 +155,42 @@ export class World {
         moved.length = 0;
         destArrays.length = 0;
 
-        const rand = Math.random;
+        let rng = this._rngState >>> 0;
+        if (rng === 0) rng = 0xA5A5A5A5;
 
         for (let x = 0; x < w; x++) {
             const col = grid[x];
+            const colL = grid[xPrev[x]];
+            const colR = grid[xNext[x]];
             for (let y = 0; y < h; y++) {
                 const tile = col[y];
                 const mols = tile.molecules;
                 const n = mols.length;
                 if (n === 0) continue;
+                const yU = yPrev[y];
+                const yD = yNext[y];
                 let write = 0;
                 let anyMoved = false;
                 for (let read = 0; read < n; read++) {
                     const m = mols[read];
-                    let rate = m.diffusionRate;
-                    if (rand() < rate) {
+                    rng ^= (rng << 13);
+                    rng ^= (rng >>> 17);
+                    rng ^= (rng << 5);
+                    const r = rng >>> 0;
+                    const thr = (m.diffusionThreshold != null)
+                        ? m.diffusionThreshold
+                        : Math.min(0xFFFFFFFF, Math.max(0, Math.floor((m.diffusionRate || 0) * 4294967296)));
+                    if (r < thr) {
                         anyMoved = true;
-                        const dir = (rand() * 4) | 0;
-                        let nx = x;
-                        let ny = y;
-                        if (dir === 0) nx = xNext[x];
-                        else if (dir === 1) nx = xPrev[x];
-                        else if (dir === 2) ny = yNext[y];
-                        else ny = yPrev[y];
+                        rng ^= (rng << 13);
+                        rng ^= (rng >>> 17);
+                        rng ^= (rng << 5);
+                        const dir = (rng >>> 0) & 3;
                         moved.push(m);
-                        destArrays.push(grid[nx][ny].molecules);
+                        if (dir === 0) destArrays.push(colR[y].molecules);
+                        else if (dir === 1) destArrays.push(colL[y].molecules);
+                        else if (dir === 2) destArrays.push(col[yD].molecules);
+                        else destArrays.push(col[yU].molecules);
                     } else {
                         if (anyMoved) mols[write] = m;
                         write++;
@@ -183,52 +199,29 @@ export class World {
                 if (anyMoved) mols.length = write;
             }
         }
+
         for (let i = 0; i < moved.length; i++) {
             destArrays[i].push(moved[i]);
         }
+
+        this._rngState = rng >>> 0;
     }
 
     diffuseScalars() {
         const w = this.width;
         const h = this.height;
-        const grid = this.grid;
-
-        const tileCount = w * h;
-
-        if (!this._tCur || this._tCur.length !== tileCount) {
-            this._tileCount = tileCount;
-            this._xPrev = new Int32Array(w);
-            this._xNext = new Int32Array(w);
-            for (let x = 0; x < w; x++) {
-                this._xPrev[x] = (x === 0) ? (w - 1) : (x - 1);
-                this._xNext[x] = (x === w - 1) ? 0 : (x + 1);
-            }
-            this._yPrev = new Int32Array(h);
-            this._yNext = new Int32Array(h);
-            for (let y = 0; y < h; y++) {
-                this._yPrev[y] = (y === 0) ? (h - 1) : (y - 1);
-                this._yNext[y] = (y === h - 1) ? 0 : (y + 1);
-            }
-            this._tCur = new Float32Array(tileCount);
-            this._sCur = new Float32Array(tileCount);
-            this._tNext = new Float32Array(tileCount);
-            this._sNext = new Float32Array(tileCount);
-        }
+        const tileCount = this._tileCount;
+        const tiles = this._tilesFlat;
 
         const tCur = this._tCur;
         const sCur = this._sCur;
         const tNext = this._tNext;
         const sNext = this._sNext;
 
-        let idx = 0;
-        for (let x = 0; x < w; x++) {
-            const col = grid[x];
-            for (let y = 0; y < h; y++) {
-                const tile = col[y];
-                tCur[idx] = tile.temperature;
-                sCur[idx] = tile.solute;
-                idx++;
-            }
+        for (let i = 0; i < tileCount; i++) {
+            const tile = tiles[i];
+            tCur[i] = tile.temperature;
+            sCur[i] = tile.solute;
         }
 
         const xPrev = this._xPrev;
@@ -244,70 +237,52 @@ export class World {
         const relax = relaxRatePerSecond * (this.dt / 1000);
 
         for (let x = 0; x < w; x++) {
+            const xL = xPrev[x];
+            const xR = xNext[x];
             const row = x * h;
-            const rowL = xPrev[x] * h;
-            const rowR = xNext[x] * h;
+            const rowL = xL * h;
+            const rowR = xR * h;
 
             for (let y = 0; y < h; y++) {
                 const yU = yPrev[y];
                 const yD = yNext[y];
 
                 const iC = row + y;
-
                 const iLU = rowL + yU;
-                const iLC = rowL + y;
+                const iL = rowL + y;
                 const iLD = rowL + yD;
-
-                const iCU = row + yU;
-                const iCD = row + yD;
-
+                const iU = row + yU;
+                const iD = row + yD;
                 const iRU = rowR + yU;
-                const iRC = rowR + y;
+                const iR = rowR + y;
                 const iRD = rowR + yD;
 
-                const tSum =
-                    tCur[iC] +
-                    tCur[iLU] + tCur[iLC] + tCur[iLD] +
-                    tCur[iCU] + tCur[iCD] +
-                    tCur[iRU] + tCur[iRC] + tCur[iRD];
-
-                const sSum =
-                    sCur[iC] +
-                    sCur[iLU] + sCur[iLC] + sCur[iLD] +
-                    sCur[iCU] + sCur[iCD] +
-                    sCur[iRU] + sCur[iRC] + sCur[iRD];
+                const tSum = tCur[iC] + tCur[iLU] + tCur[iL] + tCur[iLD] + tCur[iU] + tCur[iD] + tCur[iRU] + tCur[iR] + tCur[iRD];
+                const sSum = sCur[iC] + sCur[iLU] + sCur[iL] + sCur[iLD] + sCur[iU] + sCur[iD] + sCur[iRU] + sCur[iR] + sCur[iRD];
 
                 const tAvg = tSum * inv9;
                 const sAvg = sSum * inv9;
 
-                const tDiffused = tCur[iC] * oneMinusAlpha + tAvg * alpha;
-                tNext[iC] = tDiffused + (this.baseTemperature - tDiffused) * relax;
+                const tDiffused = alpha * tAvg + oneMinusAlpha * tCur[iC];
+                const sDiffused = alpha * sAvg + oneMinusAlpha * sCur[iC];
 
-                sNext[iC] = sCur[iC] * oneMinusAlpha + sAvg * alpha;
+                tNext[iC] = tDiffused + (this.baseTemperature - tDiffused) * relax;
+                sNext[iC] = sDiffused;
             }
         }
 
         let sumT = 0;
-        idx = 0;
-        for (let x = 0; x < w; x++) {
-            const col = grid[x];
-            for (let y = 0; y < h; y++) {
-                const tile = col[y];
-
-                let t = tNext[idx];
-                if (t < 0) t = 0;
-                else if (t > 5) t = 5;
-
-                let s = sNext[idx];
-                if (s < 0) s = 0;
-                else if (s > 1) s = 1;
-
-                tile.temperature = t;
-                tile.solute = s;
-
-                sumT += t;
-                idx++;
-            }
+        for (let i = 0; i < tileCount; i++) {
+            const tile = tiles[i];
+            let t = tNext[i];
+            let s = sNext[i];
+            if (t < 0) t = 0;
+            if (t > 1) t = 1;
+            if (s < 0) s = 0;
+            if (s > 1) s = 1;
+            tile.temperature = t;
+            tile.solute = s;
+            sumT += t;
         }
         this.temperatureSum = sumT;
         this.avgTemperature = tileCount > 0 ? (sumT / tileCount) : (this.baseTemperature ?? 0.5);
