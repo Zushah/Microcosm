@@ -322,9 +322,9 @@ export class CanvasRenderer {
 
         const soluteDark = Math.min(0.4, s * 0.6);
 
-        const r = Math.floor(250 - 1 * soluteDark + 100 * warm);
-        const g = Math.floor(250 - 20 * soluteDark - 10 * warm + 20 * cool);
-        const b = Math.floor(250 - 15 * soluteDark + 50 * cool);
+        const r = Math.floor(250 - 1 * soluteDark - 100 * warm);
+        const g = Math.floor(250 - 20 * soluteDark - 220 * warm + 20 * cool);
+        const b = Math.floor(250 - 15 * soluteDark - 220 * warm + 50 * cool);
 
         return [clamp(r, 0, 255) / 255, clamp(g, 0, 255) / 255, clamp(b, 0, 255) / 255];
     }
