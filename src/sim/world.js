@@ -19,9 +19,7 @@ export class World {
         this._tileCount = this.width * this.height;
         this._tilesFlat = new Array(this._tileCount);
 
-        this.baseTemperature = 0.45 + Math.random() * 0.1;
-        this.baseSolute = 0.2 + Math.random() * 0.2;
-        this.temperatureRelaxation = 0.0015;
+        this.baseEnval = Chalkboard.numb.random(-1, 1);
 
         this.grid = [];
         for (let x = 0; x < width; x++) {
@@ -52,13 +50,11 @@ export class World {
             this._yNext[y] = (y === this.height - 1) ? 0 : (y + 1);
         }
 
-        this._tCur = new Float32Array(this._tileCount);
-        this._sCur = new Float32Array(this._tileCount);
-        this._tNext = new Float32Array(this._tileCount);
-        this._sNext = new Float32Array(this._tileCount);
+        this._eCur = new Float32Array(this._tileCount);
+        this._eNext = new Float32Array(this._tileCount);
 
-        this.temperatureSum = this.baseTemperature * this._tileCount;
-        this.avgTemperature = this._tileCount > 0 ? (this.temperatureSum / this._tileCount) : (this.baseTemperature ?? 0.5);
+        this.envalSum = this.baseEnval * this._tileCount;
+        this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
 
         for (let ti = 0; ti < this._tileCount; ti++) {
             const tile = this._tilesFlat[ti];
@@ -78,8 +74,7 @@ export class World {
         return {
             molecules: this.seedMolecules(),
             cells: [],
-            temperature: this.baseTemperature,
-            solute: this.baseSolute
+            enval: this.baseEnval
         };
     }
 
@@ -129,16 +124,19 @@ export class World {
         this.diffuseMolecules();
         const dtSec = this.dt / 1000;
         const grid = this.grid;
-        const env = this._sharedEnv || (this._sharedEnv = { temperature: 0, pH: 0.5, dt: dtSec });
-        env.pH = 0.5;
+        const env = this._sharedEnv || (this._sharedEnv = { enval: 0, tileEnval: 0, localEnval: 0, avgEnval: 0, dt: dtSec });
         env.dt = dtSec;
+        env.avgEnval = this.avgEnval;
         for (let x = 0; x < this.width; x++) {
             const col = grid[x];
             for (let y = 0; y < this.height; y++) {
                 const tile = col[y];
                 const cells = tile.cells;
                 if (!cells || cells.length === 0) continue;
-                env.temperature = tile.temperature;
+                env.enval = tile.enval;
+                env.tileEnval = tile.enval;
+                env.localEnval = this.getLocalEnvalAverage(x, y, 2);
+                env.avgEnval = this.avgEnval;
                 for (let i = 0; i < cells.length; i++) {
                     const cell = cells[i];
                     if (cell._worldRef !== this) cell._worldRef = this;
@@ -155,7 +153,7 @@ export class World {
                 if (write !== cells.length) cells.length = write;
             }
         }
-        this.diffuseScalars();
+        this.diffuseEnval();
     }
 
     _unscheduleMoleculeDiffusion(molecule) {
@@ -349,21 +347,18 @@ export class World {
         this._rngState = rng >>> 0;
     }
 
-    diffuseScalars() {
+    diffuseEnval() {
         const w = this.width;
         const h = this.height;
         const tileCount = this._tileCount;
         const tiles = this._tilesFlat;
 
-        const tCur = this._tCur;
-        const sCur = this._sCur;
-        const tNext = this._tNext;
-        const sNext = this._sNext;
+        const eCur = this._eCur;
+        const eNext = this._eNext;
 
         for (let i = 0; i < tileCount; i++) {
             const tile = tiles[i];
-            tCur[i] = tile.temperature;
-            sCur[i] = tile.solute;
+            eCur[i] = tile.enval;
         }
 
         const xPrev = this._xPrev;
@@ -374,9 +369,6 @@ export class World {
         const alpha = 0.18;
         const oneMinusAlpha = 1 - alpha;
         const inv9 = 1 / 9;
-
-        const relaxRatePerSecond = 0.02;
-        const relax = relaxRatePerSecond * (this.dt / 1000);
 
         for (let x = 0; x < w; x++) {
             const xL = xPrev[x];
@@ -399,35 +391,46 @@ export class World {
                 const iR = rowR + y;
                 const iRD = rowR + yD;
 
-                const tSum = tCur[iC] + tCur[iLU] + tCur[iL] + tCur[iLD] + tCur[iU] + tCur[iD] + tCur[iRU] + tCur[iR] + tCur[iRD];
-                const sSum = sCur[iC] + sCur[iLU] + sCur[iL] + sCur[iLD] + sCur[iU] + sCur[iD] + sCur[iRU] + sCur[iR] + sCur[iRD];
+                const eSum = eCur[iC] + eCur[iLU] + eCur[iL] + eCur[iLD] + eCur[iU] + eCur[iD] + eCur[iRU] + eCur[iR] + eCur[iRD];
+                const eAvg = eSum * inv9;
 
-                const tAvg = tSum * inv9;
-                const sAvg = sSum * inv9;
-
-                const tDiffused = alpha * tAvg + oneMinusAlpha * tCur[iC];
-                const sDiffused = alpha * sAvg + oneMinusAlpha * sCur[iC];
-
-                tNext[iC] = tDiffused + (this.baseTemperature - tDiffused) * relax;
-                sNext[iC] = sDiffused;
+                eNext[iC] = alpha * eAvg + oneMinusAlpha * eCur[iC];
             }
         }
 
-        let sumT = 0;
+        let sumE = 0;
         for (let i = 0; i < tileCount; i++) {
             const tile = tiles[i];
-            let t = tNext[i];
-            let s = sNext[i];
-            if (t < 0) t = 0;
-            if (t > 1) t = 1;
-            if (s < 0) s = 0;
-            if (s > 1) s = 1;
-            tile.temperature = t;
-            tile.solute = s;
-            sumT += t;
+            let e = eNext[i];
+            if (!Number.isFinite(e)) e = 0;
+            tile.enval = e;
+            sumE += e;
         }
-        this.temperatureSum = sumT;
-        this.avgTemperature = tileCount > 0 ? (sumT / tileCount) : (this.baseTemperature ?? 0.5);
+        this.envalSum = sumE;
+        this.avgEnval = tileCount > 0 ? (sumE / tileCount) : (this.baseEnval ?? 0);
+    }
+
+    adjustTileEnval(tile, delta) {
+        if (!tile) return;
+        if (!Number.isFinite(delta) || delta === 0) return;
+        tile.enval += delta;
+        this.envalSum += delta;
+        this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
+    }
+
+    getLocalEnvalAverage(centerX, centerY, radius = 2) {
+        let sum = 0;
+        let count = 0;
+        for (let dx = -radius; dx <= radius; dx++) {
+            const x = (centerX + dx + this.width) % this.width;
+            const col = this.grid[x];
+            for (let dy = -radius; dy <= radius; dy++) {
+                const y = (centerY + dy + this.height) % this.height;
+                sum += col[y].enval;
+                count++;
+            }
+        }
+        return count > 0 ? (sum / count) : 0;
     }
 
     addProductAround(centerX, centerY, product) {
@@ -437,7 +440,13 @@ export class World {
         const clone = createMolecule(cloneComp, product.bondMultiplier || 1.0);
         const tile = this.grid[nx][ny];
         this._addMoleculeToTile(tile, clone);
-        tile.solute = Math.min(1, tile.solute + 0.01);
+    }
+
+    addEnvalAround(centerX, centerY, envalDelta) {
+        if (!Number.isFinite(envalDelta) || envalDelta === 0) return;
+        const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
+        const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
+        this.adjustTileEnval(this.grid[nx][ny], envalDelta);
     }
 
     mooreNeighbors(x, y) {

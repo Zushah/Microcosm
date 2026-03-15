@@ -1,13 +1,17 @@
 import { createMolecule, ELEMENTS } from "./chem.js";
 
 export const ENZYME_CLASSES = {
-    anabolase:  { maxInputs: 3, baseRate: 0.85, energyCost: 0.005 },
-    catabolase:{ maxInputs: 1, baseRate: 0.98, energyCost: 0.006 },
-    transportase: { maxInputs: 0, baseRate: 0.90, energyCost: 0.010 }
+    anabolase: { maxInputs: 3, baseRate: 0.85, energyCost: 0.005, envalThroughput: 0.18 },
+    catabolase: { maxInputs: 1, baseRate: 0.98, energyCost: 0.006, envalThroughput: 0.12 },
+    transportase: { maxInputs: 0, baseRate: 0.90, energyCost: 0.010, envalThroughput: 0.08 }
 };
 
 export let reactionsThisTick = 0;
 export const resetReactionCounter = () => reactionsThisTick = 0;
+
+const DEFAULT_ENVAL_SIGMA = 0.18;
+const DEFAULT_ENVAL_ENERGY_FRACTION = 2 / 3;
+const DEFAULT_ENVAL_RELEASE_FRACTION = 1 / 3;
 
 const _elementDeltaScratch = new Int32Array(6);
 
@@ -47,19 +51,100 @@ const _sampleAcceptedSubstrates = (enzyme, poolA, poolB, maxCount) => {
     return out;
 };
 
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+const computeEnvalFactor = (cell, enzyme, env) => {
+    const localEnval = env.localEnval ?? env.enval ?? 0;
+    const optimalEnval = (cell && cell.genome && typeof cell.genome.optimalEnval === "number")
+        ? cell.genome.optimalEnval
+        : (typeof enzyme.optimalEnval === "number" ? enzyme.optimalEnval : 0);
+    const sigma = Math.max(1e-6, enzyme.envalSigma ?? DEFAULT_ENVAL_SIGMA);
+    const d = localEnval - optimalEnval;
+    const denom = 2 * sigma * sigma;
+    return Math.exp(-(d * d) / denom);
+};
+
+const resolveEnvalPolarity = (cell, env) => {
+    const opt = cell && cell.genome ? (cell.genome.optimalEnval ?? 0) : 0;
+    if (opt > 0) return 1;
+    if (opt < 0) return -1;
+    const avg = env.avgEnval ?? 0;
+    if (avg > 0) return 1;
+    if (avg < 0) return -1;
+    return Math.random() < 0.5 ? -1 : 1;
+};
+
+const computeEnvalExchange = (enzyme, cls, cell, tile, env, envalFactor) => {
+    if (!cell) {
+        return {
+            energyBonus: 0,
+            envalInput: 0,
+            envalOutput: 0,
+            deltaEnval: 0
+        };
+    }
+
+    const polarity = resolveEnvalPolarity(cell, env);
+    const tileEnval = (tile && typeof tile.enval === "number") ? tile.enval : (env.enval ?? 0);
+    const availableAligned = Math.max(0, polarity * tileEnval);
+    if (!(availableAligned > 0)) {
+        return {
+            energyBonus: 0,
+            envalInput: 0,
+            envalOutput: 0,
+            deltaEnval: 0
+        };
+    }
+
+    const maxInput = Math.max(0, (enzyme.envalThroughput ?? cls.envalThroughput ?? 0) * (envalFactor ?? 1));
+    if (!(maxInput > 0)) {
+        return {
+            energyBonus: 0,
+            envalInput: 0,
+            envalOutput: 0,
+            deltaEnval: 0
+        };
+    }
+
+    const inputMagnitude = Math.min(availableAligned, maxInput);
+    if (!(inputMagnitude > 0)) {
+        return {
+            energyBonus: 0,
+            envalInput: 0,
+            envalOutput: 0,
+            deltaEnval: 0
+        };
+    }
+
+    const energyFraction = clamp01(enzyme.envalEnergyFraction ?? DEFAULT_ENVAL_ENERGY_FRACTION);
+    const releaseFraction = clamp01(Math.min(
+        1 - energyFraction,
+        enzyme.envalReleaseFraction ?? DEFAULT_ENVAL_RELEASE_FRACTION
+    ));
+
+    const energyBonus = inputMagnitude * energyFraction;
+    const outputMagnitude = inputMagnitude * releaseFraction;
+
+    const envalInput = polarity * inputMagnitude;
+    const envalOutput = -polarity * outputMagnitude;
+
+    return {
+        energyBonus,
+        envalInput,
+        envalOutput,
+        deltaEnval: envalOutput - envalInput
+    };
+};
+
 export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile = null, cellMolecules = null) => {
     const cls = ENZYME_CLASSES[enzyme.type];
     if (!cls) return null;
-    const T = env.temperature ?? 0.5;
-    const tOpt = enzyme.tOpt ?? 0.5;
-    const tempSigma = enzyme.tempSigma ?? 0.18;
-    const dT = T - tOpt;
-    const denom = 2 * tempSigma * tempSigma;
-    const tempFactor = Math.exp(-(dT * dT) / denom);
-    const pHFactor = Math.exp(-Math.abs((env.pH ?? 0.5) - (enzyme.pHOpt ?? 0.5)));
+
+    const envalFactor = computeEnvalFactor(cell, enzyme, env);
     const baseRate = (typeof cls.baseRate === "number") ? cls.baseRate : 0.8;
-    const rate = Math.min(1, baseRate * 1.2) * tempFactor * pHFactor;
+    const rate = Math.min(1, baseRate * 1.2) * envalFactor;
     if (Math.random() > rate) return null;
+
     let substrates = [];
     if (enzyme.type !== "transportase") {
         const maxInputs = (typeof cls.maxInputs === "number" && cls.maxInputs > 0) ? cls.maxInputs : 1;
@@ -69,17 +154,21 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
         if (substrates.length === 0) return null;
         if (enzyme.type === "anabolase" && substrates.length < 2) return null;
     }
+
+    const envalExchange = computeEnvalExchange(enzyme, cls, cell, tile, env, envalFactor);
+
     let result = null;
     if (enzyme.type === "anabolase") {
-        result = doAnabolase(enzyme, substrates, cls, cell, tile, env);
+        result = doAnabolase(enzyme, substrates, cls, cell, tile, env, envalExchange);
     } else if (enzyme.type === "catabolase") {
-        result = doCatabolase(enzyme, substrates, cls, cell, tile, env);
+        result = doCatabolase(enzyme, substrates, cls, cell, tile, env, envalExchange);
     } else if (enzyme.type === "transportase") {
-        result = doTransportase(enzyme, cls, cell, tile, env);
+        result = doTransportase(enzyme, cls, cell, tile, env, envalExchange);
     } else {
-        result = genericTransform(enzyme, substrates, cls);
+        result = genericTransform(enzyme, substrates, cls, envalExchange);
     }
     if (!result) return null;
+
     const scratch = _elementDeltaScratch;
     scratch[0] = 0;
     scratch[1] = 0;
@@ -87,6 +176,7 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
     scratch[3] = 0;
     scratch[4] = 0;
     scratch[5] = 0;
+
     const consumed = result.consumed || [];
     for (let i = 0; i < consumed.length; i++) {
         const m = consumed[i];
@@ -102,6 +192,7 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
         if (!bp || !bp.composition) continue;
         _accumulateCompDelta(scratch, bp.composition, 1);
     }
+
     let elementDelta = null;
     let sameComposition = true;
     if (scratch[0] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).A = scratch[0]; }
@@ -111,18 +202,24 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
     if (scratch[4] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).E = scratch[4]; }
     if (scratch[5] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).X = scratch[5]; }
     if (elementDelta) result.elementDelta = elementDelta;
+
+    result.efficiencyFactor = envalFactor;
+
     const raw = (typeof result.rawDelta === "number") ? result.rawDelta : NaN;
+    const deltaEnval = (typeof result.deltaEnval === "number") ? result.deltaEnval : 0;
     const ENERGY_NOISE = 1e-2;
-    if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE) return null;
+    if (sameComposition && Number.isFinite(raw) && Math.abs(raw) < ENERGY_NOISE && Math.abs(deltaEnval) < ENERGY_NOISE) return null;
+
     if (enzyme.type === "catabolase") {
         const usable = result.energyDelta || 0;
         if (usable <= 0) return null;
     }
+
     reactionsThisTick++;
     return result;
 };
 
-const doAnabolase = (enzyme, substrates, cls, cell, tile, env) => {
+const doAnabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) => {
     if (!substrates || substrates.length === 0) return null;
     if (substrates.length < 2) return null;
 
@@ -139,28 +236,27 @@ const doAnabolase = (enzyme, substrates, cls, cell, tile, env) => {
     const productEnergy = elementalSum * bondMultiplier;
     const delta = productEnergy - elementalSum;
     const totalCost = delta + (cls.energyCost || 0);
+    const netEnergyDelta = (envalExchange.energyBonus || 0) - totalCost;
 
-    if (!cell || (cell.energy || 0) < totalCost) return null;
+    if (!cell || ((cell.energy || 0) + (envalExchange.energyBonus || 0)) < totalCost) return null;
 
     const product = createMolecule(compTotal, bondMultiplier);
-
-    cell.energy = Math.max(0, (cell.energy || 0) - totalCost);
-
-    const heatDelta = -delta;
 
     return {
         consumed: substrates,
         produced: product,
         byproducts: [],
-        energyDelta: 0,
-        heatDelta,
+        energyDelta: netEnergyDelta,
+        envalInput: envalExchange.envalInput,
+        envalOutput: envalExchange.envalOutput,
+        deltaEnval: envalExchange.deltaEnval,
         substrateAtomEnergy: elementalSum,
         productAtomEnergy: productEnergy,
-        rawDelta: -totalCost
+        rawDelta: netEnergyDelta
     };
 };
 
-const doCatabolase = (enzyme, substrates, cls, cell, tile, env) => {
+const doCatabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) => {
     if (!substrates || substrates.length === 0) return null;
     const mol = substrates[0];
 
@@ -187,25 +283,27 @@ const doCatabolase = (enzyme, substrates, cls, cell, tile, env) => {
 
     const byproducts = fragmentComposition(newComp);
 
-    const rawDelta = rawBondEnergy + transmutedEnergyGain - (cls.energyCost || 0);
+    const chemicalRawDelta = rawBondEnergy + transmutedEnergyGain - (cls.energyCost || 0);
 
     const harvestFraction = enzyme.harvestFraction ?? 0.85;
-    const usableEnergy = Math.max(0, rawDelta * harvestFraction);
-    const heatDelta = rawDelta - usableEnergy;
+    const usableChemicalEnergy = Math.max(0, chemicalRawDelta * harvestFraction);
+    const energyDelta = usableChemicalEnergy + (envalExchange.energyBonus || 0);
 
     return {
         consumed: [mol],
         produced: null,
         byproducts,
-        energyDelta: usableEnergy,
-        heatDelta,
+        energyDelta,
+        envalInput: envalExchange.envalInput,
+        envalOutput: envalExchange.envalOutput,
+        deltaEnval: envalExchange.deltaEnval,
         substrateAtomEnergy: productElementSum,
         productAtomEnergy: productElementSum + rawBondEnergy - transmutedEnergyGain,
-        rawDelta
+        rawDelta: chemicalRawDelta + (envalExchange.energyBonus || 0)
     };
 };
 
-const doTransportase = (enzyme, cls, cell, tile, env) => {
+const doTransportase = (enzyme, cls, cell, tile, env, envalExchange) => {
     if (!cell || !tile) return null;
     const world = tile.__world;
     const wanted = ["D", "E"];
@@ -233,22 +331,25 @@ const doTransportase = (enzyme, cls, cell, tile, env) => {
         }
     }
     if (moved === 0) return null;
+
     const cost = (enzyme.activeCostPerAtom || 0.25) * moved + (cls.energyCost || 0.0);
-    cell.energy = Math.max(0, (cell.energy || 0) - cost);
-    const heatDelta = -0.01 * moved;
+    if (((cell.energy || 0) + (envalExchange.energyBonus || 0)) < cost) return null;
+
     return {
         consumed: [],
         produced: null,
         byproducts: [],
-        energyDelta: 0,
-        heatDelta,
+        energyDelta: (envalExchange.energyBonus || 0) - cost,
+        envalInput: envalExchange.envalInput,
+        envalOutput: envalExchange.envalOutput,
+        deltaEnval: envalExchange.deltaEnval,
         substrateAtomEnergy: 0,
         productAtomEnergy: 0,
-        rawDelta: -cost
+        rawDelta: (envalExchange.energyBonus || 0) - cost
     };
 };
 
-const genericTransform = (enzyme, substrates, cls) => {
+const genericTransform = (enzyme, substrates, cls, envalExchange) => {
     const totalComp = {};
     let substrateAtomEnergy = 0;
     let totalAtoms = 0;
@@ -297,20 +398,21 @@ const genericTransform = (enzyme, substrates, cls) => {
     for (const el in primaryProduct.composition) productAtomEnergy += (ELEMENTS[el].energy || 0) * primaryProduct.composition[el];
     for (const bp of byps) for (const el in bp.composition) productAtomEnergy += (ELEMENTS[el].energy || 0) * bp.composition[el];
 
-    const rawDelta = substrateAtomEnergy - productAtomEnergy - (cls.energyCost || 0) + transgain;
+    const chemicalRawDelta = substrateAtomEnergy - productAtomEnergy - (cls.energyCost || 0) + transgain;
     const harvestFraction = enzyme.harvestFraction ?? 0.7;
-    const usableEnergy = Math.max(0, rawDelta * harvestFraction);
-    const heatDelta = rawDelta - usableEnergy;
+    const usableEnergy = Math.max(0, chemicalRawDelta * harvestFraction) + (envalExchange.energyBonus || 0);
 
     return {
         consumed: substrates,
         produced: primaryProduct,
         byproducts: byps,
         energyDelta: usableEnergy,
-        heatDelta,
+        envalInput: envalExchange.envalInput,
+        envalOutput: envalExchange.envalOutput,
+        deltaEnval: envalExchange.deltaEnval,
         substrateAtomEnergy,
         productAtomEnergy,
-        rawDelta
+        rawDelta: chemicalRawDelta + (envalExchange.energyBonus || 0)
     };
 };
 

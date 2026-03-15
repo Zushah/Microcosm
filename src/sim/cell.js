@@ -20,13 +20,24 @@ export class Cell {
     step(env, tile) {
         if (this.state !== "active") return;
 
-        let gainedEnergy = 0;
+        let positiveEnergyGain = 0;
 
         const tileMolecules = tile.molecules;
         const internalMolecules = this.molecules;
         const world = tile.__world;
 
+        const refreshEnv = () => {
+            if (!world || !tile) return;
+            env.enval = tile.enval;
+            env.tileEnval = tile.enval;
+            env.localEnval = world.getLocalEnvalAverage(tile.__x, tile.__y, 2);
+            env.avgEnval = world.avgEnval;
+        };
+
+        refreshEnv();
+
         for (const enzyme of this.genome.enzymes) {
+            const localEnvalBefore = env.localEnval ?? tile.enval ?? 0;
             const result = attemptReaction(enzyme, tileMolecules, env, this, tile, internalMolecules);
             if (!result) continue;
 
@@ -35,9 +46,10 @@ export class Cell {
             }
 
             const eDelta = result.energyDelta || 0;
-            gainedEnergy += eDelta;
-
-            const tBefore = tile.temperature;
+            if (eDelta !== 0) {
+                this.energy += eDelta;
+                if (eDelta > 0) positiveEnergyGain += eDelta;
+            }
 
             this.consumeSubstrates(result.consumed, tile);
 
@@ -53,32 +65,19 @@ export class Cell {
                 else for (const bp of result.byproducts) tileMolecules.push(bp);
             }
 
-            const heat = result.heatDelta || 0;
-            if (heat !== 0 && world) {
-                tile.temperature = Math.max(0, tile.temperature + heat);
-                const hx = heat * 0.18;
-                const x = tile.__x;
-                const y = tile.__y;
-                const xL = world._xPrev[x];
-                const xR = world._xNext[x];
-                const yU = world._yPrev[y];
-                const yD = world._yNext[y];
-                const grid = world.grid;
-                const colL = grid[xL];
-                const col = grid[x];
-                const colR = grid[xR];
-                colL[yU].temperature = Math.max(0, colL[yU].temperature + hx);
-                colL[y].temperature = Math.max(0, colL[y].temperature + hx);
-                colL[yD].temperature = Math.max(0, colL[yD].temperature + hx);
-                col[yU].temperature = Math.max(0, col[yU].temperature + hx);
-                col[yD].temperature = Math.max(0, col[yD].temperature + hx);
-                colR[yU].temperature = Math.max(0, colR[yU].temperature + hx);
-                colR[y].temperature = Math.max(0, colR[y].temperature + hx);
-                colR[yD].temperature = Math.max(0, colR[yD].temperature + hx);
+            const envalInput = result.envalInput || 0;
+            const envalOutput = result.envalOutput || 0;
+            if (envalInput !== 0) {
+                if (world && typeof world.adjustTileEnval === "function") world.adjustTileEnval(tile, -envalInput);
+                else tile.enval -= envalInput;
+            }
+            if (envalOutput !== 0) {
+                if (world && typeof world.addEnvalAround === "function") world.addEnvalAround(tile.__x, tile.__y, envalOutput);
+                else tile.enval += envalOutput;
             }
 
-            const tAfter = tile.temperature;
-            const deltaT = tAfter - tBefore;
+            refreshEnv();
+
             const ageAtEvent = (typeof this.getAgeSecSim === "function") ? this.getAgeSecSim() : 0;
 
             this._pushReactionLog({
@@ -87,8 +86,11 @@ export class Cell {
                 consumed: result.consumed || [],
                 produced: result.produced || null,
                 byproducts: result.byproducts || [],
-                deltaE: Number((result.energyDelta || 0).toFixed(3)),
-                deltaT: Number(deltaT.toFixed(4)),
+                deltaE: Number((eDelta || 0).toFixed(3)),
+                localEnval: Number(localEnvalBefore.toFixed(4)),
+                envalInput: Number((envalInput || 0).toFixed(4)),
+                envalOutput: Number((envalOutput || 0).toFixed(4)),
+                deltaEnval: Number((result.deltaEnval || 0).toFixed(4)),
                 substrateAtomEnergy: Number((result.substrateAtomEnergy || 0).toFixed(3)),
                 productAtomEnergy: Number((result.productAtomEnergy || 0).toFixed(3)),
                 rawDelta: Number((result.rawDelta || 0).toFixed(3)),
@@ -97,9 +99,8 @@ export class Cell {
             });
         }
 
-        if (gainedEnergy > 1e-6) {
-            this.energy += gainedEnergy;
-            this.timeWithoutFood = Math.max(0, this.timeWithoutFood - gainedEnergy * 0.2);
+        if (positiveEnergyGain > 1e-6) {
+            this.timeWithoutFood = Math.max(0, this.timeWithoutFood - positiveEnergyGain * 0.2);
         } else {
             this.timeWithoutFood += env.dt;
         }
@@ -125,35 +126,14 @@ export class Cell {
             }
         }
 
-        const T = tile.temperature;
-        let stressIncrement = 0;
+        refreshEnv();
 
-        const tOptCell = (this.genome.optimalTemp != null)
-            ? this.genome.optimalTemp
-            : (this.genome.enzymes.length
-                ? this.genome.enzymes.reduce((s, en) => s + (en.tOpt ?? 0.5), 0) / this.genome.enzymes.length
-                : 0.5);
+        const localEnval = env.localEnval ?? tile.enval ?? 0;
+        const optimalEnval = (typeof this.genome.optimalEnval === "number") ? this.genome.optimalEnval : 0;
+        const dist = Math.abs(localEnval - optimalEnval);
+        const envalStressFactor = this.genome.envalStressFactor ?? 0.02;
+        const stressIncrement = Math.pow(dist, 1.6) * envalStressFactor * Math.max(1, this.genome.enzymes.length || 1);
 
-        const dist = Math.abs(T - tOptCell);
-        const tempStressFactor = this.genome.tempStressFactor ?? 0.02;
-
-        stressIncrement += Math.pow(dist, 1.6) * tempStressFactor * (this.genome.enzymes.length || 1);
-        this.timeWithoutFood += stressIncrement;
-
-        if (this.timeWithoutFood > this.genome.decayTime) {
-            this._dieAndRelease(tile);
-            return;
-        }
-
-        if (this.energy >= this.genome.reproThreshold) {
-            this.divide(tile);
-        }
-
-        for (const en of this.genome.enzymes) {
-            const tOpt = en.tOpt ?? 0.5;
-            const dist = Math.abs(T - tOpt);
-            stressIncrement += Math.pow(dist, 1.6) * (this.genome.tempStressFactor ?? 0.02);
-        }
         this.timeWithoutFood += stressIncrement;
 
         if (this.timeWithoutFood > this.genome.decayTime) {
@@ -259,7 +239,9 @@ export class Cell {
     }
 
     divide(tile) {
-        const childGenome = mutateGenome(this.genome);
+        const world = this._worldRef;
+        const worldAvgEnval = world ? world.avgEnval : 0;
+        const childGenome = mutateGenome(this.genome, worldAvgEnval);
 
         const childEnergy = this.energy * (0.5 + (Math.random() - 0.5) * 0.1);
         this.energy = Math.max(0, this.energy - childEnergy);
@@ -277,8 +259,6 @@ export class Cell {
         child.molecules = childMolecules;
         child.lineageId = this.lineageId;
         child.birthSimTime = window.SIM_TIME || 0;
-
-        const world = this._worldRef;
 
         let placed = false;
 
@@ -350,16 +330,13 @@ export class Cell {
     _worldHeight() { return this._worldRef ? this._worldRef.height : 200; }
 }
 
-const mutateGenome = (genome) => {
+const mutateGenome = (genome, worldAvgEnval = 0) => {
     const g = JSON.parse(JSON.stringify(genome));
     const mut = g.mutationRate ?? 0.05;
+    const avgEnval = Number.isFinite(worldAvgEnval) ? worldAvgEnval : 0;
 
-    if (typeof g.optimalTemp !== "number") {
-        if (g.enzymes && g.enzymes.length > 0 && typeof g.enzymes[0].tOpt === "number") {
-            g.optimalTemp = g.enzymes[0].tOpt;
-        } else {
-            g.optimalTemp = 0.5;
-        }
+    if (typeof g.optimalEnval !== "number") {
+        g.optimalEnval = avgEnval;
     }
 
     if (Math.random() < mut) {
@@ -372,13 +349,13 @@ const mutateGenome = (genome) => {
         g.defaultSecretionProb = clamp01((g.defaultSecretionProb ?? 0.15) + (Math.random() - 0.5) * 0.2);
     }
     if (Math.random() < mut * 0.5) {
-        g.tempStressFactor = Math.max(
+        g.envalStressFactor = Math.max(
             0.001,
-            (g.tempStressFactor ?? 0.02) * (1 + (Math.random() - 0.5) * 0.3)
+            (g.envalStressFactor ?? 0.02) * (1 + (Math.random() - 0.5) * 0.3)
         );
     }
 
-    g.optimalTemp = biasedPerturb01(g.optimalTemp, 0.10);
+    g.optimalEnval = mutateOptimalEnval(g.optimalEnval, avgEnval, g.envalMutationFloor ?? 0.03);
 
     for (let i = 0; i < g.enzymes.length; i++) {
         if (Math.random() < mut) {
@@ -394,10 +371,20 @@ const mutateGenome = (genome) => {
                 en.type = classes[Math.floor(Math.random() * classes.length)];
             }
             if (Math.random() < mut) {
-                en.pHOpt = clamp01((en.pHOpt ?? 0.5) + (Math.random() - 0.5) * 0.2);
+                en.envalSigma = Math.max(
+                    0.02,
+                    (en.envalSigma ?? 0.18) * (1 + (Math.random() - 0.5) * 0.35)
+                );
             }
             if (Math.random() < mut) {
                 en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (Math.random() - 0.5) * 0.2);
+            }
+            if (Math.random() < mut) {
+                const cls = ENZYME_CLASSES[en.type] || {};
+                en.envalThroughput = Math.max(
+                    0.01,
+                    (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (Math.random() - 0.5) * 0.4)
+                );
             }
         }
     }
@@ -408,17 +395,14 @@ const mutateGenome = (genome) => {
     } else if (Math.random() < mut * 0.3 && g.enzymes.length < 6) {
         const classes = Object.keys(ENZYME_CLASSES);
         const type = classes[Math.floor(Math.random() * classes.length)];
+        const cls = ENZYME_CLASSES[type] || {};
         g.enzymes.push({
             type,
             affinity: { A: Math.random(), B: Math.random(), C: Math.random(), D: Math.random() },
-            tOpt: g.optimalTemp,
-            pHOpt: Math.random(),
+            envalSigma: 0.16 + Math.random() * 0.08,
+            envalThroughput: cls.envalThroughput ?? 0.10,
             secretionProb: Math.random()
         });
-    }
-
-    for (const en of g.enzymes) {
-        en.tOpt = g.optimalTemp;
     }
 
     g.reproThreshold = Math.max(0.01, g.reproThreshold);
@@ -431,15 +415,18 @@ const clamp01 = (v) => {
     return Math.max(0, Math.min(1, v));
 };
 
-const biasedPerturb01 = (value, maxDelta) => {
-    const r = Math.random();
-    if (r < 0.5) return clamp01(value);
-    const delta = maxDelta * Math.random();
-    let v = value + (r < 0.75 ? -delta : delta);
-    return clamp01(v);
-};
+const mutateOptimalEnval = (parentEnval, worldAvgEnval, floor = 0.03) => {
+    const midpoint = (parentEnval + worldAvgEnval) / 2;
+    let step = Math.abs(parentEnval - midpoint);
+    let towardSign = Math.sign(worldAvgEnval - parentEnval);
 
-const compositionToString = (comp) => {
-    if (!comp) return "—";
-    return Object.entries(comp).map(([k, v]) => `${k}${v}`).join("");
+    if (step < floor) {
+        step = floor;
+        if (towardSign === 0) towardSign = Math.random() < 0.5 ? -1 : 1;
+    }
+
+    const r = Math.random();
+    if (r < 0.5) return parentEnval;
+    if (r < 0.75) return parentEnval + towardSign * step;
+    return parentEnval - towardSign * step;
 };

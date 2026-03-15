@@ -314,17 +314,23 @@ export class CanvasRenderer {
     }
 
     _tileRgb01(tile) {
-        const t = Math.max(0, Math.min(1, tile.temperature));
-        const s = Math.max(0, Math.min(1, tile.solute));
+        const v = (typeof tile.enval === "number") ? tile.enval : 0;
+        const mapped = Math.atan(v * 1.25) / (Math.PI * 0.5);
+        const mag = Math.min(1, Math.abs(mapped));
 
-        const cool = Math.max(0, 0.5 - t);
-        const warm = Math.max(0, t - 0.1);
+        let r = 246;
+        let g = 246;
+        let b = 246;
 
-        const soluteDark = Math.min(0.4, s * 0.6);
-
-        const r = Math.floor(250 - 1 * soluteDark - 100 * warm);
-        const g = Math.floor(250 - 20 * soluteDark - 220 * warm + 20 * cool);
-        const b = Math.floor(250 - 15 * soluteDark - 220 * warm + 50 * cool);
+        if (mapped >= 0) {
+            r = Math.floor(246 - 10 * mag);
+            g = Math.floor(246 - 92 * mag);
+            b = Math.floor(246 - 205 * mag);
+        } else {
+            r = Math.floor(246 - 205 * mag);
+            g = Math.floor(246 - 118 * mag);
+            b = Math.floor(246 - 10 * mag);
+        }
 
         return [clamp(r, 0, 255) / 255, clamp(g, 0, 255) / 255, clamp(b, 0, 255) / 255];
     }

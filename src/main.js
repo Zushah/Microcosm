@@ -62,41 +62,41 @@ const computeLineageRates = (lineageId) => {
     };
 };
 
-const currentAverageTemperature = () => {
-    if (Number.isFinite(world.avgTemperature)) return world.avgTemperature;
+const currentAverageEnval = () => {
+    if (Number.isFinite(world.avgEnval)) return world.avgEnval;
     let sum = 0;
     for (let x = 0; x < world.width; x++) {
         for (let y = 0; y < world.height; y++) {
-            sum += world.grid[x][y].temperature;
+            sum += world.grid[x][y].enval;
         }
     }
     const count = world.width * world.height;
-    if (count === 0) return world.baseTemperature ?? 0.5;
+    if (count === 0) return world.baseEnval ?? 0;
     return sum / count;
 };
 
 const randomGenome = () => {
-    const avgT = currentAverageTemperature();
-    const opt = Math.max(0, Math.min(1, avgT + (Math.random() - 0.5) * 0.10));
+    const avgEnval = currentAverageEnval();
+    const opt = avgEnval + (Math.random() - 0.5) * 0.20;
 
     return {
-        optimalTemp: opt,
+        optimalEnval: opt,
         enzymes: [
             {
                 type: "anabolase",
                 affinity: { A: 1, B: 0.5, C: 0.3 },
-                tOpt: opt,
-                pHOpt: Math.random(),
                 bondMultiplier: 1.15,
-                secretionProb: 0.12
+                secretionProb: 0.12,
+                envalSigma: 0.16 + Math.random() * 0.08,
+                envalThroughput: 0.18
             },
             {
                 type: "catabolase",
                 affinity: { D: 1, E: 1 },
-                tOpt: opt,
-                pHOpt: Math.random(),
                 transmuteProb: 0.35,
-                harvestFraction: 0.8
+                harvestFraction: 0.8,
+                envalSigma: 0.16 + Math.random() * 0.08,
+                envalThroughput: 0.12
             }
         ],
         reproThreshold: 2 + Math.random() * 6,
@@ -106,7 +106,8 @@ const randomGenome = () => {
         mutationRate: 0.06,
         postDivideMortality: 0.0,
         desiredElementReserve: 2,
-        tempStressFactor: 0.02,
+        envalStressFactor: 0.02,
+        envalMutationFloor: 0.03,
         lineageId: Math.floor(Math.random() * 1e9)
     };
 };
@@ -238,7 +239,9 @@ const enzymeSignature = (e) => {
     const affinityKeys = e.affinity ? Object.keys(e.affinity).sort().join(",") : "any";
     const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
     const tp = (typeof e.transmuteProb === "number") ? e.transmuteProb.toFixed(2) : "tpX";
-    return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}`;
+    const es = (typeof e.envalSigma === "number") ? e.envalSigma.toFixed(2) : "esX";
+    const et = (typeof e.envalThroughput === "number") ? e.envalThroughput.toFixed(2) : "etX";
+    return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}|es:${es}|et:${et}`;
 };
 
 const livingCells = new Set();
@@ -392,8 +395,8 @@ const updateHud = () => {
         const avgPerTile = (total / (world.width * world.height)).toFixed(2);
         parts.push(`${k}:${total} (avg:${avgPerTile})`);
     }
-    const avgT = Number.isFinite(world.avgTemperature) ? world.avgTemperature : (world.baseTemperature ?? 0.5);
-    parts.push(`T_avg:${avgT.toFixed(3)}`);
+    const avgEnval = Number.isFinite(world.avgEnval) ? world.avgEnval : (world.baseEnval ?? 0);
+    parts.push(`enval_avg:${avgEnval.toFixed(3)}`);
     elementsDiv.textContent = parts.join("  •  ");
 };
 
@@ -468,6 +471,13 @@ const formatReactionExpression = (ev) => {
     return `${left} → ${right}`;
 };
 
+const formatEnvalExchange = (ev) => {
+    const input = (typeof ev.envalInput === "number") ? ev.envalInput : 0;
+    const output = (typeof ev.envalOutput === "number") ? ev.envalOutput : 0;
+    const delta = (typeof ev.deltaEnval === "number") ? ev.deltaEnval : (output - input);
+    return `${input.toFixed(3)}→${output.toFixed(3)} (${delta.toFixed(3)})`;
+};
+
 const buildCellInfoHtml = (cell) => {
     if (!cell) {
         return {
@@ -484,6 +494,18 @@ const buildCellInfoHtml = (cell) => {
     const totalStoredEnergy = (cell.energy || 0) + internalMolEnergy;
 
     const dom = cell.getDominantElement ? (cell.getDominantElement() || "none") : "none";
+    const optimalEnval = (typeof cell.genome.optimalEnval === "number") ? cell.genome.optimalEnval : 0;
+    const localEnval = (
+        cell._worldRef &&
+        typeof cell._tileX === "number" &&
+        typeof cell._tileY === "number" &&
+        typeof cell._worldRef.getLocalEnvalAverage === "function"
+    )
+        ? cell._worldRef.getLocalEnvalAverage(cell._tileX, cell._tileY, 2)
+        : 0;
+    const worldAvgEnval = (cell._worldRef && Number.isFinite(cell._worldRef.avgEnval))
+        ? cell._worldRef.avgEnval
+        : 0;
 
     let moleculesHtml = "";
     if (!cell.molecules || cell.molecules.length === 0) {
@@ -500,7 +522,10 @@ const buildCellInfoHtml = (cell) => {
     let enzymesHtml = "<ul style='margin:4px 0 8px 18px;padding:0;'>";
     for (const e of cell.genome.enzymes) {
         const eq = enzymeEquationString(e);
-        enzymesHtml += `<li><strong>${e.type}</strong> — <code>${eq}</code> (tOpt:${(e.tOpt ?? 0.5).toFixed(2)}, pH:${(e.pHOpt ?? 0.5).toFixed(2)}, sec:${(e.secretionProb ?? cell.genome.defaultSecretionProb).toFixed(2)})</li>`;
+        const sigma = (e.envalSigma ?? 0.18).toFixed(2);
+        const throughput = (e.envalThroughput ?? 0).toFixed(3);
+        const secretion = (e.secretionProb ?? cell.genome.defaultSecretionProb ?? 0).toFixed(2);
+        enzymesHtml += `<li><strong>${e.type}</strong> — <code>${eq}</code> (σenv:${sigma}, thr:${throughput}, sec:${secretion})</li>`;
     }
     enzymesHtml += "</ul>";
 
@@ -508,12 +533,13 @@ const buildCellInfoHtml = (cell) => {
     if (!cell.reactionLog || cell.reactionLog.length === 0) {
         reactionHtml = "<div class='smallNote'>No recent reactions logged for this cell.</div>";
     } else {
-        reactionHtml = "<table style='width:100%;font-size:12px;border-collapse:collapse;'><thead><tr style='text-align:left;'><th>t@evt(s)</th><th>Reaction</th><th>ΔE</th><th>ΔT</th><th>Es</th><th>Ep</th><th>rawΔ</th></tr></thead><tbody>";
+        reactionHtml = "<table style='width:100%;font-size:12px;border-collapse:collapse;'><thead><tr style='text-align:left;'><th>t@evt(s)</th><th>Reaction</th><th>ΔE</th><th>enval</th><th>Es</th><th>Ep</th><th>rawΔ</th></tr></thead><tbody>";
         const slice = cell.reactionLog.slice(0, 12);
         for (const ev of slice) {
             const tAtEvt = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
             const reactionStr = formatReactionExpression(ev);
-            reactionHtml += `<tr><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${tAtEvt}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'><code>${reactionStr}</code></td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaE}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaT}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.substrateAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.productAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.rawDelta ?? "—"}</td></tr>`;
+            const envalStr = formatEnvalExchange(ev);
+            reactionHtml += `<tr><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${tAtEvt}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'><code>${reactionStr}</code></td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaE}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${envalStr}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.substrateAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.productAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.rawDelta ?? "—"}</td></tr>`;
         }
         reactionHtml += "</tbody></table>";
     }
@@ -525,6 +551,9 @@ const buildCellInfoHtml = (cell) => {
         body: `
             <div><strong>Age:</strong> ${ageSstr}s${deathNote}</div>
             <div><strong>Energy:</strong> ${cell.energy.toFixed(3)} (total stored: ${totalStoredEnergy.toFixed(3)})</div>
+            <div><strong>Optimal enval:</strong> ${optimalEnval.toFixed(3)}</div>
+            <div><strong>Local enval:</strong> ${localEnval.toFixed(3)} (5×5 average)</div>
+            <div><strong>World avg enval:</strong> ${worldAvgEnval.toFixed(3)}</div>
             <div><strong>Dominant element:</strong> ${dom}</div>
             <div style="margin-top:6px;"><strong>Internal molecules</strong>${moleculesHtml}</div>
             <div style="margin-top:6px;"><strong>Enzymes</strong>${enzymesHtml}</div>
@@ -613,7 +642,7 @@ const createCopyReactionsButton = () => {
         const lines = slice.map((ev) => {
             const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
             const reactionStr = formatReactionExpression(ev);
-            return `[t=${time}s] ${reactionStr} | ΔE=${ev.deltaE} | ΔT=${ev.deltaT} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
+            return `[t=${time}s] ${reactionStr} | ΔE=${ev.deltaE} | enval=${formatEnvalExchange(ev)} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
         }).join("\n");
         try {
             await navigator.clipboard.writeText(lines);
