@@ -87,12 +87,21 @@ export class Cell {
                 produced: result.produced || null,
                 byproducts: result.byproducts || [],
                 deltaE: Number((eDelta || 0).toFixed(3)),
+                chemicalDelta: Number((result.chemicalDelta || 0).toFixed(3)),
+                envalEnergy: Number((result.envalEnergy || 0).toFixed(3)),
+                bondEnergyDelta: Number((result.bondEnergyDelta || 0).toFixed(3)),
+                bondEnergyRaw: Number((result.bondEnergyRaw || 0).toFixed(3)),
+                transmutationEnergyDelta: Number((result.transmutationEnergyDelta || 0).toFixed(3)),
+                transmutationEnergyRaw: Number((result.transmutationEnergyRaw || 0).toFixed(3)),
+                catalyticCost: Number((result.catalyticCost || 0).toFixed(3)),
                 localEnval: Number(localEnvalBefore.toFixed(4)),
                 envalInput: Number((envalInput || 0).toFixed(4)),
                 envalOutput: Number((envalOutput || 0).toFixed(4)),
                 deltaEnval: Number((result.deltaEnval || 0).toFixed(4)),
                 substrateAtomEnergy: Number((result.substrateAtomEnergy || 0).toFixed(3)),
                 productAtomEnergy: Number((result.productAtomEnergy || 0).toFixed(3)),
+                substrateBondEnergy: Number((result.substrateBondEnergy || 0).toFixed(3)),
+                productBondEnergy: Number((result.productBondEnergy || 0).toFixed(3)),
                 rawDelta: Number((result.rawDelta || 0).toFixed(3)),
                 ageAtEventSec: Number(ageAtEvent.toFixed(3)),
                 simTime: window.SIM_TIME || 0
@@ -339,6 +348,10 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         g.optimalEnval = avgEnval;
     }
 
+    if (Array.isArray(g.enzymes)) {
+        for (let i = 0; i < g.enzymes.length; i++) applyEnzymeClassDefaults(g.enzymes[i]);
+    }
+
     if (Math.random() < mut) {
         g.reproThreshold = Math.max(0.1, g.reproThreshold * (1 + (Math.random() - 0.5) * 0.2));
     }
@@ -358,8 +371,10 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
     g.optimalEnval = mutateOptimalEnval(g.optimalEnval, avgEnval, g.envalMutationFloor ?? 0.03);
 
     for (let i = 0; i < g.enzymes.length; i++) {
+        const en = g.enzymes[i];
+        applyEnzymeClassDefaults(en);
+
         if (Math.random() < mut) {
-            const en = g.enzymes[i];
             if (!en.affinity) en.affinity = {};
             if (Math.random() < mut) {
                 const possible = ["A", "B", "C", "D", "E", "F"];
@@ -369,6 +384,7 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
             if (Math.random() < mut * 0.2) {
                 const classes = Object.keys(ENZYME_CLASSES);
                 en.type = classes[Math.floor(Math.random() * classes.length)];
+                applyEnzymeClassDefaults(en);
             }
             if (Math.random() < mut) {
                 en.envalSigma = Math.max(
@@ -386,7 +402,33 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
                     (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (Math.random() - 0.5) * 0.4)
                 );
             }
+            if (en.type === "anabolase" && Math.random() < mut) {
+                const cls = ENZYME_CLASSES[en.type] || {};
+                en.bondMultiplier = Math.max(
+                    1.01,
+                    (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (Math.random() - 0.5) * 0.18)
+                );
+            }
+            if (en.type === "catabolase") {
+                const cls = ENZYME_CLASSES[en.type] || {};
+                if (Math.random() < mut) {
+                    en.transmuteProb = clamp01(
+                        (en.transmuteProb ?? cls.transmuteProb ?? 0.35) + (Math.random() - 0.5) * 0.18
+                    );
+                }
+                if (Math.random() < mut) {
+                    en.bondHarvestFraction = clamp01(
+                        (en.bondHarvestFraction ?? cls.bondHarvestFraction ?? 0.96) + (Math.random() - 0.5) * 0.10
+                    );
+                }
+                if (Math.random() < mut) {
+                    en.transmuteHarvestFraction = clamp01(
+                        (en.transmuteHarvestFraction ?? cls.transmuteHarvestFraction ?? 0.80) + (Math.random() - 0.5) * 0.16
+                    );
+                }
+            }
         }
+        applyEnzymeClassDefaults(en);
     }
 
     if (Math.random() < mut * 0.3 && g.enzymes.length > 0) {
@@ -396,13 +438,15 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         const classes = Object.keys(ENZYME_CLASSES);
         const type = classes[Math.floor(Math.random() * classes.length)];
         const cls = ENZYME_CLASSES[type] || {};
-        g.enzymes.push({
+        const enzyme = {
             type,
             affinity: { A: Math.random(), B: Math.random(), C: Math.random(), D: Math.random() },
             envalSigma: 0.16 + Math.random() * 0.08,
             envalThroughput: cls.envalThroughput ?? 0.10,
             secretionProb: Math.random()
-        });
+        };
+        applyEnzymeClassDefaults(enzyme);
+        g.enzymes.push(enzyme);
     }
 
     g.reproThreshold = Math.max(0.01, g.reproThreshold);
@@ -413,6 +457,39 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
 
 const clamp01 = (v) => {
     return Math.max(0, Math.min(1, v));
+};
+
+const applyEnzymeClassDefaults = (enzyme) => {
+    if (!enzyme || !enzyme.type) return enzyme;
+    const cls = ENZYME_CLASSES[enzyme.type] || {};
+
+    if (typeof enzyme.envalSigma !== "number") enzyme.envalSigma = 0.16 + Math.random() * 0.08;
+    if (typeof enzyme.envalThroughput !== "number") enzyme.envalThroughput = cls.envalThroughput ?? 0.10;
+    if (typeof enzyme.secretionProb !== "number") enzyme.secretionProb = 0.15;
+
+    if (enzyme.type === "anabolase") {
+        if (typeof enzyme.bondMultiplier !== "number") enzyme.bondMultiplier = cls.bondMultiplier ?? 1.15;
+        delete enzyme.transmuteProb;
+        delete enzyme.bondHarvestFraction;
+        delete enzyme.transmuteHarvestFraction;
+    } else if (enzyme.type === "catabolase") {
+        if (typeof enzyme.transmuteProb !== "number") enzyme.transmuteProb = cls.transmuteProb ?? 0.35;
+        if (typeof enzyme.bondHarvestFraction !== "number") {
+            enzyme.bondHarvestFraction = cls.bondHarvestFraction ?? 0.96;
+        }
+        if (typeof enzyme.transmuteHarvestFraction !== "number") {
+            enzyme.transmuteHarvestFraction = enzyme.harvestFraction ?? cls.transmuteHarvestFraction ?? 0.80;
+        }
+        delete enzyme.bondMultiplier;
+    } else {
+        delete enzyme.bondMultiplier;
+        delete enzyme.transmuteProb;
+        delete enzyme.bondHarvestFraction;
+        delete enzyme.transmuteHarvestFraction;
+    }
+
+    delete enzyme.harvestFraction;
+    return enzyme;
 };
 
 const mutateOptimalEnval = (parentEnval, worldAvgEnval, floor = 0.03) => {

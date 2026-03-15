@@ -94,7 +94,8 @@ const randomGenome = () => {
                 type: "catabolase",
                 affinity: { D: 1, E: 1 },
                 transmuteProb: 0.35,
-                harvestFraction: 0.8,
+                bondHarvestFraction: 0.96,
+                transmuteHarvestFraction: 0.80,
                 envalSigma: 0.16 + Math.random() * 0.08,
                 envalThroughput: 0.12
             }
@@ -239,9 +240,11 @@ const enzymeSignature = (e) => {
     const affinityKeys = e.affinity ? Object.keys(e.affinity).sort().join(",") : "any";
     const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
     const tp = (typeof e.transmuteProb === "number") ? e.transmuteProb.toFixed(2) : "tpX";
+    const hb = (typeof e.bondHarvestFraction === "number") ? e.bondHarvestFraction.toFixed(2) : "hbX";
+    const ht = (typeof e.transmuteHarvestFraction === "number") ? e.transmuteHarvestFraction.toFixed(2) : "htX";
     const es = (typeof e.envalSigma === "number") ? e.envalSigma.toFixed(2) : "esX";
     const et = (typeof e.envalThroughput === "number") ? e.envalThroughput.toFixed(2) : "etX";
-    return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}|es:${es}|et:${et}`;
+    return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}|hb:${hb}|ht:${ht}|es:${es}|et:${et}`;
 };
 
 const livingCells = new Set();
@@ -478,6 +481,27 @@ const formatEnvalExchange = (ev) => {
     return `${input.toFixed(3)}→${output.toFixed(3)} (${delta.toFixed(3)})`;
 };
 
+const formatEnergyTerm = (v) => {
+    return (typeof v === "number" && Number.isFinite(v)) ? v.toFixed(3) : "—";
+};
+
+const enzymeParameterString = (enzyme, genome) => {
+    const sigma = (enzyme.envalSigma ?? 0.18).toFixed(2);
+    const throughput = (enzyme.envalThroughput ?? 0).toFixed(3);
+    const secretion = (enzyme.secretionProb ?? genome.defaultSecretionProb ?? 0).toFixed(2);
+    const parts = [`σenv:${sigma}`, `thr:${throughput}`, `sec:${secretion}`];
+
+    if (enzyme.type === "anabolase") {
+        parts.unshift(`β:${(enzyme.bondMultiplier ?? 1.15).toFixed(2)}`);
+    } else if (enzyme.type === "catabolase") {
+        parts.unshift(`ht:${(enzyme.transmuteHarvestFraction ?? 0.80).toFixed(2)}`);
+        parts.unshift(`hb:${(enzyme.bondHarvestFraction ?? 0.96).toFixed(2)}`);
+        parts.unshift(`tp:${(enzyme.transmuteProb ?? 0.35).toFixed(2)}`);
+    }
+
+    return parts.join(", ");
+};
+
 const buildCellInfoHtml = (cell) => {
     if (!cell) {
         return {
@@ -522,10 +546,8 @@ const buildCellInfoHtml = (cell) => {
     let enzymesHtml = "<ul style='margin:4px 0 8px 18px;padding:0;'>";
     for (const e of cell.genome.enzymes) {
         const eq = enzymeEquationString(e);
-        const sigma = (e.envalSigma ?? 0.18).toFixed(2);
-        const throughput = (e.envalThroughput ?? 0).toFixed(3);
-        const secretion = (e.secretionProb ?? cell.genome.defaultSecretionProb ?? 0).toFixed(2);
-        enzymesHtml += `<li><strong>${e.type}</strong> — <code>${eq}</code> (σenv:${sigma}, thr:${throughput}, sec:${secretion})</li>`;
+        const params = enzymeParameterString(e, cell.genome);
+        enzymesHtml += `<li><strong>${e.type}</strong> — <code>${eq}</code> (${params})</li>`;
     }
     enzymesHtml += "</ul>";
 
@@ -533,13 +555,13 @@ const buildCellInfoHtml = (cell) => {
     if (!cell.reactionLog || cell.reactionLog.length === 0) {
         reactionHtml = "<div class='smallNote'>No recent reactions logged for this cell.</div>";
     } else {
-        reactionHtml = "<table style='width:100%;font-size:12px;border-collapse:collapse;'><thead><tr style='text-align:left;'><th>t@evt(s)</th><th>Reaction</th><th>ΔE</th><th>enval</th><th>Es</th><th>Ep</th><th>rawΔ</th></tr></thead><tbody>";
+        reactionHtml = "<table style='width:100%;font-size:12px;border-collapse:collapse;'><thead><tr style='text-align:left;'><th>t@evt(s)</th><th>Reaction</th><th>ΔE</th><th>enval</th><th>Eenv</th><th>Echem</th><th>Ebond</th><th>Etrans</th><th>Ecat</th></tr></thead><tbody>";
         const slice = cell.reactionLog.slice(0, 12);
         for (const ev of slice) {
             const tAtEvt = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
             const reactionStr = formatReactionExpression(ev);
             const envalStr = formatEnvalExchange(ev);
-            reactionHtml += `<tr><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${tAtEvt}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'><code>${reactionStr}</code></td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.deltaE}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${envalStr}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.substrateAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.productAtomEnergy ?? "—"}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${ev.rawDelta ?? "—"}</td></tr>`;
+            reactionHtml += `<tr><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${tAtEvt}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'><code>${reactionStr}</code></td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${formatEnergyTerm(ev.deltaE)}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${envalStr}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${formatEnergyTerm(ev.envalEnergy)}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${formatEnergyTerm(ev.chemicalDelta)}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${formatEnergyTerm(ev.bondEnergyDelta)}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${formatEnergyTerm(ev.transmutationEnergyDelta)}</td><td style='padding:4px 6px;border-bottom:1px solid rgba(0,0,0,0.06)'>${formatEnergyTerm(ev.catalyticCost)}</td></tr>`;
         }
         reactionHtml += "</tbody></table>";
     }
@@ -642,7 +664,7 @@ const createCopyReactionsButton = () => {
         const lines = slice.map((ev) => {
             const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
             const reactionStr = formatReactionExpression(ev);
-            return `[t=${time}s] ${reactionStr} | ΔE=${ev.deltaE} | enval=${formatEnvalExchange(ev)} | Es=${ev.substrateAtomEnergy} | Ep=${ev.productAtomEnergy} | rawΔ=${ev.rawDelta}`;
+            return `[t=${time}s] ${reactionStr} | ΔE=${formatEnergyTerm(ev.deltaE)} | enval=${formatEnvalExchange(ev)} | Eenv=${formatEnergyTerm(ev.envalEnergy)} | Echem=${formatEnergyTerm(ev.chemicalDelta)} | Ebond=${formatEnergyTerm(ev.bondEnergyDelta)} | Etrans=${formatEnergyTerm(ev.transmutationEnergyDelta)} | Ecat=${formatEnergyTerm(ev.catalyticCost)}`;
         }).join("\n");
         try {
             await navigator.clipboard.writeText(lines);

@@ -1,8 +1,24 @@
 import { createMolecule, ELEMENTS } from "./chem.js";
 
 export const ENZYME_CLASSES = {
-    anabolase: { maxInputs: 3, baseRate: 0.85, energyCost: 0.005, envalThroughput: 0.18, envalPump: 0.12 },
-    catabolase: { maxInputs: 1, baseRate: 0.98, energyCost: 0.006, envalThroughput: 0.12, envalPump: 0.12 },
+    anabolase: {
+        maxInputs: 3,
+        baseRate: 0.85,
+        energyCost: 0.005,
+        envalThroughput: 0.18,
+        envalPump: 0.12,
+        bondMultiplier: 1.15
+    },
+    catabolase: {
+        maxInputs: 1,
+        baseRate: 0.98,
+        energyCost: 0.006,
+        envalThroughput: 0.12,
+        envalPump: 0.12,
+        transmuteProb: 0.35,
+        bondHarvestFraction: 0.96,
+        transmuteHarvestFraction: 0.80
+    },
     transportase: { maxInputs: 0, baseRate: 0.90, energyCost: 0.010, envalThroughput: 0.08, envalPump: 0.03 }
 };
 
@@ -199,36 +215,53 @@ const doAnabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) =>
     if (!substrates || substrates.length === 0) return null;
     if (substrates.length < 2) return null;
 
-    let elementalSum = 0;
+    let substrateElementSum = 0;
+    let substrateBondEnergy = 0;
     const compTotal = {};
     for (const m of substrates) {
+        substrateElementSum += calcElementalSum(m);
+        substrateBondEnergy += calcBondEnergy(m);
         for (const el in m.composition) {
             compTotal[el] = (compTotal[el] || 0) + m.composition[el];
-            elementalSum += (ELEMENTS[el].energy || 0) * m.composition[el];
         }
     }
 
-    const bondMultiplier = enzyme.bondMultiplier ?? 1.05;
-    const productEnergy = elementalSum * bondMultiplier;
-    const delta = productEnergy - elementalSum;
-    const totalCost = delta + (cls.energyCost || 0);
-    const netEnergyDelta = (envalExchange.energyBonus || 0) - totalCost;
-
-    if (!cell || ((cell.energy || 0) + (envalExchange.energyBonus || 0)) < totalCost) return null;
-
+    const bondMultiplier = enzyme.bondMultiplier ?? cls.bondMultiplier ?? 1.15;
     const product = createMolecule(compTotal, bondMultiplier);
+    const productElementSum = calcElementalSum(product);
+    const productBondEnergy = calcBondEnergy(product);
+
+    const additionalBondStorage = productBondEnergy - substrateBondEnergy;
+    const catalyticCost = cls.energyCost || 0;
+    const envalEnergy = envalExchange.energyBonus || 0;
+    const requiredEnergy = Math.max(0, additionalBondStorage) + catalyticCost;
+
+    if (!cell || ((cell.energy || 0) + envalEnergy) < requiredEnergy) return null;
+
+    const bondEnergyDelta = -additionalBondStorage;
+    const chemicalDelta = bondEnergyDelta - catalyticCost;
+    const netEnergyDelta = chemicalDelta + envalEnergy;
 
     return {
         consumed: substrates,
         produced: product,
         byproducts: [],
         energyDelta: netEnergyDelta,
+        chemicalDelta,
+        bondEnergyDelta,
+        bondEnergyRaw: -additionalBondStorage,
+        transmutationEnergyDelta: 0,
+        transmutationEnergyRaw: 0,
+        catalyticCost,
+        envalEnergy,
         envalInput: envalExchange.envalInput,
         envalOutput: envalExchange.envalOutput,
         deltaEnval: envalExchange.deltaEnval,
-        substrateAtomEnergy: elementalSum,
-        productAtomEnergy: productEnergy,
-        rawDelta: netEnergyDelta
+        substrateAtomEnergy: substrateElementSum,
+        productAtomEnergy: productElementSum,
+        substrateBondEnergy,
+        productBondEnergy,
+        rawDelta: chemicalDelta
     };
 };
 
@@ -236,13 +269,10 @@ const doCatabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) =
     if (!substrates || substrates.length === 0) return null;
     const mol = substrates[0];
 
-    const productElementSum = mol.elementalEnergySum || calcElementalSum(mol);
-    const productEnergy = mol.energy || productElementSum * (mol.bondMultiplier || 1.0);
+    const substrateElementSum = calcElementalSum(mol);
+    const substrateBondEnergy = calcBondEnergy(mol);
 
-    const rawBondEnergy = productEnergy - productElementSum;
-
-    const transmuteProb = enzyme.transmuteProb ?? 0.75;
-    let transmutedEnergyGain = 0;
+    const transmuteProb = clamp01(enzyme.transmuteProb ?? cls.transmuteProb ?? 0.75);
     const newComp = Object.assign({}, mol.composition);
     if (Math.random() < transmuteProb) {
         for (const el of ["D", "E"]) {
@@ -250,32 +280,51 @@ const doCatabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) =
                 newComp[el] -= 1;
                 if (newComp[el] === 0) delete newComp[el];
                 newComp["F"] = (newComp["F"] || 0) + 1;
-                const before = ELEMENTS[el].energy || 0;
-                const after = ELEMENTS["F"].energy || 0;
-                transmutedEnergyGain += (before - after);
             }
         }
     }
 
     const byproducts = fragmentComposition(newComp);
+    const productElementSum = calcCompositionSum(newComp);
+    const productBondEnergy = calcBondEnergyCollection(byproducts);
 
-    const chemicalRawDelta = rawBondEnergy + transmutedEnergyGain - (cls.energyCost || 0);
+    const bondEnergyReleasedRaw = Math.max(0, substrateBondEnergy - productBondEnergy);
+    const transmutationEnergyRaw = substrateElementSum - productElementSum;
 
-    const harvestFraction = enzyme.harvestFraction ?? 0.85;
-    const usableChemicalEnergy = Math.max(0, chemicalRawDelta * harvestFraction);
-    const energyDelta = usableChemicalEnergy + (envalExchange.energyBonus || 0);
+    const bondHarvestFraction = clamp01(
+        enzyme.bondHarvestFraction ?? cls.bondHarvestFraction ?? enzyme.harvestFraction ?? 0.85
+    );
+    const transmuteHarvestFraction = clamp01(
+        enzyme.transmuteHarvestFraction ?? enzyme.harvestFraction ?? cls.transmuteHarvestFraction ?? 0.85
+    );
+
+    const bondEnergyDelta = Math.max(0, bondEnergyReleasedRaw) * bondHarvestFraction;
+    const transmutationEnergyDelta = Math.max(0, transmutationEnergyRaw) * transmuteHarvestFraction;
+    const catalyticCost = cls.energyCost || 0;
+    const envalEnergy = envalExchange.energyBonus || 0;
+    const chemicalDelta = bondEnergyDelta + transmutationEnergyDelta - catalyticCost;
+    const energyDelta = chemicalDelta + envalEnergy;
 
     return {
         consumed: [mol],
         produced: null,
         byproducts,
         energyDelta,
+        chemicalDelta,
+        bondEnergyDelta,
+        bondEnergyRaw: bondEnergyReleasedRaw,
+        transmutationEnergyDelta,
+        transmutationEnergyRaw,
+        catalyticCost,
+        envalEnergy,
         envalInput: envalExchange.envalInput,
         envalOutput: envalExchange.envalOutput,
         deltaEnval: envalExchange.deltaEnval,
-        substrateAtomEnergy: productElementSum,
-        productAtomEnergy: productElementSum + rawBondEnergy - transmutedEnergyGain,
-        rawDelta: chemicalRawDelta + (envalExchange.energyBonus || 0)
+        substrateAtomEnergy: substrateElementSum,
+        productAtomEnergy: productElementSum,
+        substrateBondEnergy,
+        productBondEnergy,
+        rawDelta: chemicalDelta
     };
 };
 
@@ -309,19 +358,29 @@ const doTransportase = (enzyme, cls, cell, tile, env, envalExchange) => {
     if (moved === 0) return null;
 
     const cost = (enzyme.activeCostPerAtom || 0.25) * moved + (cls.energyCost || 0.0);
-    if (((cell.energy || 0) + (envalExchange.energyBonus || 0)) < cost) return null;
+    const envalEnergy = envalExchange.energyBonus || 0;
+    if (((cell.energy || 0) + envalEnergy) < cost) return null;
 
     return {
         consumed: [],
         produced: null,
         byproducts: [],
-        energyDelta: (envalExchange.energyBonus || 0) - cost,
+        energyDelta: envalEnergy - cost,
+        chemicalDelta: -cost,
+        bondEnergyDelta: 0,
+        bondEnergyRaw: 0,
+        transmutationEnergyDelta: 0,
+        transmutationEnergyRaw: 0,
+        catalyticCost: cost,
+        envalEnergy,
         envalInput: envalExchange.envalInput,
         envalOutput: envalExchange.envalOutput,
         deltaEnval: envalExchange.deltaEnval,
         substrateAtomEnergy: 0,
         productAtomEnergy: 0,
-        rawDelta: (envalExchange.energyBonus || 0) - cost
+        substrateBondEnergy: 0,
+        productBondEnergy: 0,
+        rawDelta: -cost
     };
 };
 
@@ -376,19 +435,30 @@ const genericTransform = (enzyme, substrates, cls, envalExchange) => {
 
     const chemicalRawDelta = substrateAtomEnergy - productAtomEnergy - (cls.energyCost || 0) + transgain;
     const harvestFraction = enzyme.harvestFraction ?? 0.7;
-    const usableEnergy = Math.max(0, chemicalRawDelta * harvestFraction) + (envalExchange.energyBonus || 0);
+    const chemicalDelta = Math.max(0, chemicalRawDelta * harvestFraction);
+    const envalEnergy = envalExchange.energyBonus || 0;
+    const usableEnergy = chemicalDelta + envalEnergy;
 
     return {
         consumed: substrates,
         produced: primaryProduct,
         byproducts: byps,
         energyDelta: usableEnergy,
+        chemicalDelta,
+        bondEnergyDelta: 0,
+        bondEnergyRaw: 0,
+        transmutationEnergyDelta: Math.max(0, transgain * harvestFraction),
+        transmutationEnergyRaw: transgain,
+        catalyticCost: cls.energyCost || 0,
+        envalEnergy,
         envalInput: envalExchange.envalInput,
         envalOutput: envalExchange.envalOutput,
         deltaEnval: envalExchange.deltaEnval,
         substrateAtomEnergy,
         productAtomEnergy,
-        rawDelta: chemicalRawDelta + (envalExchange.energyBonus || 0)
+        substrateBondEnergy: 0,
+        productBondEnergy: 0,
+        rawDelta: chemicalDelta
     };
 };
 
@@ -447,6 +517,28 @@ const fragmentComposition = (comp) => {
 
 const calcElementalSum = (mol) => {
     let s = 0;
+    if (!mol || !mol.composition) return s;
     for (const el in mol.composition) s += (ELEMENTS[el].energy || 0) * mol.composition[el];
+    return s;
+};
+
+const calcCompositionSum = (comp) => {
+    let s = 0;
+    if (!comp) return s;
+    for (const el in comp) s += (ELEMENTS[el].energy || 0) * comp[el];
+    return s;
+};
+
+const calcBondEnergy = (mol) => {
+    if (!mol || !mol.composition) return 0;
+    const elementalSum = calcElementalSum(mol);
+    const totalEnergy = elementalSum * (mol.bondMultiplier || 1.0);
+    return Math.max(0, totalEnergy - elementalSum);
+};
+
+const calcBondEnergyCollection = (molecules) => {
+    let s = 0;
+    if (!molecules) return s;
+    for (let i = 0; i < molecules.length; i++) s += calcBondEnergy(molecules[i]);
     return s;
 };
