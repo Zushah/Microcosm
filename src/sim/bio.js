@@ -1,4 +1,11 @@
-import { createMolecule, ELEMENTS } from "./chem.js";
+import {
+    createMolecule,
+    ELEMENTS,
+    ALL_ELEMENT_MASK,
+    compositionToElementMask,
+    elementToMask,
+    normalizeSpecificityMask
+} from "./chem.js";
 
 export const ENZYME_CLASSES = {
     anabolase: {
@@ -115,6 +122,29 @@ const _sampleAcceptedSubstrates = (enzyme, poolA, poolB, maxCount) => {
 };
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+const specificityMaskFromLegacyAffinity = (affinity) => {
+    if (!affinity) return 0;
+    return compositionToElementMask(affinity);
+};
+
+const getSpecificityMask = (enzyme) => {
+    if (!enzyme) return ALL_ELEMENT_MASK;
+
+    let mask = enzyme.specificityMask;
+    if (!Number.isFinite(mask) && enzyme.affinity) {
+        mask = specificityMaskFromLegacyAffinity(enzyme.affinity);
+    }
+
+    mask = normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
+    enzyme.specificityMask = mask;
+
+    delete enzyme.affinity;
+    delete enzyme._affinityMask;
+
+    return mask;
+};
+
 
 const computeEnvalFactor = (cell, enzyme, env) => {
     const localEnval = env.localEnval ?? env.enval ?? 0;
@@ -311,10 +341,10 @@ const doAnabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) =>
     };
 };
 
-const getAffinityWeight = (enzyme, el) => {
-    if (!enzyme || !enzyme.affinity) return 1;
-    const w = enzyme.affinity[el];
-    return (typeof w === "number" && w > 0) ? w : 0;
+const transmutaseElementWeight = (enzyme, el, count) => {
+    const specificityMask = getSpecificityMask(enzyme);
+    if ((specificityMask & elementToMask(el)) === 0) return 0;
+    return Math.max(0, count || 0);
 };
 
 const chooseWeightedOption = (options) => {
@@ -427,7 +457,7 @@ const doTransmutase = (enzyme, substrates, cls, cell, tile, env, envalExchange) 
         const count = mol.composition[el] || 0;
         if (count <= 0) continue;
 
-        const weight = getAffinityWeight(enzyme, el);
+        const weight = transmutaseElementWeight(enzyme, el, count);
         if (weight <= 0) continue;
 
         const uphillTarget = TRANSMUTATION_UP[el];
@@ -609,38 +639,19 @@ const genericTransform = (enzyme, substrates, cls, envalExchange) => {
 
 const enzymeAccepts = (enzyme, molecule) => {
     if (!enzyme) return true;
-    if (enzyme.type === "catabolase") {
-        const bm = molecule.bondMultiplier || 1.0;
-        const size = molecule.composition ? computeCompositionSize(molecule.composition) : (molecule.size || 0);
-        if (bm > 1.0 + 1e-6 && size > 1) {
-            return true;
-        }
+
+    const specificityMask = getSpecificityMask(enzyme);
+    const moleculeMask = molecule && molecule.composition
+        ? compositionToElementMask(molecule.composition)
+        : (molecule ? molecule.elementMask : 0);
+
+    if (!moleculeMask) return false;
+
+    if (enzyme.type === "transmutase") {
+        return (moleculeMask & specificityMask) !== 0;
     }
-    const affinity = enzyme.affinity;
-    if (!affinity) return true;
-    let affinityMask = enzyme._affinityMask;
-    if (affinityMask == null) {
-        affinityMask = 0;
-        for (const el in affinity) {
-            if (el === "A") affinityMask |= 1;
-            else if (el === "B") affinityMask |= 2;
-            else if (el === "C") affinityMask |= 4;
-            else if (el === "D") affinityMask |= 8;
-            else if (el === "E") affinityMask |= 16;
-            else if (el === "F") affinityMask |= 32;
-        }
-        enzyme._affinityMask = affinityMask;
-    }
-    const mMask = molecule.composition ? computeCompositionMask(molecule.composition) : molecule.elementMask;
-    if (typeof mMask === "number") {
-        return (mMask & affinityMask) !== 0;
-    }
-    if (molecule.composition) {
-        for (const el in affinity) {
-            if (molecule.composition[el]) return true;
-        }
-    }
-    return false;
+
+    return (moleculeMask & ~specificityMask) === 0;
 };
 
 const fragmentComposition = (comp) => {

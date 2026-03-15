@@ -7,26 +7,63 @@ export const ELEMENTS = {
     F: { mass: 1.0, polarity: 0.6, energy: -0.2 }
 };
 
+export const ELEMENT_ORDER = ["A", "B", "C", "D", "E", "F"];
+
+export const ELEMENT_MASKS = {
+    A: 1,
+    B: 2,
+    C: 4,
+    D: 8,
+    E: 16,
+    F: 32
+};
+
+export const ALL_ELEMENT_MASK = ELEMENT_ORDER.reduce((mask, el) => mask | ELEMENT_MASKS[el], 0);
+
+export const elementToMask = (el) => ELEMENT_MASKS[el] || 0;
+
+export const compositionToElementMask = (composition) => {
+    let mask = 0;
+    if (!composition) return mask;
+    for (const el in composition) {
+        if ((composition[el] || 0) > 0) mask |= elementToMask(el);
+    }
+    return mask;
+};
+
+export const maskToElements = (mask) => {
+    const out = [];
+    const normalized = Number.isFinite(mask) ? (mask | 0) : 0;
+    for (let i = 0; i < ELEMENT_ORDER.length; i++) {
+        const el = ELEMENT_ORDER[i];
+        if ((normalized & ELEMENT_MASKS[el]) !== 0) out.push(el);
+    }
+    return out;
+};
+
+export const maskToString = (mask) => {
+    const els = maskToElements(mask);
+    return els.length > 0 ? els.join("") : "∅";
+};
+
+export const normalizeSpecificityMask = (mask, fallbackMask = ALL_ELEMENT_MASK) => {
+    const fallback = Number.isFinite(fallbackMask) ? (fallbackMask | 0) : ALL_ELEMENT_MASK;
+    const normalized = Number.isFinite(mask) ? ((mask | 0) & ALL_ELEMENT_MASK) : 0;
+    return normalized !== 0 ? normalized : fallback;
+};
+
 export const createMolecule = (composition, bondMultiplier = 1.0) => {
     const comp = Object.assign({}, composition);
     let size = 0;
     let polarity = 0;
     let elementalEnergySum = 0;
-    let elementMask = 0;
     for (const el in comp) {
         const count = comp[el];
         size += count;
         polarity += (ELEMENTS[el].polarity || 0) * count;
         elementalEnergySum += (ELEMENTS[el].energy || 0) * count;
-        if (count > 0) {
-            if (el === "A") elementMask |= 1;
-            else if (el === "B") elementMask |= 2;
-            else if (el === "C") elementMask |= 4;
-            else if (el === "D") elementMask |= 8;
-            else if (el === "E") elementMask |= 16;
-            else if (el === "F") elementMask |= 32;
-        }
     }
+    const elementMask = compositionToElementMask(comp);
     polarity = size > 0 ? polarity / size : 0;
     const energy = elementalEnergySum * bondMultiplier;
     const diffusionRate = Math.min(0.04, 0.01 + (1 / (size + 1)) * polarity * 0.04);

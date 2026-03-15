@@ -1,5 +1,12 @@
 import { ENZYME_CLASSES, attemptReaction } from "./bio.js";
-import { createMolecule } from "./chem.js";
+import {
+    ALL_ELEMENT_MASK,
+    ELEMENT_MASKS,
+    ELEMENT_ORDER,
+    compositionToElementMask,
+    maskToString,
+    normalizeSpecificityMask
+} from "./chem.js";
 
 export class Cell {
     constructor(genome) {
@@ -82,7 +89,8 @@ export class Cell {
 
             this._pushReactionLog({
                 enzymeType: enzyme.type || "unknown",
-                affinity: enzyme.affinity || null,
+                specificityMask: normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK),
+                specificity: maskToString(normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK)),
                 consumed: result.consumed || [],
                 produced: result.produced || null,
                 byproducts: result.byproducts || [],
@@ -378,11 +386,8 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         applyEnzymeClassDefaults(en);
 
         if (Math.random() < mut) {
-            if (!en.affinity) en.affinity = {};
             if (Math.random() < mut) {
-                const possible = ["A", "B", "C", "D", "E", "F"];
-                const k = possible[Math.floor(Math.random() * possible.length)];
-                en.affinity[k] = (en.affinity[k] || 0) + Math.random();
+                en.specificityMask = mutateSpecificityMask(en.specificityMask);
             }
             if (Math.random() < mut * 0.2) {
                 const classes = Object.keys(ENZYME_CLASSES);
@@ -450,7 +455,7 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         const cls = ENZYME_CLASSES[type] || {};
         const enzyme = {
             type,
-            affinity: makeRandomAffinity(),
+            specificityMask: makeRandomSpecificityMask(),
             envalSigma: 0.16 + Math.random() * 0.08,
             envalThroughput: cls.envalThroughput ?? 0.10,
             secretionProb: Math.random()
@@ -476,6 +481,15 @@ const applyEnzymeClassDefaults = (enzyme) => {
     if (typeof enzyme.envalSigma !== "number") enzyme.envalSigma = 0.16 + Math.random() * 0.08;
     if (typeof enzyme.envalThroughput !== "number") enzyme.envalThroughput = cls.envalThroughput ?? 0.10;
     if (typeof enzyme.secretionProb !== "number") enzyme.secretionProb = 0.15;
+
+    if (typeof enzyme.specificityMask !== "number") {
+        if (enzyme.affinity) enzyme.specificityMask = compositionToElementMask(enzyme.affinity);
+        else enzyme.specificityMask = defaultSpecificityMaskForType(enzyme.type);
+    }
+    enzyme.specificityMask = normalizeSpecificityMask(
+        enzyme.specificityMask,
+        defaultSpecificityMaskForType(enzyme.type)
+    );
 
     if (enzyme.type === "anabolase") {
         if (typeof enzyme.bondMultiplier !== "number") enzyme.bondMultiplier = cls.bondMultiplier ?? 1.15;
@@ -512,21 +526,62 @@ const applyEnzymeClassDefaults = (enzyme) => {
     delete enzyme.harvestFraction;
     delete enzyme.transportRate;
     delete enzyme.activeCostPerAtom;
+    delete enzyme.affinity;
+    delete enzyme._affinityMask;
     return enzyme;
 };
 
-const makeRandomAffinity = () => {
-    const possible = ["A", "B", "C", "D", "E", "F"];
-    const affinity = {};
-    for (let i = 0; i < possible.length; i++) {
-        const el = possible[i];
-        if (Math.random() < 0.55) affinity[el] = 0.25 + Math.random();
+const maskFromLetters = (letters) => {
+    let mask = 0;
+    for (let i = 0; i < letters.length; i++) {
+        mask |= ELEMENT_MASKS[letters[i]] || 0;
     }
-    if (Object.keys(affinity).length === 0) {
-        const el = possible[(Math.random() * possible.length) | 0];
-        affinity[el] = 0.25 + Math.random();
+    return normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
+};
+
+const defaultSpecificityMaskForType = (type) => {
+    if (type === "anabolase") return maskFromLetters("ABC");
+    if (type === "catabolase") return ALL_ELEMENT_MASK;
+    if (type === "transmutase") return ALL_ELEMENT_MASK;
+    return ALL_ELEMENT_MASK;
+};
+
+const pickRandom = (arr) => arr[(Math.random() * arr.length) | 0];
+
+const makeRandomSpecificityMask = () => {
+    const shuffled = ELEMENT_ORDER.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        const tmp = shuffled[i];
+        shuffled[i] = shuffled[j];
+        shuffled[j] = tmp;
     }
-    return affinity;
+    const targetCount = 1 + ((Math.random() * 3) | 0);
+    let mask = 0;
+    for (let i = 0; i < targetCount; i++) mask |= ELEMENT_MASKS[shuffled[i]] || 0;
+    return normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
+};
+
+const mutateSpecificityMask = (mask) => {
+    let next = normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
+    const present = [];
+    const absent = [];
+
+    for (let i = 0; i < ELEMENT_ORDER.length; i++) {
+        const el = ELEMENT_ORDER[i];
+        const bit = ELEMENT_MASKS[el];
+        if ((next & bit) !== 0) present.push(bit);
+        else absent.push(bit);
+    }
+
+    if (present.length <= 1 && absent.length === 0) return next;
+    if (present.length <= 1) return next | pickRandom(absent);
+    if (absent.length === 0) return next & ~pickRandom(present);
+
+    if (Math.random() < 0.5) next |= pickRandom(absent);
+    else next &= ~pickRandom(present);
+
+    return normalizeSpecificityMask(next, ALL_ELEMENT_MASK);
 };
 
 const mutateOptimalEnval = (parentEnval, worldAvgEnval, floor = 0.03) => {

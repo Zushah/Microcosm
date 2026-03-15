@@ -1,7 +1,14 @@
 import { World } from "./sim/world.js";
 import { CanvasRenderer } from "./render/canvas.js";
 import { resetReactionCounter } from "./sim/bio.js";
-import { ELEMENTS } from "./sim/chem.js";
+import {
+    ALL_ELEMENT_MASK,
+    ELEMENTS,
+    ELEMENT_MASKS,
+    maskToElements,
+    maskToString,
+    normalizeSpecificityMask
+} from "./sim/chem.js";
 
 const world = new World(320, 240);
 
@@ -84,7 +91,7 @@ const randomGenome = () => {
         enzymes: [
             {
                 type: "anabolase",
-                affinity: { A: 1, B: 0.5, C: 0.3 },
+                specificityMask: ELEMENT_MASKS.A | ELEMENT_MASKS.B | ELEMENT_MASKS.C,
                 bondMultiplier: 1.15,
                 secretionProb: 0.12,
                 envalSigma: 0.16 + Math.random() * 0.08,
@@ -92,7 +99,7 @@ const randomGenome = () => {
             },
             {
                 type: "catabolase",
-                affinity: { D: 1, E: 1 },
+                specificityMask: ALL_ELEMENT_MASK,
                 transmuteProb: 0.35,
                 bondHarvestFraction: 0.96,
                 transmuteHarvestFraction: 0.80,
@@ -235,16 +242,30 @@ rebuildElementTotals();
 
 const computeElementTotals = () => elementTotals;
 
+const normalizedSpecificityMask = (enzyme) => normalizeSpecificityMask(
+    enzyme && enzyme.specificityMask,
+    ALL_ELEMENT_MASK
+);
+
+const specificityLetters = (enzyme) => maskToString(normalizedSpecificityMask(enzyme));
+
+const specificityLabel = (enzyme) => {
+    const letters = specificityLetters(enzyme);
+    return letters === "ABCDEF" ? "ALL" : letters;
+};
+
+const enzymeDisplayName = (enzyme) => `${specificityLabel(enzyme)}-${enzyme.type || "enzyme"}`;
+
 const enzymeSignature = (e) => {
     const type = e.type || "any";
-    const affinityKeys = e.affinity ? Object.keys(e.affinity).sort().join(",") : "any";
+    const specificity = specificityLetters(e);
     const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
     const tp = (typeof e.transmuteProb === "number") ? e.transmuteProb.toFixed(2) : "tpX";
     const hb = (typeof e.bondHarvestFraction === "number") ? e.bondHarvestFraction.toFixed(2) : "hbX";
     const ht = (typeof e.transmuteHarvestFraction === "number") ? e.transmuteHarvestFraction.toFixed(2) : "htX";
     const es = (typeof e.envalSigma === "number") ? e.envalSigma.toFixed(2) : "esX";
     const et = (typeof e.envalThroughput === "number") ? e.envalThroughput.toFixed(2) : "etX";
-    return `${type}|aff:${affinityKeys}|bm:${bm}|tp:${tp}|hb:${hb}|ht:${ht}|es:${es}|et:${et}`;
+    return `${type}|spec:${specificity}|bm:${bm}|tp:${tp}|hb:${hb}|ht:${ht}|es:${es}|et:${et}`;
 };
 
 const livingCells = new Set();
@@ -428,31 +449,21 @@ const transmutaseRuleString = (keys) => {
         if (TRANSMUTASE_DOWN[k]) targets.push(TRANSMUTASE_DOWN[k]);
         if (targets.length > 0) parts.push(`${k}→${targets.join("/")}`);
     }
-    if (parts.length === 0) return "A→F, F→A";
-    return parts.slice(0, 3).join("; ");
+    if (parts.length === 0) return "source∩S → ladder/base";
+    return parts.slice(0, 4).join("; ");
 };
 
 const enzymeEquationString = (enzyme) => {
-    const keys = enzyme.affinity ? Object.keys(enzyme.affinity).sort() : [];
-    if (keys.length === 0) {
-        if (enzyme.type === "anabolase") return "a + b → ab";
-        if (enzyme.type === "catabolase") return "AB → A + B";
-        if (enzyme.type === "transmutase") return "A→F, F→A";
-        return `${enzyme.type}: ? → ?`;
-    }
+    const spec = specificityLabel(enzyme);
+    const keys = maskToElements(normalizedSpecificityMask(enzyme));
     if (enzyme.type === "anabolase") {
-        const left = keys.slice(0, enzyme.maxInputs || 2).join(" + ");
-        const prod = keys.slice(0, enzyme.maxInputs || 2).join("");
-        return `${left} → ${prod}`;
+        return `subset(${spec}) + subset(${spec}) → bonded subset(${spec})`;
     }
     if (enzyme.type === "catabolase") {
-        const a = keys[0];
-        return `${a} → fragments`;
+        return `subset(${spec}) → fragments`;
     }
     if (enzyme.type === "transmutase") return transmutaseRuleString(keys);
-    const left = keys.slice(0, 2).join(" + ");
-    const prod = keys.slice(0, 2).join("");
-    return `${left} → ${prod}`;
+    return `${enzyme.type}: subset(${spec})`;
 };
 
 const compositionToString = (comp) => {
@@ -523,7 +534,7 @@ const enzymeParameterString = (enzyme, genome) => {
     const sigma = (enzyme.envalSigma ?? 0.18).toFixed(2);
     const throughput = (enzyme.envalThroughput ?? 0).toFixed(3);
     const secretion = (enzyme.secretionProb ?? genome.defaultSecretionProb ?? 0).toFixed(2);
-    const parts = [`σenv:${sigma}`, `thr:${throughput}`, `sec:${secretion}`];
+    const parts = [`spec:${specificityLabel(enzyme)}`, `σenv:${sigma}`, `thr:${throughput}`, `sec:${secretion}`];
 
     if (enzyme.type === "anabolase") {
         parts.unshift(`β:${(enzyme.bondMultiplier ?? 1.15).toFixed(2)}`);
@@ -583,7 +594,7 @@ const buildCellInfoHtml = (cell) => {
     for (const e of cell.genome.enzymes) {
         const eq = enzymeEquationString(e);
         const params = enzymeParameterString(e, cell.genome);
-        enzymesHtml += `<li><strong>${e.type}</strong> — <code>${eq}</code> (${params})</li>`;
+        enzymesHtml += `<li><strong>${enzymeDisplayName(e)}</strong> — <code>${eq}</code> (${params})</li>`;
     }
     enzymesHtml += "</ul>";
 
