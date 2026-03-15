@@ -5,9 +5,9 @@
 <hr>
 
 ## 1. Atomic Theory and Chemistry
-Microcosm models matter as a discrete artificial chemistry built from six fundamental elements (**A**, **B**, **C**, **D**, **E**, and **X**), each with its own mass, polarity, and intrinsic energetic value. Rather than attempting biochemical realism, the simulation uses a compact state space in which higher-order ecological behavior emerges from simple compositional rules.
+Microcosm models matter as a discrete artificial chemistry built from six fundamental elements (**A**, **B**, **C**, **D**, **E**, and **F**), each with its own mass, polarity, and intrinsic energetic value. Rather than attempting biochemical realism, the simulation uses a compact state space in which higher-order ecological behavior emerges from simple compositional rules.
 - Energetic Isotopes: Elements **D** and **E** carry high elemental energy and remain the most concentrated chemical fuel available to evolving cells.
-- Waste State: Element **X** is a low-energy terminal state and commonly accumulates as a byproduct of destructive metabolism.
+- Waste State: Element **F** is a low-energy terminal state and commonly accumulates as a byproduct of destructive metabolism.
 - Molecular Energetics: A molecule is represented by an elemental composition together with a bond multiplier $`\beta`$. Its total stored energy $`E_{mol}`$ is:
 ```math
 E_{mol} = \beta \sum_i n_i E_i.
@@ -27,7 +27,7 @@ Anabolase enzymes perform anabolism by polymerizing accepted substrates into a s
 ```
 Thus anabolism is often only sustainable when either prior catabolism or aligned enval flux subsidizes the reaction.
 ### Catabolase
-Catabolase enzymes perform catabolism by selecting a substrate, releasing its bond energy, and fragmenting it into lower-bond byproducts. In addition, catabolism may transmute energetic isotopes **D** and **E** into low-energy **X**, extracting additional chemical free energy from the conversion. The chemically available yield is therefore:
+Catabolase enzymes perform catabolism by selecting a substrate, releasing its bond energy, and fragmenting it into lower-bond byproducts. In addition, catabolism may transmute energetic isotopes **D** and **E** into low-energy **F**, extracting additional chemical free energy from the conversion. The chemically available yield is therefore:
 ```math
 \Delta E_{chem} = \eta\left(E_{bond} + E_{transmute} - E_{act}\right),
 ```

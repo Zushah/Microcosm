@@ -4,7 +4,7 @@ export const ELEMENTS = {
     C: { mass: 1.4, polarity: 0.2, energy: 0.9 },
     D: { mass: 1.8, polarity: 0.1, energy: 4.0 },
     E: { mass: 0.8, polarity: 1.0, energy: 3.0 },
-    X: { mass: 1.0, polarity: 0.6, energy: -0.2 }
+    F: { mass: 1.0, polarity: 0.6, energy: -0.2 }
 };
 
 export const createMolecule = (composition, bondMultiplier = 1.0) => {
@@ -24,7 +24,7 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
             else if (el === "C") elementMask |= 4;
             else if (el === "D") elementMask |= 8;
             else if (el === "E") elementMask |= 16;
-            else if (el === "X") elementMask |= 32;
+            else if (el === "F") elementMask |= 32;
         }
     }
     polarity = size > 0 ? polarity / size : 0;

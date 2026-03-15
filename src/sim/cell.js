@@ -362,7 +362,7 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
             const en = g.enzymes[i];
             if (!en.affinity) en.affinity = {};
             if (Math.random() < mut) {
-                const possible = ["A", "B", "C", "D", "E", "X"];
+                const possible = ["A", "B", "C", "D", "E", "F"];
                 const k = possible[Math.floor(Math.random() * possible.length)];
                 en.affinity[k] = (en.affinity[k] || 0) + Math.random();
             }

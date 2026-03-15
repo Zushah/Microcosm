@@ -26,7 +26,7 @@ const _accumulateCompDelta = (scratch, comp, sign) => {
         else if (el === "C") scratch[2] += sign * v;
         else if (el === "D") scratch[3] += sign * v;
         else if (el === "E") scratch[4] += sign * v;
-        else if (el === "X") scratch[5] += sign * v;
+        else if (el === "F") scratch[5] += sign * v;
     }
 };
 
@@ -176,7 +176,7 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
     if (scratch[2] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).C = scratch[2]; }
     if (scratch[3] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).D = scratch[3]; }
     if (scratch[4] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).E = scratch[4]; }
-    if (scratch[5] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).X = scratch[5]; }
+    if (scratch[5] !== 0) { sameComposition = false; (elementDelta || (elementDelta = {})).F = scratch[5]; }
     if (elementDelta) result.elementDelta = elementDelta;
 
     result.efficiencyFactor = envalFactor;
@@ -249,9 +249,9 @@ const doCatabolase = (enzyme, substrates, cls, cell, tile, env, envalExchange) =
             while ((newComp[el] || 0) > 0 && Math.random() < 0.6) {
                 newComp[el] -= 1;
                 if (newComp[el] === 0) delete newComp[el];
-                newComp["X"] = (newComp["X"] || 0) + 1;
+                newComp["F"] = (newComp["F"] || 0) + 1;
                 const before = ELEMENTS[el].energy || 0;
-                const after = ELEMENTS["X"].energy || 0;
+                const after = ELEMENTS["F"].energy || 0;
                 transmutedEnergyGain += (before - after);
             }
         }
@@ -362,9 +362,9 @@ const genericTransform = (enzyme, substrates, cls, envalExchange) => {
             while (primaryProduct.composition[el] > 0 && Math.random() < 0.35) {
                 primaryProduct.composition[el] -= 1;
                 if (primaryProduct.composition[el] === 0) delete primaryProduct.composition[el];
-                primaryProduct.composition["X"] = (primaryProduct.composition["X"] || 0) + 1;
+                primaryProduct.composition["F"] = (primaryProduct.composition["F"] || 0) + 1;
                 const before = ELEMENTS[el].energy || 0;
-                const after = ELEMENTS["X"].energy || 0;
+                const after = ELEMENTS["F"].energy || 0;
                 transgain += (before - after);
             }
         }
@@ -412,7 +412,7 @@ const enzymeAccepts = (enzyme, molecule) => {
             else if (el === "C") affinityMask |= 4;
             else if (el === "D") affinityMask |= 8;
             else if (el === "E") affinityMask |= 16;
-            else if (el === "X") affinityMask |= 32;
+            else if (el === "F") affinityMask |= 32;
         }
         enzyme._affinityMask = affinityMask;
     }

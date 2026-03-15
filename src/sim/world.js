@@ -85,7 +85,7 @@ export class World {
         if (Math.random() < 0.45) arr.push(createMolecule({ C: 1 }));
         if (Math.random() < 0.12) arr.push(createMolecule({ D: 1 }));
         if (Math.random() < 0.08) arr.push(createMolecule({ E: 1 }));
-        if (Math.random() < 0.05) arr.push(createMolecule({ X: 1 }));
+        if (Math.random() < 0.05) arr.push(createMolecule({ F: 1 }));
         if (Math.random() < 0.05) arr.push(createMolecule({ B: 1, C: 1 }));
         return arr;
     }
