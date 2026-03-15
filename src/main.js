@@ -403,12 +403,41 @@ const updateHud = () => {
     elementsDiv.textContent = parts.join("  •  ");
 };
 
+const TRANSMUTASE_UP = {
+    F: "A",
+    A: "C",
+    C: "B",
+    B: "E",
+    E: "D"
+};
+
+const TRANSMUTASE_DOWN = {
+    A: "F",
+    B: "F",
+    C: "F",
+    D: "F",
+    E: "F"
+};
+
+const transmutaseRuleString = (keys) => {
+    const parts = [];
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        const targets = [];
+        if (TRANSMUTASE_UP[k]) targets.push(TRANSMUTASE_UP[k]);
+        if (TRANSMUTASE_DOWN[k]) targets.push(TRANSMUTASE_DOWN[k]);
+        if (targets.length > 0) parts.push(`${k}→${targets.join("/")}`);
+    }
+    if (parts.length === 0) return "A→F, F→A";
+    return parts.slice(0, 3).join("; ");
+};
+
 const enzymeEquationString = (enzyme) => {
     const keys = enzyme.affinity ? Object.keys(enzyme.affinity).sort() : [];
     if (keys.length === 0) {
         if (enzyme.type === "anabolase") return "a + b → ab";
         if (enzyme.type === "catabolase") return "AB → A + B";
-        if (enzyme.type === "transportase") return "import D/E";
+        if (enzyme.type === "transmutase") return "A→F, F→A";
         return `${enzyme.type}: ? → ?`;
     }
     if (enzyme.type === "anabolase") {
@@ -420,7 +449,7 @@ const enzymeEquationString = (enzyme) => {
         const a = keys[0];
         return `${a} → fragments`;
     }
-    if (enzyme.type === "transportase") return `transport ${keys.slice(0, 2).join(",")}`;
+    if (enzyme.type === "transmutase") return transmutaseRuleString(keys);
     const left = keys.slice(0, 2).join(" + ");
     const prod = keys.slice(0, 2).join("");
     return `${left} → ${prod}`;
@@ -471,7 +500,12 @@ const formatReactionExpression = (ev) => {
         else if (norm.byproducts.length === 1) right = norm.byproducts[0];
         else right = norm.byproducts.join(" + ");
     }
-    return `${left} → ${right}`;
+
+    let expr = `${left} → ${right}`;
+    if (ev && ev.enzymeType === "transmutase" && ev.transmutedFrom && ev.transmutedTo) {
+        expr += ` [${ev.transmutedFrom}→${ev.transmutedTo}]`;
+    }
+    return expr;
 };
 
 const formatEnvalExchange = (ev) => {
@@ -497,6 +531,8 @@ const enzymeParameterString = (enzyme, genome) => {
         parts.unshift(`ht:${(enzyme.transmuteHarvestFraction ?? 0.80).toFixed(2)}`);
         parts.unshift(`hb:${(enzyme.bondHarvestFraction ?? 0.96).toFixed(2)}`);
         parts.unshift(`tp:${(enzyme.transmuteProb ?? 0.35).toFixed(2)}`);
+    } else if (enzyme.type === "transmutase") {
+        parts.unshift(`hd:${(enzyme.downhillHarvestFraction ?? 0.90).toFixed(2)}`);
     }
 
     return parts.join(", ");
