@@ -1,9 +1,9 @@
 import { createMolecule, ELEMENTS } from "./chem.js";
 
 export const ENZYME_CLASSES = {
-    anabolase: { maxInputs: 3, baseRate: 0.85, energyCost: 0.005, envalThroughput: 0.18 },
-    catabolase: { maxInputs: 1, baseRate: 0.98, energyCost: 0.006, envalThroughput: 0.12 },
-    transportase: { maxInputs: 0, baseRate: 0.90, energyCost: 0.010, envalThroughput: 0.08 }
+    anabolase: { maxInputs: 3, baseRate: 0.85, energyCost: 0.005, envalThroughput: 0.18, envalPump: 0.12 },
+    catabolase: { maxInputs: 1, baseRate: 0.98, energyCost: 0.006, envalThroughput: 0.12, envalPump: 0.12 },
+    transportase: { maxInputs: 0, baseRate: 0.90, energyCost: 0.010, envalThroughput: 0.08, envalPump: 0.03 }
 };
 
 export let reactionsThisTick = 0;
@@ -12,6 +12,7 @@ export const resetReactionCounter = () => reactionsThisTick = 0;
 const DEFAULT_ENVAL_SIGMA = 0.18;
 const DEFAULT_ENVAL_ENERGY_FRACTION = 2 / 3;
 const DEFAULT_ENVAL_RELEASE_FRACTION = 1 / 3;
+const DEFAULT_ENVAL_PUMP = 0.1;
 
 const _elementDeltaScratch = new Int32Array(6);
 
@@ -64,57 +65,29 @@ const computeEnvalFactor = (cell, enzyme, env) => {
     return Math.exp(-(d * d) / denom);
 };
 
-const resolveEnvalPolarity = (cell, env) => {
+const resolveEnvalPolarity = (cell) => {
     const opt = cell && cell.genome ? (cell.genome.optimalEnval ?? 0) : 0;
     if (opt > 0) return 1;
     if (opt < 0) return -1;
-    const avg = env.avgEnval ?? 0;
-    if (avg > 0) return 1;
-    if (avg < 0) return -1;
     return Math.random() < 0.5 ? -1 : 1;
 };
 
-const computeEnvalExchange = (enzyme, cls, cell, tile, env, envalFactor) => {
+const computeEnvalExchange = (enzyme, cls, cell, tile, env) => {
     if (!cell) {
         return {
             energyBonus: 0,
             envalInput: 0,
             envalOutput: 0,
+            envalPump: 0,
             deltaEnval: 0
         };
     }
 
-    const polarity = resolveEnvalPolarity(cell, env);
-    const tileEnval = (tile && typeof tile.enval === "number") ? tile.enval : (env.enval ?? 0);
-    const availableAligned = Math.max(0, polarity * tileEnval);
-    if (!(availableAligned > 0)) {
-        return {
-            energyBonus: 0,
-            envalInput: 0,
-            envalOutput: 0,
-            deltaEnval: 0
-        };
-    }
-
-    const maxInput = Math.max(0, (enzyme.envalThroughput ?? cls.envalThroughput ?? 0) * (envalFactor ?? 1));
-    if (!(maxInput > 0)) {
-        return {
-            energyBonus: 0,
-            envalInput: 0,
-            envalOutput: 0,
-            deltaEnval: 0
-        };
-    }
-
+    const polarity = resolveEnvalPolarity(cell);
+    const localEnval = env.localEnval ?? env.enval ?? 0;
+    const availableAligned = Math.max(0, polarity * localEnval);
+    const maxInput = Math.max(0, enzyme.envalThroughput ?? cls.envalThroughput ?? 0);
     const inputMagnitude = Math.min(availableAligned, maxInput);
-    if (!(inputMagnitude > 0)) {
-        return {
-            energyBonus: 0,
-            envalInput: 0,
-            envalOutput: 0,
-            deltaEnval: 0
-        };
-    }
 
     const energyFraction = clamp01(enzyme.envalEnergyFraction ?? DEFAULT_ENVAL_ENERGY_FRACTION);
     const releaseFraction = clamp01(Math.min(
@@ -122,8 +95,10 @@ const computeEnvalExchange = (enzyme, cls, cell, tile, env, envalFactor) => {
         enzyme.envalReleaseFraction ?? DEFAULT_ENVAL_RELEASE_FRACTION
     ));
 
+    const pumpMagnitude = Math.max(0, enzyme.envalPump ?? cls.envalPump ?? DEFAULT_ENVAL_PUMP);
     const energyBonus = inputMagnitude * energyFraction;
-    const outputMagnitude = inputMagnitude * releaseFraction;
+    const recycledOutputMagnitude = inputMagnitude * releaseFraction;
+    const outputMagnitude = recycledOutputMagnitude + pumpMagnitude;
 
     const envalInput = polarity * inputMagnitude;
     const envalOutput = -polarity * outputMagnitude;
@@ -132,6 +107,7 @@ const computeEnvalExchange = (enzyme, cls, cell, tile, env, envalFactor) => {
         energyBonus,
         envalInput,
         envalOutput,
+        envalPump: -polarity * pumpMagnitude,
         deltaEnval: envalOutput - envalInput
     };
 };
@@ -155,7 +131,7 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
         if (enzyme.type === "anabolase" && substrates.length < 2) return null;
     }
 
-    const envalExchange = computeEnvalExchange(enzyme, cls, cell, tile, env, envalFactor);
+    const envalExchange = computeEnvalExchange(enzyme, cls, cell, tile, env);
 
     let result = null;
     if (enzyme.type === "anabolase") {
