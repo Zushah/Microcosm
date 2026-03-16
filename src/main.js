@@ -1,14 +1,7 @@
 import { World } from "./sim/world.js";
 import { CanvasRenderer } from "./render/canvas.js";
 import { resetReactionCounter } from "./sim/bio.js";
-import {
-    ALL_ELEMENT_MASK,
-    ELEMENTS,
-    ELEMENT_MASKS,
-    maskToElements,
-    maskToString,
-    normalizeSpecificityMask
-} from "./sim/chem.js";
+import { ALL_ELEMENT_MASK, ELEMENTS, ELEMENT_MASKS, maskToElements, maskToString, normalizeSpecificityMask } from "./sim/chem.js";
 
 const world = new World(320, 240);
 
@@ -92,19 +85,18 @@ const randomGenome = () => {
             {
                 type: "anabolase",
                 specificityMask: ELEMENT_MASKS.A | ELEMENT_MASKS.B | ELEMENT_MASKS.C,
-                bondMultiplier: 1.15,
+                bondMultiplier: 1.18,
+                bondCostFraction: 0.70,
                 secretionProb: 0.12,
                 envalSigma: 0.16 + Math.random() * 0.08,
                 envalThroughput: 0.18
             },
             {
                 type: "catabolase",
-                specificityMask: ALL_ELEMENT_MASK,
-                transmuteProb: 0.35,
-                bondHarvestFraction: 0.96,
-                transmuteHarvestFraction: 0.80,
+                specificityMask: ELEMENT_MASKS.A | ELEMENT_MASKS.B | ELEMENT_MASKS.C,
+                bondHarvestFraction: 1.00,
                 envalSigma: 0.16 + Math.random() * 0.08,
-                envalThroughput: 0.12
+                envalThroughput: 0.14
             }
         ],
         reproThreshold: 2 + Math.random() * 6,
@@ -260,12 +252,11 @@ const enzymeSignature = (e) => {
     const type = e.type || "any";
     const specificity = specificityLetters(e);
     const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
-    const tp = (typeof e.transmuteProb === "number") ? e.transmuteProb.toFixed(2) : "tpX";
     const hb = (typeof e.bondHarvestFraction === "number") ? e.bondHarvestFraction.toFixed(2) : "hbX";
-    const ht = (typeof e.transmuteHarvestFraction === "number") ? e.transmuteHarvestFraction.toFixed(2) : "htX";
+    const hd = (typeof e.downhillHarvestFraction === "number") ? e.downhillHarvestFraction.toFixed(2) : "hdX";
     const es = (typeof e.envalSigma === "number") ? e.envalSigma.toFixed(2) : "esX";
     const et = (typeof e.envalThroughput === "number") ? e.envalThroughput.toFixed(2) : "etX";
-    return `${type}|spec:${specificity}|bm:${bm}|tp:${tp}|hb:${hb}|ht:${ht}|es:${es}|et:${et}`;
+    return `${type}|spec:${specificity}|bm:${bm}|hb:${hb}|hd:${hd}|es:${es}|et:${et}`;
 };
 
 const livingCells = new Set();
@@ -537,13 +528,12 @@ const enzymeParameterString = (enzyme, genome) => {
     const parts = [`spec:${specificityLabel(enzyme)}`, `σenv:${sigma}`, `thr:${throughput}`, `sec:${secretion}`];
 
     if (enzyme.type === "anabolase") {
+        parts.unshift(`ca:${(enzyme.bondCostFraction ?? 0.90).toFixed(2)}`);
         parts.unshift(`β:${(enzyme.bondMultiplier ?? 1.15).toFixed(2)}`);
     } else if (enzyme.type === "catabolase") {
-        parts.unshift(`ht:${(enzyme.transmuteHarvestFraction ?? 0.80).toFixed(2)}`);
-        parts.unshift(`hb:${(enzyme.bondHarvestFraction ?? 0.96).toFixed(2)}`);
-        parts.unshift(`tp:${(enzyme.transmuteProb ?? 0.35).toFixed(2)}`);
+        parts.unshift(`hb:${(enzyme.bondHarvestFraction ?? 1.00).toFixed(2)}`);
     } else if (enzyme.type === "transmutase") {
-        parts.unshift(`hd:${(enzyme.downhillHarvestFraction ?? 0.90).toFixed(2)}`);
+        parts.unshift(`hd:${(enzyme.downhillHarvestFraction ?? 0.18).toFixed(2)}`);
     }
 
     return parts.join(", ");

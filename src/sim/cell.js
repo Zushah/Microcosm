@@ -1,12 +1,5 @@
 import { ENZYME_CLASSES, attemptReaction } from "./bio.js";
-import {
-    ALL_ELEMENT_MASK,
-    ELEMENT_MASKS,
-    ELEMENT_ORDER,
-    compositionToElementMask,
-    maskToString,
-    normalizeSpecificityMask
-} from "./chem.js";
+import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, createMolecule, maskToString, normalizeSpecificityMask } from "./chem.js";
 
 export class Cell {
     constructor(genome) {
@@ -52,6 +45,10 @@ export class Cell {
                 window.__recordElementDelta(result.elementDelta);
             }
 
+            const logConsumed = snapshotMolecules(result.consumed || []);
+            const logProduced = snapshotMolecule(result.produced || null);
+            const logByproducts = snapshotMolecules(result.byproducts || []);
+
             const eDelta = result.energyDelta || 0;
             if (eDelta !== 0) {
                 this.energy += eDelta;
@@ -91,9 +88,9 @@ export class Cell {
                 enzymeType: enzyme.type || "unknown",
                 specificityMask: normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK),
                 specificity: maskToString(normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK)),
-                consumed: result.consumed || [],
-                produced: result.produced || null,
-                byproducts: result.byproducts || [],
+                consumed: logConsumed,
+                produced: logProduced,
+                byproducts: logByproducts,
                 deltaE: Number((eDelta || 0).toFixed(3)),
                 chemicalDelta: Number((result.chemicalDelta || 0).toFixed(3)),
                 envalEnergy: Number((result.envalEnergy || 0).toFixed(3)),
@@ -417,28 +414,10 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
                     (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (Math.random() - 0.5) * 0.18)
                 );
             }
-            if (en.type === "catabolase") {
-                const cls = ENZYME_CLASSES[en.type] || {};
-                if (Math.random() < mut) {
-                    en.transmuteProb = clamp01(
-                        (en.transmuteProb ?? cls.transmuteProb ?? 0.35) + (Math.random() - 0.5) * 0.18
-                    );
-                }
-                if (Math.random() < mut) {
-                    en.bondHarvestFraction = clamp01(
-                        (en.bondHarvestFraction ?? cls.bondHarvestFraction ?? 0.96) + (Math.random() - 0.5) * 0.10
-                    );
-                }
-                if (Math.random() < mut) {
-                    en.transmuteHarvestFraction = clamp01(
-                        (en.transmuteHarvestFraction ?? cls.transmuteHarvestFraction ?? 0.80) + (Math.random() - 0.5) * 0.16
-                    );
-                }
-            }
             if (en.type === "transmutase" && Math.random() < mut) {
                 const cls = ENZYME_CLASSES[en.type] || {};
                 en.downhillHarvestFraction = clamp01(
-                    (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.90) + (Math.random() - 0.5) * 0.12
+                    (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (Math.random() - 0.5) * 0.08
                 );
             }
         }
@@ -474,6 +453,21 @@ const clamp01 = (v) => {
     return Math.max(0, Math.min(1, v));
 };
 
+const snapshotMolecule = (molecule) => {
+    if (!molecule || !molecule.composition) return null;
+    return createMolecule(Object.assign({}, molecule.composition), molecule.bondMultiplier || 1.0);
+};
+
+const snapshotMolecules = (molecules) => {
+    if (!molecules || molecules.length === 0) return [];
+    const out = [];
+    for (let i = 0; i < molecules.length; i++) {
+        const snap = snapshotMolecule(molecules[i]);
+        if (snap) out.push(snap);
+    }
+    return out;
+};
+
 const applyEnzymeClassDefaults = (enzyme) => {
     if (!enzyme || !enzyme.type) return enzyme;
     const cls = ENZYME_CLASSES[enzyme.type] || {};
@@ -493,36 +487,32 @@ const applyEnzymeClassDefaults = (enzyme) => {
 
     if (enzyme.type === "anabolase") {
         if (typeof enzyme.bondMultiplier !== "number") enzyme.bondMultiplier = cls.bondMultiplier ?? 1.15;
+        if (typeof enzyme.bondCostFraction !== "number") enzyme.bondCostFraction = cls.bondCostFraction ?? 0.90;
         delete enzyme.transmuteProb;
         delete enzyme.bondHarvestFraction;
         delete enzyme.transmuteHarvestFraction;
         delete enzyme.downhillHarvestFraction;
     } else if (enzyme.type === "catabolase") {
-        if (typeof enzyme.transmuteProb !== "number") enzyme.transmuteProb = cls.transmuteProb ?? 0.35;
-        if (typeof enzyme.bondHarvestFraction !== "number") {
-            enzyme.bondHarvestFraction = cls.bondHarvestFraction ?? 0.96;
-        }
-        if (typeof enzyme.transmuteHarvestFraction !== "number") {
-            enzyme.transmuteHarvestFraction = enzyme.harvestFraction ?? cls.transmuteHarvestFraction ?? 0.80;
-        }
+        enzyme.bondHarvestFraction = Math.max(1, cls.bondHarvestFraction ?? 1.0);
         delete enzyme.bondMultiplier;
+        delete enzyme.bondCostFraction;
         delete enzyme.downhillHarvestFraction;
     } else if (enzyme.type === "transmutase") {
         if (typeof enzyme.downhillHarvestFraction !== "number") {
-            enzyme.downhillHarvestFraction = cls.downhillHarvestFraction ?? 0.90;
+            enzyme.downhillHarvestFraction = cls.downhillHarvestFraction ?? 0.18;
         }
         delete enzyme.bondMultiplier;
-        delete enzyme.transmuteProb;
+        delete enzyme.bondCostFraction;
         delete enzyme.bondHarvestFraction;
-        delete enzyme.transmuteHarvestFraction;
     } else {
         delete enzyme.bondMultiplier;
-        delete enzyme.transmuteProb;
+        delete enzyme.bondCostFraction;
         delete enzyme.bondHarvestFraction;
-        delete enzyme.transmuteHarvestFraction;
         delete enzyme.downhillHarvestFraction;
     }
 
+    delete enzyme.transmuteProb;
+    delete enzyme.transmuteHarvestFraction;
     delete enzyme.harvestFraction;
     delete enzyme.transportRate;
     delete enzyme.activeCostPerAtom;
@@ -541,7 +531,7 @@ const maskFromLetters = (letters) => {
 
 const defaultSpecificityMaskForType = (type) => {
     if (type === "anabolase") return maskFromLetters("ABC");
-    if (type === "catabolase") return ALL_ELEMENT_MASK;
+    if (type === "catabolase") return maskFromLetters("ABC");
     if (type === "transmutase") return ALL_ELEMENT_MASK;
     return ALL_ELEMENT_MASK;
 };
