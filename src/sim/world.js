@@ -417,6 +417,35 @@ export class World {
         this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
     }
 
+
+    applyEnvalBrush(centerX, centerY, brushWidth, brushHeight, intensity) {
+        if (!Number.isFinite(intensity) || intensity === 0) return 0;
+
+        const width = Math.max(1, Math.min(this.width, Math.round(Number(brushWidth) || 1)));
+        const height = Math.max(1, Math.min(this.height, Math.round(Number(brushHeight) || 1)));
+        const startX = centerX - Math.floor(width * 0.5);
+        const startY = centerY - Math.floor(height * 0.5);
+
+        const xIndices = [];
+        const yIndices = [];
+
+        if (width >= this.width) for (let x = 0; x < this.width; x++) xIndices.push(x);
+        else for (let dx = 0; dx < width; dx++) xIndices.push(((startX + dx) % this.width + this.width) % this.width);
+        if (height >= this.height) for (let y = 0; y < this.height; y++) yIndices.push(y);
+        else for (let dy = 0; dy < height; dy++) yIndices.push(((startY + dy) % this.height + this.height) % this.height);
+
+        for (let xi = 0; xi < xIndices.length; xi++) {
+            const x = xIndices[xi];
+            const col = this.grid[x];
+            for (let yi = 0; yi < yIndices.length; yi++) col[yIndices[yi]].enval += intensity;
+        }
+
+        const affectedTileCount = xIndices.length * yIndices.length;
+        this.envalSum += intensity * affectedTileCount;
+        this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
+        return affectedTileCount;
+    }
+
     getLocalEnvalAverage(centerX, centerY, radius = 2) {
         let sum = 0;
         let count = 0;

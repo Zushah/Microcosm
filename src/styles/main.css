@@ -64,3 +64,127 @@ html, body {
     gap: 10px;
     align-items: center;
 }
+
+.smallNote {
+    font-size: 12px;
+    color: #555;
+    line-height: 1.45;
+}
+
+#interactionPanel {
+    position: fixed;
+    top: 54px;
+    left: 8px;
+    width: 292px;
+    padding: 12px;
+    background: var(--panel-bg);
+    color: var(--panel-text);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    z-index: 45;
+    transform: translateX(0);
+    transition: transform 160ms ease;
+}
+
+#interactionPanel.isCollapsed {
+    transform: translateX(calc(-100% + 42px));
+}
+
+#interactionPanel h3 {
+    margin: 0;
+    font-size: 15px;
+}
+
+#interactionPanelToggle {
+    position: absolute;
+    top: 12px;
+    right: -34px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 8px;
+    background: #fff;
+    color: #111;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+}
+
+.controlRow {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.controlLabel {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.controlCaption {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #555;
+    line-height: 1.45;
+}
+
+.modeSwitch {
+    display: flex;
+    gap: 8px;
+}
+
+.modeOption {
+    flex: 1;
+    padding: 8px 10px;
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 8px;
+    background: #fff;
+    color: #111;
+    cursor: pointer;
+    font: inherit;
+}
+
+.modeOption.isActive {
+    background: #111;
+    border-color: #111;
+    color: #fff;
+}
+
+#interactionEditSettings.isDisabled {
+    opacity: 0.5;
+}
+
+.brushGrid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.fieldLabel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+}
+
+.fieldLabelFull {
+    width: 100%;
+}
+
+.fieldLabel input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    font: inherit;
+}
+
+.fieldLabel input:disabled {
+    background: rgba(0,0,0,0.04);
+    color: rgba(0,0,0,0.45);
+    cursor: not-allowed;
+}

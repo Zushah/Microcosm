@@ -145,6 +145,185 @@ if (!elementsDiv) {
 
 let selectedCell = null;
 
+const interactionState = {
+    mode: "explore",
+    brushWidth: 10,
+    brushHeight: 10,
+    brushIntensity: 0.00,
+    panelOpen: true
+};
+
+const interactionUi = {
+    panel: null,
+    toggle: null,
+    modeButtons: [],
+    editSettings: null,
+    brushWidthInput: null,
+    brushHeightInput: null,
+    brushIntensityInput: null,
+    modeNote: null
+};
+
+const clampBrushSpan = (value, maxValue, fallback) => {
+    const parsed = Math.round(Number(value));
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(1, Math.min(maxValue, parsed));
+};
+
+const parseBrushIntensity = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const formatBrushIntensity = (value) => {
+    if (!Number.isFinite(value)) return "0.00";
+    if (value === 0) return "0.00";
+    return String(value);
+};
+
+const syncInteractionUi = () => {
+    renderer.setInteractionMode(interactionState.mode);
+    renderer.setEditBrush(
+        interactionState.brushWidth,
+        interactionState.brushHeight,
+        interactionState.brushIntensity
+    );
+
+    const panel = interactionUi.panel;
+    if (!panel) return;
+
+    const isEditMode = interactionState.mode === "edit";
+
+    panel.classList.toggle("isCollapsed", !interactionState.panelOpen);
+    interactionUi.toggle.textContent = interactionState.panelOpen ? "❮" : "❯";
+    interactionUi.toggle.setAttribute("aria-label", interactionState.panelOpen ? "Collapse controls" : "Expand controls");
+
+    for (const button of interactionUi.modeButtons) {
+        const active = button.dataset.mode === interactionState.mode;
+        button.classList.toggle("isActive", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+    }
+
+    interactionUi.editSettings.classList.toggle("isDisabled", !isEditMode);
+    interactionUi.brushWidthInput.disabled = !isEditMode;
+    interactionUi.brushHeightInput.disabled = !isEditMode;
+    interactionUi.brushIntensityInput.disabled = !isEditMode;
+
+    interactionUi.brushWidthInput.value = String(interactionState.brushWidth);
+    interactionUi.brushHeightInput.value = String(interactionState.brushHeight);
+    interactionUi.brushIntensityInput.value = formatBrushIntensity(interactionState.brushIntensity);
+    interactionUi.modeNote.textContent = isEditMode
+        ? "Right-click and drag to stamp the configured Δ enval across the rectangular brush footprint."
+        : "Left-drag pans, the mouse wheel zooms, left-click inspects a cell, and right-click inspects its lineage.";
+};
+
+const createInteractionPanel = () => {
+    const panel = document.createElement("div");
+    panel.id = "interactionPanel";
+    panel.innerHTML = `
+        <button id="interactionPanelToggle" type="button" aria-label="Collapse controls">❮</button>
+        <h3>Interaction</h3>
+        <div class="controlCaption">Choose how the canvas responds to your mouse.</div>
+        <div class="controlRow">
+            <div class="controlLabel">Mode</div>
+            <div class="modeSwitch">
+                <button class="modeOption" data-mode="explore" type="button">Explore</button>
+                <button class="modeOption" data-mode="edit" type="button">Edit</button>
+            </div>
+        </div>
+        <div id="interactionEditSettings">
+            <div class="controlRow">
+                <div class="controlLabel">Brush size</div>
+                <div class="brushGrid">
+                    <label class="fieldLabel">
+                        <span>X tiles</span>
+                        <input id="editBrushWidth" type="number" min="1" max="${world.width}" step="1" value="${interactionState.brushWidth}">
+                    </label>
+                    <label class="fieldLabel">
+                        <span>Y tiles</span>
+                        <input id="editBrushHeight" type="number" min="1" max="${world.height}" step="1" value="${interactionState.brushHeight}">
+                    </label>
+                </div>
+            </div>
+            <div class="controlRow">
+                <label class="fieldLabel fieldLabelFull">
+                    <span>Δ enval / stamp</span>
+                    <input id="editBrushIntensity" type="number" step="0.01" value="${formatBrushIntensity(interactionState.brushIntensity)}">
+                </label>
+            </div>
+        </div>
+        <div class="controlCaption" id="interactionModeNote"></div>
+    `;
+    document.body.appendChild(panel);
+
+    interactionUi.panel = panel;
+    interactionUi.toggle = panel.querySelector("#interactionPanelToggle");
+    interactionUi.modeButtons = [...panel.querySelectorAll(".modeOption")];
+    interactionUi.editSettings = panel.querySelector("#interactionEditSettings");
+    interactionUi.brushWidthInput = panel.querySelector("#editBrushWidth");
+    interactionUi.brushHeightInput = panel.querySelector("#editBrushHeight");
+    interactionUi.brushIntensityInput = panel.querySelector("#editBrushIntensity");
+    interactionUi.modeNote = panel.querySelector("#interactionModeNote");
+
+    interactionUi.toggle.addEventListener("click", () => {
+        interactionState.panelOpen = !interactionState.panelOpen;
+        syncInteractionUi();
+    });
+
+    for (const button of interactionUi.modeButtons) {
+        button.addEventListener("click", () => {
+            interactionState.mode = button.dataset.mode === "edit" ? "edit" : "explore";
+            syncInteractionUi();
+        });
+    }
+
+    interactionUi.brushWidthInput.addEventListener("change", () => {
+        interactionState.brushWidth = clampBrushSpan(
+            interactionUi.brushWidthInput.value,
+            world.width,
+            interactionState.brushWidth
+        );
+        syncInteractionUi();
+    });
+    interactionUi.brushWidthInput.addEventListener("blur", syncInteractionUi);
+
+    interactionUi.brushHeightInput.addEventListener("change", () => {
+        interactionState.brushHeight = clampBrushSpan(
+            interactionUi.brushHeightInput.value,
+            world.height,
+            interactionState.brushHeight
+        );
+        syncInteractionUi();
+    });
+    interactionUi.brushHeightInput.addEventListener("blur", syncInteractionUi);
+
+    interactionUi.brushIntensityInput.addEventListener("change", () => {
+        interactionState.brushIntensity = parseBrushIntensity(
+            interactionUi.brushIntensityInput.value,
+            interactionState.brushIntensity
+        );
+        syncInteractionUi();
+    });
+    interactionUi.brushIntensityInput.addEventListener("blur", syncInteractionUi);
+
+    syncInteractionUi();
+};
+
+createInteractionPanel();
+
+renderer.onEditBrushStroke = (x, y) => {
+    if (interactionState.mode !== "edit") return;
+    world.applyEnvalBrush(
+        x,
+        y,
+        interactionState.brushWidth,
+        interactionState.brushHeight,
+        interactionState.brushIntensity
+    );
+    lastHudUpdateMs = 0;
+    lastInfoUpdateMs = 0;
+};
+
 renderer.onCellClick = (x, y, tile, topCell) => {
     selectedCell = topCell;
     updateInfoPanel();
@@ -539,7 +718,7 @@ const buildCellInfoHtml = (cell) => {
     if (!cell) {
         return {
             title: "No cell selected",
-            body: `<div class="smallNote">Left-click a cell to inspect it. Right-click a cell to inspect its lineage.</div>`
+            body: `<div class="smallNote">Left-click a cell to inspect it. In Explore mode, right-click a cell to inspect its lineage.</div>`
         };
     }
 

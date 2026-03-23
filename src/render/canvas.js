@@ -84,11 +84,20 @@ export class CanvasRenderer {
         this.offsetX = options.initialOffsetX || 0;
         this.offsetY = options.initialOffsetY || 0;
 
-        this.isDragging = false;
+        this.isPanning = false;
+        this.isRightPainting = false;
         this.lastMouse = null;
+        this._panMoved = false;
+        this._hoverTile = null;
+        this._lastPaintTileKey = null;
 
         this.onCellClick = null;
         this.onCellRightClick = null;
+        this.onEditBrushStroke = null;
+        this.interactionMode = "explore";
+        this.brushWidth = 10;
+        this.brushHeight = 10;
+        this.brushIntensity = 0;
         this._lineageRgbCache = new Map();
         this._dpr = 1;
         this._instanceStrideFloats = 8;
@@ -99,6 +108,7 @@ export class CanvasRenderer {
         this._initWebGL();
         this.setupMouse();
         this.resize();
+        this._applyIdleCursor();
         window.addEventListener("resize", () => this.resize());
     }
 
@@ -159,6 +169,30 @@ export class CanvasRenderer {
         gl.clearColor(250 / 255, 250 / 255, 250 / 255, 1);
     }
 
+    setInteractionMode(mode) {
+        this.interactionMode = mode === "edit" ? "edit" : "explore";
+        if (this.interactionMode !== "edit") {
+            this.isRightPainting = false;
+            this._hoverTile = null;
+            this._lastPaintTileKey = null;
+        }
+        this._applyIdleCursor();
+    }
+
+    setEditBrush(width, height, intensity = 0) {
+        this.brushWidth = Math.max(1, Math.min(this.world.width, Math.round(Number(width) || 1)));
+        this.brushHeight = Math.max(1, Math.min(this.world.height, Math.round(Number(height) || 1)));
+        this.brushIntensity = Number.isFinite(intensity) ? intensity : 0;
+    }
+
+    _applyIdleCursor() {
+        if (this.isPanning) {
+            this.canvas.style.cursor = "grabbing";
+            return;
+        }
+        this.canvas.style.cursor = this.interactionMode === "edit" ? "crosshair" : "grab";
+    }
+
     resize() {
         const dpr = Math.min(2, window.devicePixelRatio || 1);
         this._dpr = dpr;
@@ -169,33 +203,110 @@ export class CanvasRenderer {
         this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
 
+    _canvasPointFromEvent(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            rect,
+            cx: e.clientX - rect.left,
+            cy: e.clientY - rect.top
+        };
+    }
+
+    _isEventInsideCanvas(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        return e.clientX >= rect.left && e.clientX < rect.right && e.clientY >= rect.top && e.clientY < rect.bottom;
+    }
+
+    _tileHitFromCanvasPoint(cx, cy) {
+        const gx = Math.floor((cx - this.offsetX) / this.scale);
+        const gy = Math.floor((cy - this.offsetY) / this.scale);
+
+        const x = ((gx % this.world.width) + this.world.width) % this.world.width;
+        const y = ((gy % this.world.height) + this.world.height) % this.world.height;
+        const tile = this.world.grid[x][y];
+        const topCell = tile.cells.length > 0 ? tile.cells[tile.cells.length - 1] : null;
+
+        return { x, y, tile, topCell };
+    }
+
+    _tileHitFromEvent(e) {
+        const { cx, cy } = this._canvasPointFromEvent(e);
+        return this._tileHitFromCanvasPoint(cx, cy);
+    }
+
+    _paintEditStrokeFromHit(hit) {
+        if (!hit || this.interactionMode !== "edit" || !this.onEditBrushStroke) return;
+        const key = `${hit.x},${hit.y}`;
+        if (key === this._lastPaintTileKey) return;
+        this._lastPaintTileKey = key;
+        this.onEditBrushStroke(hit.x, hit.y, hit.tile, hit.topCell);
+    }
+
     setupMouse() {
         this.canvas.addEventListener("mousedown", (e) => {
-            this.isDragging = true;
-            this.canvas.style.cursor = "grabbing";
-            this.lastMouse = { x: e.clientX, y: e.clientY };
+            if (e.button === 0) {
+                this.isPanning = true;
+                this._panMoved = false;
+                this.lastMouse = { x: e.clientX, y: e.clientY };
+                this._applyIdleCursor();
+                return;
+            }
+
+            if (e.button === 2 && this.interactionMode === "edit") {
+                e.preventDefault();
+                this.isRightPainting = true;
+                this._lastPaintTileKey = null;
+                const hit = this._tileHitFromEvent(e);
+                this._hoverTile = hit ? { x: hit.x, y: hit.y } : null;
+                this._paintEditStrokeFromHit(hit);
+            }
         });
 
-        window.addEventListener("mouseup", () => {
-            this.isDragging = false;
-            this.canvas.style.cursor = "grab";
-            this.lastMouse = null;
+        window.addEventListener("mouseup", (e) => {
+            if (e.button === 0) {
+                this.isPanning = false;
+                this.lastMouse = null;
+                this._applyIdleCursor();
+            }
+            if (e.button === 2) {
+                this.isRightPainting = false;
+                this._lastPaintTileKey = null;
+                this._applyIdleCursor();
+            }
         });
 
         window.addEventListener("mousemove", (e) => {
-            if (!this.isDragging) return;
-            const dx = e.clientX - this.lastMouse.x;
-            const dy = e.clientY - this.lastMouse.y;
-            this.offsetX += dx;
-            this.offsetY += dy;
-            this.lastMouse = { x: e.clientX, y: e.clientY };
+            if (this.isPanning && this.lastMouse) {
+                const dx = e.clientX - this.lastMouse.x;
+                const dy = e.clientY - this.lastMouse.y;
+                if (dx !== 0 || dy !== 0) this._panMoved = true;
+                this.offsetX += dx;
+                this.offsetY += dy;
+                this.lastMouse = { x: e.clientX, y: e.clientY };
+            }
+
+            if (this.isPanning) return;
+
+            const inside = this._isEventInsideCanvas(e);
+            if (!inside) {
+                if (this.interactionMode === "edit" && !this.isRightPainting) this._hoverTile = null;
+                return;
+            }
+
+            const hit = this._tileHitFromEvent(e);
+            if (this.interactionMode === "edit") {
+                this._hoverTile = hit ? { x: hit.x, y: hit.y } : null;
+                if (this.isRightPainting) this._paintEditStrokeFromHit(hit);
+            }
+        });
+
+        this.canvas.addEventListener("mouseleave", () => {
+            if (this.interactionMode === "edit" && !this.isRightPainting) this._hoverTile = null;
         });
 
         this.canvas.addEventListener("wheel", (e) => {
             e.preventDefault();
-            const rect = this.canvas.getBoundingClientRect();
-            const cx = e.clientX - rect.left;
-            const cy = e.clientY - rect.top;
+            const { cx, cy } = this._canvasPointFromEvent(e);
 
             const worldX = (cx - this.offsetX) / this.scale;
             const worldY = (cy - this.offsetY) / this.scale;
@@ -209,38 +320,19 @@ export class CanvasRenderer {
         }, { passive: false });
 
         this.canvas.addEventListener("click", (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const cx = e.clientX - rect.left;
-            const cy = e.clientY - rect.top;
-
-            const gx = Math.floor((cx - this.offsetX) / this.scale);
-            const gy = Math.floor((cy - this.offsetY) / this.scale);
-
-            const x = ((gx % this.world.width) + this.world.width) % this.world.width;
-            const y = ((gy % this.world.height) + this.world.height) % this.world.height;
-
-            const tile = this.world.grid[x][y];
-            const topCell = tile.cells.length > 0 ? tile.cells[tile.cells.length - 1] : null;
-
-            if (this.onCellClick) this.onCellClick(x, y, tile, topCell);
+            if (this._panMoved) {
+                this._panMoved = false;
+                return;
+            }
+            const hit = this._tileHitFromEvent(e);
+            if (this.onCellClick) this.onCellClick(hit.x, hit.y, hit.tile, hit.topCell);
         });
 
         this.canvas.addEventListener("contextmenu", (e) => {
             e.preventDefault();
-            const rect = this.canvas.getBoundingClientRect();
-            const cx = e.clientX - rect.left;
-            const cy = e.clientY - rect.top;
-
-            const gx = Math.floor((cx - this.offsetX) / this.scale);
-            const gy = Math.floor((cy - this.offsetY) / this.scale);
-
-            const x = ((gx % this.world.width) + this.world.width) % this.world.width;
-            const y = ((gy % this.world.height) + this.world.height) % this.world.height;
-
-            const tile = this.world.grid[x][y];
-            const topCell = tile.cells.length > 0 ? tile.cells[tile.cells.length - 1] : null;
-
-            if (this.onCellRightClick) this.onCellRightClick(x, y, tile, topCell);
+            if (this.interactionMode === "edit") return;
+            const hit = this._tileHitFromEvent(e);
+            if (this.onCellRightClick) this.onCellRightClick(hit.x, hit.y, hit.tile, hit.topCell);
         });
     }
 
@@ -339,6 +431,45 @@ export class CanvasRenderer {
         return out;
     }
 
+    _wrappedSegments(start, span, worldSize) {
+        if (span >= worldSize) return [{ start: 0, size: worldSize }];
+
+        const normalizedStart = ((start % worldSize) + worldSize) % worldSize;
+        const end = normalizedStart + span;
+        if (end <= worldSize) return [{ start: normalizedStart, size: span }];
+
+        return [
+            { start: normalizedStart, size: worldSize - normalizedStart },
+            { start: 0, size: end - worldSize }
+        ];
+    }
+
+    _brushPreviewColor01() {
+        if (this.brushIntensity > 0) return [0.95, 0.56, 0.12];
+        if (this.brushIntensity < 0) return [0.18, 0.43, 0.92];
+        return [0.35, 0.35, 0.35];
+    }
+
+    _pushBrushPreview(centerX, centerY) {
+        const brushWidth = Math.max(1, Math.min(this.world.width, this.brushWidth | 0));
+        const brushHeight = Math.max(1, Math.min(this.world.height, this.brushHeight | 0));
+        const startX = centerX - Math.floor(brushWidth * 0.5);
+        const startY = centerY - Math.floor(brushHeight * 0.5);
+        const xSegments = this._wrappedSegments(startX, brushWidth, this.world.width);
+        const ySegments = this._wrappedSegments(startY, brushHeight, this.world.height);
+        const [r, g, b] = this._brushPreviewColor01();
+
+        for (let xi = 0; xi < xSegments.length; xi++) {
+            const xSeg = xSegments[xi];
+            for (let yi = 0; yi < ySegments.length; yi++) {
+                const ySeg = ySegments[yi];
+                this._pushRect(xSeg.start, ySeg.start, xSeg.size, ySeg.size, r, g, b, 0.12);
+                this._pushStrokeRect(xSeg.start, ySeg.start, xSeg.size, ySeg.size, 0.12, r, g, b, 0.92);
+                this._pushStrokeRect(xSeg.start, ySeg.start, xSeg.size, ySeg.size, 0.04, 1, 1, 1, 0.55);
+            }
+        }
+    }
+
     render() {
         const gl = this.gl;
         const wCss = this.canvas.width / this._dpr;
@@ -350,7 +481,7 @@ export class CanvasRenderer {
         const maxX = Math.min(this.world.width - 1, Math.ceil((wCss - this.offsetX) / this.scale));
         const maxY = Math.min(this.world.height - 1, Math.ceil((hCss - this.offsetY) / this.scale));
 
-        const tilesVisible = (maxX - minX + 1) * (maxY - minY + 1);
+        const tilesVisible = Math.max(0, maxX - minX + 1) * Math.max(0, maxY - minY + 1);
         this._ensureInstanceCapacity(Math.max(this._instanceCapacity, tilesVisible * 2));
 
         for (let x = minX; x <= maxX; x++) {
@@ -388,6 +519,10 @@ export class CanvasRenderer {
                     }
                 }
             }
+        }
+
+        if (this.interactionMode === "edit" && this._hoverTile) {
+            this._pushBrushPreview(this._hoverTile.x, this._hoverTile.y);
         }
 
         gl.clear(gl.COLOR_BUFFER_BIT);
