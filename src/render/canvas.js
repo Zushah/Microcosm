@@ -1,8 +1,6 @@
 const fetchText = async (url) => {
     const res = await fetch(url);
-    if (!res.ok) {
-        throw new Error(`Failed to load shader: ${String(url)} (${res.status} ${res.statusText})`);
-    }
+    if (!res.ok) throw new Error(`Failed to load shader: ${String(url)} (${res.status} ${res.statusText})`);
     return await res.text();
 };
 
@@ -91,7 +89,6 @@ export class CanvasRenderer {
 
         this.onCellClick = null;
         this.onCellRightClick = null;
-        this.lineageColorCache = new Map();
         this._lineageRgbCache = new Map();
         this._dpr = 1;
         this._instanceStrideFloats = 8;
@@ -247,18 +244,6 @@ export class CanvasRenderer {
         });
     }
 
-    elementColor(sym) {
-        const map = {
-            A: [220, 240, 255],
-            B: [200, 220, 160],
-            C: [255, 200, 160],
-            D: [250, 220, 250],
-            E: [255, 235, 200],
-            F: [200, 200, 200]
-        };
-        return map[sym] || [210, 210, 210];
-    }
-
     _ensureInstanceCapacity(nextCount) {
         if (nextCount <= this._instanceCapacity) return;
         const gl = this.gl;
@@ -352,33 +337,6 @@ export class CanvasRenderer {
 
         this._lineageRgbCache.set(lineageId, out);
         return out;
-    }
-
-    lineageColor(lineageId) {
-        if (this.lineageColorCache.has(lineageId)) return this.lineageColorCache.get(lineageId);
-
-        let x = (lineageId | 0) ^ 0x9e3779b9;
-        x = Math.imul(x ^ (x >>> 16), 0x85ebca6b);
-        x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
-        x = (x ^ (x >>> 16)) >>> 0;
-
-        const hue = x % 360;
-        const sat = 70;
-        const light = 55;
-
-        const col = `hsl(${hue}, ${sat}%, ${light}%)`;
-        this.lineageColorCache.set(lineageId, col);
-        return col;
-    }
-
-    colorForCell(cell) {
-        return this.lineageColor(cell.lineageId || 0);
-    }
-
-    withAlpha(rgbString, alpha) {
-        const m = rgbString.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-        if (!m) return rgbString;
-        return `rgba(${m[1]},${m[2]},${m[3]},${alpha})`;
     }
 
     render() {

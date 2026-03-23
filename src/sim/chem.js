@@ -82,5 +82,3 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
         elementMask
     };
 };
-
-export const computeStability = (size, polarity) => Math.max(0, 1.0 - 0.08 * size - Math.abs(polarity - 0.5));

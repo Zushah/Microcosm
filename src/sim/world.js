@@ -124,7 +124,7 @@ export class World {
         this.diffuseMolecules();
         const dtSec = this.dt / 1000;
         const grid = this.grid;
-        const env = this._sharedEnv || (this._sharedEnv = { enval: 0, tileEnval: 0, localEnval: 0, avgEnval: 0, dt: dtSec });
+        const env = this._sharedEnv || (this._sharedEnv = { enval: 0, localEnval: 0, avgEnval: 0, dt: dtSec });
         env.dt = dtSec;
         env.avgEnval = this.avgEnval;
         for (let x = 0; x < this.width; x++) {
@@ -134,7 +134,6 @@ export class World {
                 const cells = tile.cells;
                 if (!cells || cells.length === 0) continue;
                 env.enval = tile.enval;
-                env.tileEnval = tile.enval;
                 env.localEnval = this.getLocalEnvalAverage(x, y, 2);
                 env.avgEnval = this.avgEnval;
                 for (let i = 0; i < cells.length; i++) {
@@ -460,9 +459,4 @@ export class World {
         return out;
     }
 
-    randomNeighbor(x, y) {
-        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-        const [dx, dy] = dirs[Math.floor(Math.random() * dirs.length)];
-        return [(x + dx + this.width) % this.width, (y + dy + this.height) % this.height];
-    }
 }

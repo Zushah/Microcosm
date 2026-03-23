@@ -29,7 +29,6 @@ export class Cell {
         const refreshEnv = () => {
             if (!world || !tile) return;
             env.enval = tile.enval;
-            env.tileEnval = tile.enval;
             env.localEnval = world.getLocalEnvalAverage(tile.__x, tile.__y, 2);
             env.avgEnval = world.avgEnval;
         };
@@ -343,8 +342,6 @@ export class Cell {
         return (d - b);
     }
 
-    _worldWidth() { return this._worldRef ? this._worldRef.width : 200; }
-    _worldHeight() { return this._worldRef ? this._worldRef.height : 200; }
 }
 
 const mutateGenome = (genome, worldAvgEnval = 0) => {
@@ -488,9 +485,7 @@ const applyEnzymeClassDefaults = (enzyme) => {
     if (enzyme.type === "anabolase") {
         if (typeof enzyme.bondMultiplier !== "number") enzyme.bondMultiplier = cls.bondMultiplier ?? 1.15;
         if (typeof enzyme.bondCostFraction !== "number") enzyme.bondCostFraction = cls.bondCostFraction ?? 0.90;
-        delete enzyme.transmuteProb;
         delete enzyme.bondHarvestFraction;
-        delete enzyme.transmuteHarvestFraction;
         delete enzyme.downhillHarvestFraction;
     } else if (enzyme.type === "catabolase") {
         enzyme.bondHarvestFraction = Math.max(1, cls.bondHarvestFraction ?? 1.0);

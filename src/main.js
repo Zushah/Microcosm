@@ -1,6 +1,5 @@
 import { World } from "./sim/world.js";
 import { CanvasRenderer } from "./render/canvas.js";
-import { resetReactionCounter } from "./sim/bio.js";
 import { ALL_ELEMENT_MASK, ELEMENTS, ELEMENT_MASKS, maskToElements, maskToString, normalizeSpecificityMask } from "./sim/chem.js";
 
 const world = new World(320, 240);
@@ -133,8 +132,7 @@ const hud = {
     population: document.getElementById("statPopulation"),
     avgEnergy: document.getElementById("statAvgEnergy"),
     lineages: document.getElementById("statLineages"),
-    enzymeDiversity: document.getElementById("statEnzymeDiversity"),
-    selectedLineage: document.getElementById("statSelectedLineage")
+    enzymeDiversity: document.getElementById("statEnzymeDiversity")
 };
 
 let elementsDiv = document.getElementById("statElements");
@@ -146,11 +144,9 @@ if (!elementsDiv) {
 }
 
 let selectedCell = null;
-let selectedTile = null;
 
 renderer.onCellClick = (x, y, tile, topCell) => {
     selectedCell = topCell;
-    selectedTile = tile;
     updateInfoPanel();
     lastInfoUpdateMs = performance.now();
 };
@@ -762,7 +758,6 @@ const main = () => {
         const spawnProb = spawnChanceBasedOnPopulation(livingCells.size);
         if (Math.random() < spawnProb) world.spawnRandomCell(randomGenome);
 
-        resetReactionCounter();
         world.step();
         tpsTicks++;
 
