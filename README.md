@@ -4,93 +4,146 @@
 <p align="center">Life simulation of evolving unicellular organisms in a stochastic artificial chemistry.<br><a href="https://zushah.github.io/Microcosm">https://zushah.github.io/Microcosm</a></p>
 <hr>
 
-## 1. Atomic Theory and Chemistry
-Microcosm models matter as a discrete artificial chemistry built from six fundamental elements (**A**, **B**, **C**, **D**, **E**, and **F**), each with its own mass, polarity, and intrinsic energetic value. Rather than attempting biochemical realism, the simulation uses a compact state space in which higher-order ecological behavior emerges from simple compositional rules.
-- Energetic Isotopes: Elements **D** and **E** carry high elemental energy and remain the most concentrated chemical fuel available to evolving cells.
-- Waste State: Element **F** is a low-energy terminal state and commonly accumulates as a byproduct of destructive metabolism.
-- Molecular Energetics: A molecule is represented by an elemental composition together with a bond multiplier $`\beta`$. Its total stored energy $`E_{mol}`$ is:
+## 1. Atomic Theory, Molecules, and Space
+Microcosm models matter as a discrete artificial chemistry built from six fundamental elements (**A**, **B**, **C**, **D**, **E**, and **F**). Each element carries intrinsic polarity and intrinsic elemental energy; masses are also defined as metadata, but the active dynamics in the current simulation are driven by composition, bond state, polarity, and enval coupling rather than by explicit mechanics.
+- Energetic Species: **D** and **E** are the most energy-rich elements and therefore remain the most concentrated atomic fuel available to evolving cells.
+- Terminal Sink: **F** is a low-energy terminal state and commonly accumulates as the endpoint of downhill transmutation.
+- Molecular Energetics: A molecule is represented by an elemental composition together with a bond multiplier $`\beta`$. Its total stored energy $`E_{\mathrm{mol}}`$ is:
 ```math
-E_{mol} = \beta \sum_i n_i E_i.
+E_{\mathrm{mol}} = \beta \sum_i n_i E_i.
 ```
-- Molecular Mobility: Diffusion is stochastic and depends on molecular size $`N`$ and mean polarity $`P`$. The diffusion parameter $`D`$ is:
+- Molecular Mobility: A molecule of size $`N`$ and mean polarity $`\bar{P}`$ receives a diffusion parameter $`D`$ given by:
 ```math
-D = \min\left(0.04,\ 0.01 + \frac{P}{N + 1} \cdot 0.04\right).
+D = \min\left(0.04,\ 0.01 + \frac{\bar{P}}{N + 1} \cdot 0.04\right).
 ```
-Small, polar molecules therefore migrate through the lattice more rapidly than large or weakly polar compounds.
+Larger molecules therefore move more slowly, while smaller and more polar molecules hop more readily through the lattice.
+- Spatial Substrate Field: The world is a toroidal lattice. Each tile begins with a shared base enval and a seeded molecular inventory: **A** is always present, while **B**, **C**, **D**, **E**, **F**, and a small **BC** dimer appear stochastically.
+- Diffusion Mode: Molecular diffusion is asynchronous and event-scheduled. When a molecule diffuses, it moves to one random cardinal neighbor rather than being globally re-sampled every tick.
 
-## 2. Enzymology and Metabolism
-Life is defined by the possession of a genome encoding functional proteins called **enzymes** together with a scalar environmental optimum called **optimal enval**. Enzymes catalyze transformations over both extracellular and intracellular molecules, while the cell's optimal enval determines which sign of the ambient field it can exploit most efficiently.
+## 2. Enzymology, Specificity, and Metabolism
+Life is defined by the possession of a genome encoding functional proteins called **enzymes** together with a scalar environmental optimum called **optimal enval**. Each enzyme stores a class, a specificity mask over the six elements, an enval response width $`\sigma`$, an enval throughput $`\tau`$, and a secretion probability.
+- Specificity Rule: Let $`X(M)`$ be the set of elements present in molecule $`M`$, and let $`S`$ be the enzyme specificity mask. For anabolase and catabolase,
+```math
+X(M) \subseteq S.
+```
+For transmutase,
+```math
+X(M) \cap S \neq \varnothing.
+```
+Thus synthetic and degradative enzymes are exclusive over their allowed alphabet, whereas transmutases only require access to at least one allowed source element.
+
 ### Anabolase
-Anabolase enzymes perform anabolism by polymerizing accepted substrates into a single higher-bond product. This process is endergonic: the cell must pay the energetic difference between the bonded product and its unbound elemental constituents, together with a fixed activation cost. In the current implementation, the net cellular energy change is:
+Anabolase enzymes perform anabolism by sampling accepted substrates from the extracellular and intracellular pools and polymerizing them into a single higher-bond product. The product composition is simply the summed elemental composition of the substrates, but its bond multiplier is elevated above unity. The energetic cost is the increase in bond storage, scaled by a bond-cost fraction $`\lambda`$, together with a fixed catalytic cost $`E_{\mathrm{act}}`$:
 ```math
-\Delta E_{cell} = E_{enval} - \left[(\beta - 1)\sum_i n_i E_i + E_{act}\right].
+\Delta E_{\mathrm{cell}} = E_{\mathrm{enval}} - \left(\lambda\,\max\left(0, E_{\mathrm{bond}}^{\mathrm{prod}} - \sum_j E_{\mathrm{bond}}^{(j)}\right) + E_{\mathrm{act}}\right).
 ```
-Thus anabolism is often only sustainable when either prior catabolism or aligned enval flux subsidizes the reaction.
-### Catabolase
-Catabolase enzymes perform catabolism by selecting a substrate, releasing its bond energy, and fragmenting it into lower-bond byproducts. In addition, catabolism may transmute energetic isotopes **D** and **E** into low-energy **F**, extracting additional chemical free energy from the conversion. The chemically available yield is therefore:
-```math
-\Delta E_{chem} = \eta\left(E_{bond} + E_{transmute} - E_{act}\right),
-```
-where $`\eta`$ is the enzyme harvest fraction. The total cellular gain is then $`\Delta E_{chem} + E_{enval}`$.
-### Transportase
-Transportase enzymes actively import **D** and **E** atoms from the local tile into the cell, paying an energy cost proportional to the transported mass. This allows a lineage to concentrate scarce high-energy isotopes internally even when passive access would be insufficient.
-### Energy Transduction
-All enzyme classes may couple metabolism to the signed environmental scalar **`enval`**. The sign of the cell's genomic optimum determines the favorable direction of flux: cells with positive optimal enval consume positive enval and emit negative enval, whereas cells with negative optimal enval do the converse. If aligned field is available, the harvested magnitude $`I`$ is:
-```math
-I = \min(V_{\parallel}, \tau \phi),
-```
-where $`V_{\parallel}`$ is the locally available aligned enval, $`\tau`$ is the enzyme throughput, and $`\phi`$ is the enval-matching efficiency from Section 3. The default partition is:
-```math
-E_{enval} = \frac{2}{3}I, \qquad V_{out} = -\operatorname{sgn}(V_{opt})\frac{1}{3}I.
-```
-This makes enval neither intrinsically favorable nor intrinsically hostile; whichever sign is abundant can become metabolically useful for the phenotype adapted to it.
+This makes anabolism endergonic unless it is subsidized by previously stored energy or by aligned enval harvesting.
 
-## 3. Reaction Kinetics
-The primary environmental variable is a single unbounded signed scalar called **`enval`**. At initialization the world begins with a random base enval sampled from the interval $`[-1, +1]`$, after which diffusion and metabolism are free to push the field to any real value. Enzymatic efficiency $\phi$ is governed by a Gaussian dependence on local enval mismatch.
+### Catabolase
+Catabolase enzymes perform catabolism by selecting one accepted substrate of size at least two and fragmenting it into two lower-bond products. The current implementation does **not** perform the old catabolic isotope-transmutation step; catabolase now extracts only released bond energy, scaled by a harvest fraction $`h_b`$ (currently defaulted to 1.0), minus catalytic cost:
 ```math
-\phi(V_{loc}, V_{opt}) = \exp\left(-\frac{(V_{loc} - V_{opt})^2}{2\sigma^2}\right).
+\Delta E_{\mathrm{cell}} = h_b\,\max\left(0, E_{\mathrm{bond}}^{\mathrm{sub}} - \sum_k E_{\mathrm{bond}}^{(k)}\right) - E_{\mathrm{act}} + E_{\mathrm{enval}}.
 ```
-- Local Sensing: $`V_{loc}`$ is the mean enval over the $`5 \times 5`$ neighborhood surrounding the cell (Chebyshev radius of two).
-- Genomic Target: $`V_{opt}`$ is stored in the cell genome as **optimal enval**.
+If the net usable gain is non-positive, the reaction is discarded.
+
+### Transmutase
+Transmutase replaces the former transportase system. It acts on one accepted molecule and changes exactly one atom at a time along a directed artificial transmutation ladder.
+- Uphill ladder:
+```math
+F \to A \to C \to B \to E \to D
+```
+- Downhill collapse:
+```math
+A, B, C, D, E \to F
+```
+If the raw elemental change is $`\Delta E_{\mathrm{raw}}`$, then downhill transmutation only harvests a fraction $`h_d`$ of that release, while uphill transmutation pays the full energetic penalty:
+```math
+\Delta E_{\mathrm{trans}} =
+\begin{cases}
+h_d\,\Delta E_{\mathrm{raw}}, & \Delta E_{\mathrm{raw}} \ge 0, \\
+\Delta E_{\mathrm{raw}}, & \Delta E_{\mathrm{raw}} < 0.
+\end{cases}
+```
+The full cellular effect is then:
+```math
+\Delta E_{\mathrm{cell}} = \Delta E_{\mathrm{trans}} - E_{\mathrm{act}} + E_{\mathrm{enval}}.
+```
+When both directions are available, transmutase biases more strongly toward uphill moves when aligned enval is abundant and the cell already has substantial energy reserves.
+
+### Enval Coupling
+All enzyme classes may couple metabolism to the signed environmental scalar **`enval`**. Let $`s`$ denote the cell polarity induced by genomic optimal enval ($`s = +1`$ for positive-adapted cells, $`s = -1`$ for negative-adapted cells, and random sign if the optimum is exactly zero). If the local field is aligned with that polarity, the harvested input magnitude is:
+```math
+I = \min\left(\max(0, sV_{\mathrm{loc}}),\ \tau\right).
+```
+By default the harvested energy term is:
+```math
+E_{\mathrm{enval}} = \frac{2}{3}I.
+```
+The reaction simultaneously pumps opposite-sign enval back into the environment. With baseline pump magnitude $`P`$ and recycle fraction $`f_r`$ (default $`P = 0.3`$, $`f_r = 1/3`$), the emitted field term is:
+```math
+V_{\mathrm{out}} = -s\left(P + f_r I\right).
+```
+Operationally, aligned enval is removed from the local tile while opposite-sign enval is deposited into the local Moore neighborhood. Successful metabolism therefore does not merely consume a pre-existing field; it actively reshapes that field.
+
+## 3. Reaction Kinetics and Field Dynamics
+The primary environmental variable is a single unbounded signed scalar called **`enval`**. At initialization the world begins with a random base enval sampled from the interval $`[-1, +1]`$, after which diffusion and metabolism are free to push the field to any real value. Enzymatic efficiency $`\phi`$ is governed by a Gaussian dependence on local enval mismatch:
+```math
+\phi(V_{\mathrm{loc}}, V_{\mathrm{opt}}) = \exp\left(-\frac{(V_{\mathrm{loc}} - V_{\mathrm{opt}})^2}{2\sigma^2}\right).
+```
+- Local Sensing: $`V_{\mathrm{loc}}`$ is the mean enval over the $`5 \times 5`$ neighborhood surrounding the cell (Chebyshev radius of two).
+- Genomic Target: $`V_{\mathrm{opt}}`$ is stored in the cell genome as **optimal enval**.
 - Enzyme Tolerance: $`\sigma`$ is stored per enzyme as its enval response width.
 
-The reaction attempt probability is then scaled by this efficiency term:
+The reaction attempt probability is scaled by this efficiency term:
 ```math
-p_{rxn} = \min(1, 1.2R_{base})\,\phi.
+p_{\mathrm{rxn}} = \min(1, 1.2R_{\mathrm{base}})\,\phi.
 ```
-Strong mismatch simultaneously suppresses reaction probability and enval harvesting throughput, so maladapted cells suffer a rapid collapse in metabolic performance.
+Current base rates are 0.85 for anabolase, 0.98 for catabolase, and 0.30 for transmutase. Strong mismatch therefore suppresses metabolism primarily by preventing reactions from firing at all; enval harvesting falls indirectly because fewer reactions occur.
 
-## 4. Cellular Physiology, Field Dynamics, and Evolution
-A cell is modeled as a non-equilibrium metabolic agent coupled to a diffusing environmental field.
-- Basal Maintenance: Each cell continuously pays a maintenance cost in stored energy. If energy reaches zero, the cell dies and releases its internal molecular inventory.
-- Enval Stress: In addition to basal maintenance, mismatch between local and optimal enval increases the cell's starvation/decay timer according to:
-```math
-\Delta t_{stress} = k\,|V_{loc} - V_{opt}|^{1.6}\max(1, n_{enz}),
-```
-where $`k`$ is the genome-level stress factor and $`n_{enz}`$ is enzyme count. If the accumulated timer exceeds the decay threshold, the cell dies.
-- Spatial Field Dynamics: The enval field diffuses across a toroidal lattice by discrete local averaging:
+The enval field itself diffuses across the toroidal lattice by discrete local averaging:
 ```math
 V_{t+1}(x, y) = (1 - \alpha)V_t(x, y) + \alpha\,\bar{V}_{3 \times 3}(x, y), \qquad \alpha = 0.18.
 ```
-Reaction-generated enval is deposited into the local Moore neighborhood, allowing successful metabolism to reshape the surrounding field.
-- Reproduction: Once a cell's stored energy exceeds its reproduction threshold, it undergoes binary fission into a nearby empty tile. Energy and internal molecules are partitioned stochastically between parent and offspring.
-- Founder Initialization: Randomly spawned founder cells receive an optimal enval sampled from a narrow band centered on the current world-average enval:
+Because reactions continuously remove aligned enval and emit opposite-sign enval, the field is both smoothed by diffusion and destabilized by metabolic feedback.
+
+## 4. Cellular Physiology and Evolution
+A cell is a stationary metabolic agent that occupies a tile, stores free energy, stores an internal molecular inventory, and executes its genome each tick.
+- Basal Maintenance: Each cell continuously pays a maintenance cost in stored energy. If energy reaches zero, the cell dies and releases its internal molecules into the environment.
+- Opportunistic Uptake: If internal elemental reserves fall below the desired reserve target, the cell passively grabs one random molecule from the tile into its internal pool. There is no longer a dedicated transportase class for active import.
+- Enval Stress: In addition to basal maintenance, mismatch between local and optimal enval increases the cell's starvation/decay timer according to:
 ```math
-V_{opt}^{(0)} \sim U(\bar{V}_{world} - 0.1,\ \bar{V}_{world} + 0.1).
+\Delta t_{\mathrm{stress}} = k\,|V_{\mathrm{loc}} - V_{\mathrm{opt}}|^{1.6}\max(1, n_{\mathrm{enz}}),
 ```
-- Heritable Enval Adaptation: During division, the offspring's optimal enval is inherited by a biased midpoint mutation rule. Let $`P`$ be the parental optimal enval and $`W`$ the current world-average enval. Define:
+where $`k`$ is the genome-level stress factor and $`n_{\mathrm{enz}}`$ is enzyme count. If the accumulated timer exceeds the decay threshold, the cell dies.
+- Reproduction: Once stored free energy exceeds the reproduction threshold, the cell divides into a nearby empty tile within radius two. Energy is split stochastically around a 50/50 partition, and each internal molecule independently has a 50% chance to go to the offspring.
+- Lineage Identity: Offspring inherit the parental lineage identifier, so lineage structure tracks ecological descent rather than instantaneous genotype identity.
+
+Founders are seeded with an optimal enval drawn from a narrow band around the current world-average enval and initially carry only an **anabolase** plus a **catabolase**, both with **ABC** specificity. Transmutases arise later by mutation or by enzyme class switching.
+
+During division, the offspring optimal enval is inherited by a biased midpoint rule. Let $`P`$ be the parental optimal enval and $`W`$ the current world-average enval. Define:
 ```math
-\delta = \max\left(\frac{|P - W|}{2}, \varepsilon\right), \qquad \varepsilon = 0.03.
+\delta = \max\left(\frac{|P - W|}{2},\ \varepsilon\right), \qquad \varepsilon = 0.03.
 ```
 Then the offspring receives:
 ```math
-V'_{opt} =
+V'_{\mathrm{opt}} =
 \begin{cases}
-P & \text{with probability } 0.50,\\
-P + \operatorname{sgn}(W - P)\delta & \text{with probability } 0.25,\\
-P - \operatorname{sgn}(W - P)\delta & \text{with probability } 0.25.
+P, & \text{with probability } 0.50, \\
+P + \mathrm{sgn}(W - P)\,\delta, & \text{with probability } 0.25, \\
+P - \mathrm{sgn}(W - P)\,\delta, & \text{with probability } 0.25.
 \end{cases}
 ```
-Other genome parameters (including enzyme affinity, secretion behavior, enval tolerance width, enval throughput, reproduction threshold, and decay time) also mutate stochastically.
+Other genome parameters also mutate stochastically: reproduction threshold, decay time, default secretion probability, enval stress factor, enzyme specificity masks, enzyme class, enval response width, secretion probability, enval throughput, anabolase bond multiplier, and transmutase downhill harvest fraction. Enzyme count may also increase or decrease over evolutionary time.
 
-The central ecological consequence is that successful lineages tend to destabilize the very field regime they exploit. Positive-adapted cells deplete positive enval and produce negative enval; negative-adapted cells deplete negative enval and produce positive enval. The intended macrodynamics are therefore cyclical succession, lineage turnover, and repeated ecological boom-bust behavior.
+The central ecological consequence is that successful lineages tend to destabilize the very field regime they exploit. Positive-adapted cells deplete positive enval and emit negative enval; negative-adapted cells deplete negative enval and emit positive enval. The intended macrodynamics are therefore cyclical succession, lineage turnover, and repeated ecological boom-bust behavior.
+
+## 5. Runtime and Interface
+Microcosm is a browser-native ES-module application with no backend and no build step in the repository itself. The runtime is organized into a small set of source files:
+- `src/sim/chem.js` defines the artificial chemistry and molecule construction.
+- `src/sim/bio.js` defines enzyme classes and reaction execution.
+- `src/sim/cell.js` defines cellular physiology, reaction logging, division, and mutation.
+- `src/sim/world.js` defines the toroidal world, molecule diffusion, enval diffusion, and spawning.
+- `src/render/canvas.js` defines the WebGL2 renderer.
+- `src/main.js` wires together the simulation loop, statistics, interaction, and inspector UI.
+
+At startup the simulation builds a 320 × 240 world, spawns 32 founder cells, and advances the world at a fixed step of 10 ms. The renderer colors the background by local enval and colors cells by lineage identity. The HUD reports frame rate, tick rate, population, average energy, lineage count, enzyme functional diversity, elemental totals, and average enval. Left-clicking a cell opens a detailed inspector; right-clicking a cell selects its lineage. The inspector exposes internal molecules, genome parameters, recent reactions, and reaction-level energetic bookkeeping, and a button copies the recent reaction log to the clipboard.
