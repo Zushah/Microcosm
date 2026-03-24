@@ -147,6 +147,7 @@ let selectedCell = null;
 
 const interactionState = {
     mode: "explore",
+    tileColorMode: "enval",
     brushWidth: 10,
     brushHeight: 10,
     brushIntensity: 0.00,
@@ -157,6 +158,7 @@ const interactionUi = {
     panel: null,
     toggle: null,
     modeButtons: [],
+    tileColorModeInput: null,
     editSettings: null,
     brushWidthInput: null,
     brushHeightInput: null,
@@ -183,6 +185,7 @@ const formatBrushIntensity = (value) => {
 
 const syncInteractionUi = () => {
     renderer.setInteractionMode(interactionState.mode);
+    renderer.setTileColorMode(interactionState.tileColorMode);
     renderer.setEditBrush(
         interactionState.brushWidth,
         interactionState.brushHeight,
@@ -209,6 +212,7 @@ const syncInteractionUi = () => {
     interactionUi.brushHeightInput.disabled = !isEditMode;
     interactionUi.brushIntensityInput.disabled = !isEditMode;
 
+    interactionUi.tileColorModeInput.value = interactionState.tileColorMode;
     interactionUi.brushWidthInput.value = String(interactionState.brushWidth);
     interactionUi.brushHeightInput.value = String(interactionState.brushHeight);
     interactionUi.brushIntensityInput.value = formatBrushIntensity(interactionState.brushIntensity);
@@ -230,6 +234,20 @@ const createInteractionPanel = () => {
                 <button class="modeOption" data-mode="explore" type="button">Explore</button>
                 <button class="modeOption" data-mode="edit" type="button">Edit</button>
             </div>
+        </div>
+        <div class="controlRow">
+            <label class="fieldLabel fieldLabelFull">
+                <span>Tile coloring</span>
+                <select id="tileColorMode">
+                    <option value="enval">Enval</option>
+                    <option value="element:A">Element A concentration</option>
+                    <option value="element:B">Element B concentration</option>
+                    <option value="element:C">Element C concentration</option>
+                    <option value="element:D">Element D concentration</option>
+                    <option value="element:E">Element E concentration</option>
+                    <option value="element:F">Element F concentration</option>
+                </select>
+            </label>
         </div>
         <div id="interactionEditSettings">
             <div class="controlRow">
@@ -259,6 +277,7 @@ const createInteractionPanel = () => {
     interactionUi.panel = panel;
     interactionUi.toggle = panel.querySelector("#interactionPanelToggle");
     interactionUi.modeButtons = [...panel.querySelectorAll(".modeOption")];
+    interactionUi.tileColorModeInput = panel.querySelector("#tileColorMode");
     interactionUi.editSettings = panel.querySelector("#interactionEditSettings");
     interactionUi.brushWidthInput = panel.querySelector("#editBrushWidth");
     interactionUi.brushHeightInput = panel.querySelector("#editBrushHeight");
@@ -276,6 +295,11 @@ const createInteractionPanel = () => {
             syncInteractionUi();
         });
     }
+
+    interactionUi.tileColorModeInput.addEventListener("change", () => {
+        interactionState.tileColorMode = interactionUi.tileColorModeInput.value || "enval";
+        syncInteractionUi();
+    });
 
     interactionUi.brushWidthInput.addEventListener("change", () => {
         interactionState.brushWidth = clampBrushSpan(
@@ -590,48 +614,6 @@ const updateHud = () => {
     elementsDiv.textContent = parts.join("  •  ");
 };
 
-const TRANSMUTASE_UP = {
-    F: "A",
-    A: "C",
-    C: "B",
-    B: "E",
-    E: "D"
-};
-
-const TRANSMUTASE_DOWN = {
-    A: "F",
-    B: "F",
-    C: "F",
-    D: "F",
-    E: "F"
-};
-
-const transmutaseRuleString = (keys) => {
-    const parts = [];
-    for (let i = 0; i < keys.length; i++) {
-        const k = keys[i];
-        const targets = [];
-        if (TRANSMUTASE_UP[k]) targets.push(TRANSMUTASE_UP[k]);
-        if (TRANSMUTASE_DOWN[k]) targets.push(TRANSMUTASE_DOWN[k]);
-        if (targets.length > 0) parts.push(`${k}→${targets.join("/")}`);
-    }
-    if (parts.length === 0) return "source∩S → ladder/base";
-    return parts.slice(0, 4).join("; ");
-};
-
-const enzymeEquationString = (enzyme) => {
-    const spec = specificityLabel(enzyme);
-    const keys = maskToElements(normalizedSpecificityMask(enzyme));
-    if (enzyme.type === "anabolase") {
-        return `subset(${spec}) + subset(${spec}) → bonded subset(${spec})`;
-    }
-    if (enzyme.type === "catabolase") {
-        return `subset(${spec}) → fragments`;
-    }
-    if (enzyme.type === "transmutase") return transmutaseRuleString(keys);
-    return `${enzyme.type}: subset(${spec})`;
-};
-
 const compositionToString = (comp) => {
     if (!comp) return "—";
     return Object.entries(comp).map(([k, v]) => `${k}${v}`).join("");
@@ -700,17 +682,15 @@ const enzymeParameterString = (enzyme, genome) => {
     const sigma = (enzyme.envalSigma ?? 0.18).toFixed(2);
     const throughput = (enzyme.envalThroughput ?? 0).toFixed(3);
     const secretion = (enzyme.secretionProb ?? genome.defaultSecretionProb ?? 0).toFixed(2);
-    const parts = [`spec:${specificityLabel(enzyme)}`, `σenv:${sigma}`, `thr:${throughput}`, `sec:${secretion}`];
-
+    const parts = [`specificity:${specificityLabel(enzyme)}`, `envalSigma:${sigma}`, `throughput:${throughput}`, `secretion:${secretion}`];
     if (enzyme.type === "anabolase") {
-        parts.unshift(`ca:${(enzyme.bondCostFraction ?? 0.90).toFixed(2)}`);
-        parts.unshift(`β:${(enzyme.bondMultiplier ?? 1.15).toFixed(2)}`);
+        parts.unshift(`cost:${(enzyme.bondCostFraction ?? 0.90).toFixed(2)}`);
+        parts.unshift(`multiplier:${(enzyme.bondMultiplier ?? 1.15).toFixed(2)}`);
     } else if (enzyme.type === "catabolase") {
-        parts.unshift(`hb:${(enzyme.bondHarvestFraction ?? 1.00).toFixed(2)}`);
+        parts.unshift(`harvest:${(enzyme.bondHarvestFraction ?? 1.00).toFixed(2)}`);
     } else if (enzyme.type === "transmutase") {
-        parts.unshift(`hd:${(enzyme.downhillHarvestFraction ?? 0.18).toFixed(2)}`);
+        parts.unshift(`harvest:${(enzyme.downhillHarvestFraction ?? 0.18).toFixed(2)}`);
     }
-
     return parts.join(", ");
 };
 
@@ -757,9 +737,8 @@ const buildCellInfoHtml = (cell) => {
 
     let enzymesHtml = "<ul style='margin:4px 0 8px 18px;padding:0;'>";
     for (const e of cell.genome.enzymes) {
-        const eq = enzymeEquationString(e);
         const params = enzymeParameterString(e, cell.genome);
-        enzymesHtml += `<li><strong>${enzymeDisplayName(e)}</strong> — <code>${eq}</code> (${params})</li>`;
+        enzymesHtml += `<li><strong>${enzymeDisplayName(e)}</strong> — <code>${params}</code></li>`;
     }
     enzymesHtml += "</ul>";
 

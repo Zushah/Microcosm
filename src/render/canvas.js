@@ -8,6 +8,8 @@ const VERT_SOURCE = await fetchText(new URL("./quad.vert.glsl", import.meta.url)
 const FRAG_SOURCE = await fetchText(new URL("./quad.frag.glsl", import.meta.url));
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const TILE_COLOR_MODE_PATTERN = /^element:([A-F])$/;
+const TILE_NEUTRAL_RGB255 = [246, 246, 246];
 
 const hslToRgb255 = (hDeg, s01, l01) => {
     const h = ((hDeg % 360) + 360) % 360;
@@ -38,6 +40,8 @@ const hslToRgb255 = (hDeg, s01, l01) => {
     const b = Math.round((b1 + m) * 255);
     return [clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255)];
 };
+
+const TILE_ELEMENT_RGB255 = { A: hslToRgb255(132, 0.46, 0.48), B: hslToRgb255(220, 0.62, 0.54), C: hslToRgb255(186, 0.62, 0.46), D: hslToRgb255(12, 0.66, 0.56), E: hslToRgb255(46, 0.68, 0.52), F: hslToRgb255(284, 0.44, 0.56) };
 
 const compileShader = (gl, type, source) => {
     const sh = gl.createShader(type);
@@ -95,6 +99,8 @@ export class CanvasRenderer {
         this.onCellRightClick = null;
         this.onEditBrushStroke = null;
         this.interactionMode = "explore";
+        this.tileColorMode = "enval";
+        this._tileColorElement = null;
         this.brushWidth = 10;
         this.brushHeight = 10;
         this.brushIntensity = 0;
@@ -183,6 +189,17 @@ export class CanvasRenderer {
         this.brushWidth = Math.max(1, Math.min(this.world.width, Math.round(Number(width) || 1)));
         this.brushHeight = Math.max(1, Math.min(this.world.height, Math.round(Number(height) || 1)));
         this.brushIntensity = Number.isFinite(intensity) ? intensity : 0;
+    }
+
+    setTileColorMode(mode) {
+        if (mode === "enval" || TILE_COLOR_MODE_PATTERN.test(mode)) {
+            this.tileColorMode = mode;
+            const match = TILE_COLOR_MODE_PATTERN.exec(mode);
+            this._tileColorElement = match ? match[1] : null;
+            return;
+        }
+        this.tileColorMode = "enval";
+        this._tileColorElement = null;
     }
 
     _applyIdleCursor() {
@@ -390,14 +407,12 @@ export class CanvasRenderer {
         }
     }
 
-    _tileRgb01(tile) {
+    _tileEnvalRgb01(tile) {
         const v = (typeof tile.enval === "number") ? tile.enval : 0;
         const mapped = Math.atan(v * 1.25) / (Math.PI * 0.5);
         const mag = Math.min(1, Math.abs(mapped));
 
-        let r = 246;
-        let g = 246;
-        let b = 246;
+        let [r, g, b] = TILE_NEUTRAL_RGB255;
 
         if (mapped >= 0) {
             r = Math.floor(246 - 10 * mag);
@@ -410,6 +425,23 @@ export class CanvasRenderer {
         }
 
         return [clamp(r, 0, 255) / 255, clamp(g, 0, 255) / 255, clamp(b, 0, 255) / 255];
+    }
+
+    _tileElementRgb01(tile, element) {
+        const amount = (this.world && typeof this.world.getTileElementCount === "function") ? this.world.getTileElementCount(tile, element) : 0;
+        const intensity = 1 - Math.exp(-Math.max(0, amount) * 0.35);
+        const target = TILE_ELEMENT_RGB255[element] || TILE_NEUTRAL_RGB255;
+
+        const r = Math.round(TILE_NEUTRAL_RGB255[0] + (target[0] - TILE_NEUTRAL_RGB255[0]) * intensity);
+        const g = Math.round(TILE_NEUTRAL_RGB255[1] + (target[1] - TILE_NEUTRAL_RGB255[1]) * intensity);
+        const b = Math.round(TILE_NEUTRAL_RGB255[2] + (target[2] - TILE_NEUTRAL_RGB255[2]) * intensity);
+
+        return [clamp(r, 0, 255) / 255, clamp(g, 0, 255) / 255, clamp(b, 0, 255) / 255];
+    }
+
+    _tileRgb01(tile) {
+        if (!this._tileColorElement) return this._tileEnvalRgb01(tile);
+        return this._tileElementRgb01(tile, this._tileColorElement);
     }
 
     _lineageRgb01(lineageId) {

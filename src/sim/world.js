@@ -1,16 +1,16 @@
-import { createMolecule } from "./chem.js";
+import { createMolecule, ELEMENT_ORDER } from "./chem.js";
 import { Cell } from "./cell.js";
 
 const DIFFUSION_WHEEL_SIZE = 4096;
 const DIFFUSION_WHEEL_MASK = DIFFUSION_WHEEL_SIZE - 1;
-const U32_TO_UNIT = 2.3283064365386963e-10; // 1 / 2^32
+const TILE_ELEMENT_STRIDE = ELEMENT_ORDER.length;
+const ELEMENT_INDEX = { A: 0, B: 1, C: 2, D: 3, E: 4, F: 5 };
 
 export class World {
     constructor(width, height) {
         this.width = width;
         this.height = height;
         this.dt = 10;
-        this._rngState = ((Math.random() * 0xFFFFFFFF) >>> 0) || 0xA5A5A5A5;
 
         this._diffusionTick = 0;
         this._diffusionWheel = new Array(DIFFUSION_WHEEL_SIZE);
@@ -18,6 +18,15 @@ export class World {
 
         this._tileCount = this.width * this.height;
         this._tilesFlat = new Array(this._tileCount);
+        this._tileElementCounts = new Int32Array(this._tileCount * TILE_ELEMENT_STRIDE);
+        this._tileMassCounts = new Int32Array(this._tileCount);
+        this._tileDiffusionRotor = new Uint8Array(this._tileCount);
+        for (let ti = 0; ti < this._tileCount; ti++) {
+            let hash = (ti ^ 0x9e3779b9) >>> 0;
+            hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b) >>> 0;
+            hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35) >>> 0;
+            this._tileDiffusionRotor[ti] = (hash ^ (hash >>> 16)) & 3;
+        }
 
         this.baseEnval = Chalkboard.numb.random(-1, 1);
 
@@ -61,8 +70,11 @@ export class World {
             const mols = tile.molecules;
             for (let mi = 0; mi < mols.length; mi++) {
                 const m = mols[mi];
+                this._applyTileCompositionDelta(tile, m.composition, 1);
                 m.__tile = tile;
                 m.__tileIndex = mi;
+                m.__diffusionPhase = -1;
+                m.__lastDiffusionDir = -1;
                 m.__diffusionWheelIndex = -1;
                 m.__diffusionWheelPos = -1;
                 this._scheduleMoleculeDiffusion(m);
@@ -181,25 +193,31 @@ export class World {
     _scheduleMoleculeDiffusion(molecule) {
         if (!molecule) return;
         this._unscheduleMoleculeDiffusion(molecule);
-        const p = molecule.diffusionRate || 0;
-        if (!(p > 0)) {
+        const wait = molecule.diffusionPeriod || (molecule.diffusionRate > 0 ? Math.max(1, Math.round(1 / molecule.diffusionRate)) : 0);
+        if (!(wait > 0)) {
             molecule.__diffusionTick = 0;
             return;
         }
-        let wait = 1;
-        const invLog = molecule.diffusionInvLog1mP;
-        if (invLog && Number.isFinite(invLog)) {
-            let rng = this._rngState >>> 0;
-            if (rng === 0) rng = 0xA5A5A5A5;
-            rng ^= (rng << 13);
-            rng ^= (rng >>> 17);
-            rng ^= (rng << 5);
-            const u = ((rng >>> 0) + 1) * U32_TO_UNIT;
-            wait = ((Math.log(u) * invLog) | 0) + 1;
-            if (wait < 1) wait = 1;
-            this._rngState = rng >>> 0;
+
+        let phase = molecule.__diffusionPhase;
+        if (!Number.isInteger(phase) || phase < 0) {
+            const tileIndex = molecule.__tile ? molecule.__tile.__i : 0;
+            const tileOffset = Number.isInteger(molecule.__tileIndex) && molecule.__tileIndex > 0 ? molecule.__tileIndex : 0;
+            phase = (tileIndex + tileOffset + ((molecule.elementMask || 0) * 7) + ((molecule.size || 0) * 13)) % wait;
+        } else {
+            phase %= wait;
         }
-        const nextTick = (this._diffusionTick + wait) >>> 0;
+        molecule.__diffusionPhase = phase;
+
+        let offset = wait - ((this._diffusionTick + phase) % wait);
+        if (offset <= 0 || offset > wait) offset = wait;
+
+        const nextTick = (this._diffusionTick + offset) >>> 0;
+        this._queueMoleculeDiffusionAt(molecule, nextTick);
+    }
+
+    _queueMoleculeDiffusionAt(molecule, nextTick) {
+        if (!molecule) return;
         molecule.__diffusionTick = nextTick;
         const wi = nextTick & DIFFUSION_WHEEL_MASK;
         const bucket = this._diffusionWheel[wi];
@@ -208,13 +226,58 @@ export class World {
         bucket.push(molecule);
     }
 
+    _applyTileCompositionDelta(tile, composition, sign) {
+        if (!tile || !composition || !Number.isFinite(sign) || sign === 0) return;
+        const tileIndex = tile.__i;
+        if (!Number.isInteger(tileIndex) || tileIndex < 0) return;
+        const base = tileIndex * TILE_ELEMENT_STRIDE;
+        let totalDelta = 0;
+        for (const el in composition) {
+            const elementIndex = ELEMENT_INDEX[el];
+            if (elementIndex === undefined) continue;
+            const count = composition[el] || 0;
+            if (count === 0) continue;
+            totalDelta += count;
+            this._tileElementCounts[base + elementIndex] += sign * count;
+        }
+        if (totalDelta !== 0) this._tileMassCounts[tileIndex] += sign * totalDelta;
+    }
+
+    getTileElementCount(tile, element) {
+        if (!tile) return 0;
+        const elementIndex = ELEMENT_INDEX[element];
+        if (elementIndex === undefined) return 0;
+        const tileIndex = tile.__i;
+        if (!Number.isInteger(tileIndex) || tileIndex < 0) return 0;
+        return this._tileElementCounts[(tileIndex * TILE_ELEMENT_STRIDE) + elementIndex] || 0;
+    }
+
+    _getTileCompositionDensity(tile, composition) {
+        if (!tile || !composition) return 0;
+        const tileIndex = tile.__i;
+        if (!Number.isInteger(tileIndex) || tileIndex < 0) return 0;
+        const base = tileIndex * TILE_ELEMENT_STRIDE;
+        let density = 0;
+        for (const el in composition) {
+            const elementIndex = ELEMENT_INDEX[el];
+            if (elementIndex === undefined) continue;
+            const count = composition[el] || 0;
+            if (count <= 0) continue;
+            density += count * (this._tileElementCounts[base + elementIndex] || 0);
+        }
+        return density;
+    }
+
     _addMoleculeToTile(tile, molecule) {
         if (!tile || !molecule) return;
         const mols = tile.molecules;
         const idx = mols.length;
         mols.push(molecule);
+        this._applyTileCompositionDelta(tile, molecule.composition, 1);
         molecule.__tile = tile;
         molecule.__tileIndex = idx;
+        molecule.__diffusionPhase = -1;
+        molecule.__lastDiffusionDir = -1;
         molecule.__diffusionWheelIndex = -1;
         molecule.__diffusionWheelPos = -1;
         this._scheduleMoleculeDiffusion(molecule);
@@ -233,6 +296,7 @@ export class World {
         }
         mols.length = lastIdx;
         if (removed) {
+            this._applyTileCompositionDelta(tile, removed.composition, -1);
             removed.__tile = null;
             removed.__tileIndex = -1;
             this._unscheduleMoleculeDiffusion(removed);
@@ -254,9 +318,6 @@ export class World {
         const xNext = this._xNext;
         const yPrev = this._yPrev;
         const yNext = this._yNext;
-
-        let rng = this._rngState >>> 0;
-        if (rng === 0) rng = 0xA5A5A5A5;
 
         let i = 0;
         while (i < bucket.length) {
@@ -295,16 +356,78 @@ export class World {
             const x = tile.__x;
             const y = tile.__y;
 
-            rng ^= (rng << 13);
-            rng ^= (rng >>> 17);
-            rng ^= (rng << 5);
-            const dir = (rng >>> 0) & 3;
+            const composition = m.composition;
+            const srcDensity = this._getTileCompositionDensity(tile, composition);
+            const rightTile = grid[xNext[x]][y];
+            const leftTile = grid[xPrev[x]][y];
+            const downTile = grid[x][yNext[y]];
+            const upTile = grid[x][yPrev[y]];
+            const rightDensity = this._getTileCompositionDensity(rightTile, composition);
+            const leftDensity = this._getTileCompositionDensity(leftTile, composition);
+            const downDensity = this._getTileCompositionDensity(downTile, composition);
+            const upDensity = this._getTileCompositionDensity(upTile, composition);
+            let minDensity = srcDensity;
+            let tieMask = 0;
 
-            let destTile;
-            if (dir === 0) destTile = grid[xNext[x]][y];
-            else if (dir === 1) destTile = grid[xPrev[x]][y];
-            else if (dir === 2) destTile = grid[x][yNext[y]];
-            else destTile = grid[x][yPrev[y]];
+            if (rightDensity < minDensity) {
+                minDensity = rightDensity;
+                tieMask = 1;
+            } else if (rightDensity === minDensity && rightDensity < srcDensity) tieMask |= 1;
+            if (leftDensity < minDensity) {
+                minDensity = leftDensity;
+                tieMask = 2;
+            } else if (leftDensity === minDensity && leftDensity < srcDensity) tieMask |= 2;
+            if (downDensity < minDensity) {
+                minDensity = downDensity;
+                tieMask = 4;
+            } else if (downDensity === minDensity && downDensity < srcDensity) tieMask |= 4;
+            if (upDensity < minDensity) {
+                minDensity = upDensity;
+                tieMask = 8;
+            } else if (upDensity === minDensity && upDensity < srcDensity) tieMask |= 8;
+            if (tieMask === 0) {
+                const wait = m.diffusionPeriod || (m.diffusionRate > 0 ? Math.max(1, Math.round(1 / m.diffusionRate)) : 0);
+                if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
+                continue;
+            }
+
+            const lastDir = Number.isInteger(m.__lastDiffusionDir) ? (m.__lastDiffusionDir & 3) : -1;
+            if (lastDir >= 0) {
+                const reverseMask = 1 << (lastDir ^ 1);
+                const filteredMask = tieMask & ~reverseMask;
+                if (filteredMask !== 0) tieMask = filteredMask;
+            }
+
+            let chosenDir = -1;
+            if ((tieMask & (tieMask - 1)) === 0) {
+                if (tieMask === 1) chosenDir = 0;
+                else if (tieMask === 2) chosenDir = 1;
+                else if (tieMask === 4) chosenDir = 2;
+                else chosenDir = 3;
+            } else {
+                const rotorIndex = tile.__i;
+                const rotorStart = this._tileDiffusionRotor[rotorIndex] & 3;
+                for (let step = 0; step < 4; step++) {
+                    const dir = (rotorStart + step) & 3;
+                    if ((tieMask & (1 << dir)) !== 0) {
+                        chosenDir = dir;
+                        this._tileDiffusionRotor[rotorIndex] = (dir + 1) & 3;
+                        break;
+                    }
+                }
+            }
+
+            let destTile = null;
+            if (chosenDir === 0) destTile = rightTile;
+            else if (chosenDir === 1) destTile = leftTile;
+            else if (chosenDir === 2) destTile = downTile;
+            else if (chosenDir === 3) destTile = upTile;
+
+            if (!destTile) {
+                const wait = m.diffusionPeriod || (m.diffusionRate > 0 ? Math.max(1, Math.round(1 / m.diffusionRate)) : 0);
+                if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
+                continue;
+            }
 
             const srcMols = tile.molecules;
             const srcIdx = m.__tileIndex;
@@ -319,31 +442,16 @@ export class World {
             }
 
             const destMols = destTile.molecules;
+            this._applyTileCompositionDelta(tile, m.composition, -1);
+            this._applyTileCompositionDelta(destTile, m.composition, 1);
             m.__tile = destTile;
             m.__tileIndex = destMols.length;
+            m.__lastDiffusionDir = chosenDir;
             destMols.push(m);
 
-            let wait = 1;
-            const invLog = m.diffusionInvLog1mP;
-            if (invLog && Number.isFinite(invLog)) {
-                rng ^= (rng << 13);
-                rng ^= (rng >>> 17);
-                rng ^= (rng << 5);
-                const u = ((rng >>> 0) + 1) * U32_TO_UNIT;
-                wait = ((Math.log(u) * invLog) | 0) + 1;
-                if (wait < 1) wait = 1;
-            }
-
-            const nextTick = (tick + wait) >>> 0;
-            m.__diffusionTick = nextTick;
-            const wi = nextTick & DIFFUSION_WHEEL_MASK;
-            const b2 = wheel[wi];
-            m.__diffusionWheelIndex = wi;
-            m.__diffusionWheelPos = b2.length;
-            b2.push(m);
+            const wait = m.diffusionPeriod || (m.diffusionRate > 0 ? Math.max(1, Math.round(1 / m.diffusionRate)) : 0);
+            if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
         }
-
-        this._rngState = rng >>> 0;
     }
 
     diffuseEnval() {
@@ -487,5 +595,4 @@ export class World {
         }
         return out;
     }
-
 }

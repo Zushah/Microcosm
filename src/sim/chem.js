@@ -8,16 +8,7 @@ export const ELEMENTS = {
 };
 
 export const ELEMENT_ORDER = ["A", "B", "C", "D", "E", "F"];
-
-export const ELEMENT_MASKS = {
-    A: 1,
-    B: 2,
-    C: 4,
-    D: 8,
-    E: 16,
-    F: 32
-};
-
+export const ELEMENT_MASKS = { A: 1, B: 2, C: 4, D: 8, E: 16, F: 32 };
 export const ALL_ELEMENT_MASK = ELEMENT_ORDER.reduce((mask, el) => mask | ELEMENT_MASKS[el], 0);
 
 export const elementToMask = (el) => ELEMENT_MASKS[el] || 0;
@@ -25,9 +16,7 @@ export const elementToMask = (el) => ELEMENT_MASKS[el] || 0;
 export const compositionToElementMask = (composition) => {
     let mask = 0;
     if (!composition) return mask;
-    for (const el in composition) {
-        if ((composition[el] || 0) > 0) mask |= elementToMask(el);
-    }
+    for (const el in composition) if ((composition[el] || 0) > 0) mask |= elementToMask(el);
     return mask;
 };
 
@@ -52,13 +41,15 @@ export const normalizeSpecificityMask = (mask, fallbackMask = ALL_ELEMENT_MASK) 
     return normalized !== 0 ? normalized : fallback;
 };
 
-export const createMolecule = (composition, bondMultiplier = 1.0) => {
-    const comp = Object.assign({}, composition);
+export const refreshMoleculeDerivedState = (molecule) => {
+    if (!molecule) return molecule;
+    const comp = molecule.composition || {};
+    const bondMultiplier = molecule.bondMultiplier || 1.0;
     let size = 0;
     let polarity = 0;
     let elementalEnergySum = 0;
     for (const el in comp) {
-        const count = comp[el];
+        const count = comp[el] || 0;
         size += count;
         polarity += (ELEMENTS[el].polarity || 0) * count;
         elementalEnergySum += (ELEMENTS[el].energy || 0) * count;
@@ -67,18 +58,22 @@ export const createMolecule = (composition, bondMultiplier = 1.0) => {
     polarity = size > 0 ? polarity / size : 0;
     const energy = elementalEnergySum * bondMultiplier;
     const diffusionRate = Math.min(0.04, 0.01 + (1 / (size + 1)) * polarity * 0.04);
+    const diffusionPeriod = diffusionRate > 0 ? Math.max(1, Math.round(1 / diffusionRate)) : 0;
     const diffusionThreshold = Math.min(0xFFFFFFFF, Math.max(0, Math.floor(diffusionRate * 4294967296)));
     const diffusionInvLog1mP = (diffusionRate > 0 && diffusionRate < 1) ? (1 / Math.log1p(-diffusionRate)) : 0;
-    return {
-        composition: comp,
-        size,
-        polarity,
-        elementalEnergySum,
-        bondMultiplier,
-        energy,
-        diffusionRate,
-        diffusionThreshold,
-        diffusionInvLog1mP,
-        elementMask
-    };
+    molecule.size = size;
+    molecule.polarity = polarity;
+    molecule.elementalEnergySum = elementalEnergySum;
+    molecule.energy = energy;
+    molecule.diffusionRate = diffusionRate;
+    molecule.diffusionPeriod = diffusionPeriod;
+    molecule.diffusionThreshold = diffusionThreshold;
+    molecule.diffusionInvLog1mP = diffusionInvLog1mP;
+    molecule.elementMask = elementMask;
+    return molecule;
+};
+
+export const createMolecule = (composition, bondMultiplier = 1.0) => {
+    const molecule = { composition: Object.assign({}, composition), bondMultiplier };
+    return refreshMoleculeDerivedState(molecule);
 };

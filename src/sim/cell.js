@@ -1,5 +1,5 @@
 import { ENZYME_CLASSES, attemptReaction } from "./bio.js";
-import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, createMolecule, maskToString, normalizeSpecificityMask } from "./chem.js";
+import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, createMolecule, maskToString, normalizeSpecificityMask, refreshMoleculeDerivedState } from "./chem.js";
 
 export class Cell {
     constructor(genome) {
@@ -218,6 +218,8 @@ export class Cell {
                 let ok = true;
                 for (const el in subComp) if ((m.composition[el] || 0) < subComp[el]) { ok = false; break; }
                 if (!ok) continue;
+                const changedTileMolecule = pool === tilePool && world && typeof world._applyTileCompositionDelta === "function";
+                if (changedTileMolecule) world._applyTileCompositionDelta(tile, subComp, -1);
                 for (const el in subComp) {
                     m.composition[el] -= subComp[el];
                     if (m.composition[el] <= 0) delete m.composition[el];
@@ -225,6 +227,9 @@ export class Cell {
                 if (Object.keys(m.composition).length === 0) {
                     if (pool === tilePool && world && typeof world._removeMoleculeFromTile === "function" && m.__tile === tile) world._removeMoleculeFromTile(tile, i);
                     else pool.splice(i, 1);
+                } else {
+                    refreshMoleculeDerivedState(m);
+                    if (changedTileMolecule && typeof world._scheduleMoleculeDiffusion === "function" && m.__tile === tile) world._scheduleMoleculeDiffusion(m);
                 }
                 return true;
             }
