@@ -1,0 +1,3 @@
+* text=auto
+src/styles/* linguist-detectable=false
+*.glsl text
