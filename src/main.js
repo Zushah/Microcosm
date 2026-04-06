@@ -1,6 +1,29 @@
 import { World } from "./sim/world.js";
 import { CanvasRenderer } from "./render/canvas.js";
 import { ALL_ELEMENT_MASK, ELEMENTS, ELEMENT_MASKS, maskToElements, maskToString, normalizeSpecificityMask } from "./sim/chem.js";
+import { chance, createRandomSeed, random, randomInt, setSeed } from "./sim/rng.js";
+
+const SEED_QUERY_PARAM = "seed";
+
+const normalizeSeedValue = (value) => {
+    const text = `${value ?? ""}`;
+    return text.trim() !== "" ? text : createRandomSeed();
+};
+
+const seedUrl = (seed) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set(SEED_QUERY_PARAM, seed);
+    return url;
+};
+
+const currentRunSeed = setSeed(normalizeSeedValue(new URL(window.location.href).searchParams.get(SEED_QUERY_PARAM)));
+window.MICROCOSM_SEED = currentRunSeed;
+window.history.replaceState(null, "", seedUrl(currentRunSeed).toString());
+
+const restartWithSeed = (value) => {
+    const nextSeed = normalizeSeedValue(value);
+    window.location.assign(seedUrl(nextSeed).toString());
+};
 
 const world = new World(320, 240);
 
@@ -76,7 +99,7 @@ const currentAverageEnval = () => {
 
 const randomGenome = () => {
     const avgEnval = currentAverageEnval();
-    const opt = avgEnval + (Math.random() - 0.5) * 0.20;
+    const opt = avgEnval + (random() - 0.5) * 0.20;
 
     return {
         optimalEnval: opt,
@@ -87,27 +110,27 @@ const randomGenome = () => {
                 bondMultiplier: 1.18,
                 bondCostFraction: 0.70,
                 secretionProb: 0.12,
-                envalSigma: 0.16 + Math.random() * 0.08,
+                envalSigma: 0.16 + random() * 0.08,
                 envalThroughput: 0.18
             },
             {
                 type: "catabolase",
                 specificityMask: ELEMENT_MASKS.A | ELEMENT_MASKS.B | ELEMENT_MASKS.C,
                 bondHarvestFraction: 1.00,
-                envalSigma: 0.16 + Math.random() * 0.08,
+                envalSigma: 0.16 + random() * 0.08,
                 envalThroughput: 0.14
             }
         ],
-        reproThreshold: 2 + Math.random() * 6,
-        initialEnergy: 1.2 + Math.random() * 1.8,
-        decayTime: 700 + Math.random() * 2000,
+        reproThreshold: 2 + random() * 6,
+        initialEnergy: 1.2 + random() * 1.8,
+        decayTime: 700 + random() * 2000,
         defaultSecretionProb: 0.15,
         mutationRate: 0.06,
         postDivideMortality: 0.0,
         desiredElementReserve: 2,
         envalStressFactor: 0.02,
         envalMutationFloor: 0.03,
-        lineageId: Math.floor(Math.random() * 1e9)
+        lineageId: randomInt(1e9)
     };
 };
 
@@ -157,6 +180,8 @@ const interactionState = {
 const interactionUi = {
     panel: null,
     toggle: null,
+    seedInput: null,
+    seedSetButton: null,
     modeButtons: [],
     tileColorModeInput: null,
     editSettings: null,
@@ -227,6 +252,15 @@ const createInteractionPanel = () => {
     panel.innerHTML = `
         <button id="interactionPanelToggle" type="button" aria-label="Collapse controls">❮</button>
         <h3>Interaction</h3>
+        <div class="controlRow">
+            <div class="seedRow">
+                <label class="fieldLabel fieldLabelGrow">
+                    <span>Seed</span>
+                    <input id="seedInput" type="text" spellcheck="false" autocomplete="off" placeholder="Random seed">
+                </label>
+                <button id="seedSetButton" class="inlineActionButton" type="button">Set</button>
+            </div>
+        </div>
         <div class="controlCaption">Choose how the canvas responds to your mouse.</div>
         <div class="controlRow">
             <div class="controlLabel">Mode</div>
@@ -276,6 +310,8 @@ const createInteractionPanel = () => {
 
     interactionUi.panel = panel;
     interactionUi.toggle = panel.querySelector("#interactionPanelToggle");
+    interactionUi.seedInput = panel.querySelector("#seedInput");
+    interactionUi.seedSetButton = panel.querySelector("#seedSetButton");
     interactionUi.modeButtons = [...panel.querySelectorAll(".modeOption")];
     interactionUi.tileColorModeInput = panel.querySelector("#tileColorMode");
     interactionUi.editSettings = panel.querySelector("#interactionEditSettings");
@@ -283,6 +319,16 @@ const createInteractionPanel = () => {
     interactionUi.brushHeightInput = panel.querySelector("#editBrushHeight");
     interactionUi.brushIntensityInput = panel.querySelector("#editBrushIntensity");
     interactionUi.modeNote = panel.querySelector("#interactionModeNote");
+
+    interactionUi.seedInput.value = currentRunSeed;
+    interactionUi.seedSetButton.addEventListener("click", () => {
+        restartWithSeed(interactionUi.seedInput.value);
+    });
+    interactionUi.seedInput.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        restartWithSeed(interactionUi.seedInput.value);
+    });
 
     interactionUi.toggle.addEventListener("click", () => {
         interactionState.panelOpen = !interactionState.panelOpen;
@@ -914,7 +960,7 @@ const main = () => {
         window.SIM_TIME = simTime;
 
         const spawnProb = spawnChanceBasedOnPopulation(livingCells.size);
-        if (Math.random() < spawnProb) world.spawnRandomCell(randomGenome);
+        if (chance(spawnProb)) world.spawnRandomCell(randomGenome);
 
         world.step();
         tpsTicks++;

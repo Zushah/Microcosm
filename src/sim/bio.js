@@ -1,4 +1,5 @@
 import { createMolecule, ELEMENTS, ALL_ELEMENT_MASK, compositionToElementMask, elementToMask, normalizeSpecificityMask } from "./chem.js";
+import { chance, random, randomInt, shuffleInPlace } from "./rng.js";
 
 export const ENZYME_CLASSES = {
     anabolase: {
@@ -86,7 +87,7 @@ const _accumulateCompDelta = (scratch, comp, sign) => {
 const _sampleAcceptedSubstrates = (enzyme, poolA, poolB, maxCount) => {
     const out = [];
     let seen = 0;
-    const rand = Math.random;
+    const rand = random;
     const scan = (arr) => {
         for (let i = 0; i < arr.length; i++) {
             const m = arr[i];
@@ -144,7 +145,7 @@ const resolveEnvalPolarity = (cell) => {
     const opt = cell && cell.genome ? (cell.genome.optimalEnval ?? 0) : 0;
     if (opt > 0) return 1;
     if (opt < 0) return -1;
-    return Math.random() < 0.5 ? -1 : 1;
+    return chance(0.5) ? -1 : 1;
 };
 
 const computeEnvalExchange = (enzyme, cls, cell, env) => {
@@ -192,7 +193,7 @@ export const attemptReaction = (enzyme, localMolecules, env, cell = null, tile =
     const envalFactor = computeEnvalFactor(cell, enzyme, env);
     const baseRate = (typeof cls.baseRate === "number") ? cls.baseRate : 0.8;
     const rate = Math.min(1, baseRate * 1.2) * envalFactor;
-    if (Math.random() > rate) return null;
+    if (random() > rate) return null;
 
     const maxInputs = (typeof cls.maxInputs === "number" && cls.maxInputs > 0) ? cls.maxInputs : 0;
     let substrates = [];
@@ -332,9 +333,9 @@ const chooseWeightedOption = (options) => {
     if (!options || options.length === 0) return null;
     let total = 0;
     for (let i = 0; i < options.length; i++) total += Math.max(0, options[i].weight || 0);
-    if (total <= 0) return options[(Math.random() * options.length) | 0];
+    if (total <= 0) return options[randomInt(options.length)];
 
-    let r = Math.random() * total;
+    let r = random() * total;
     for (let i = 0; i < options.length; i++) {
         r -= Math.max(0, options[i].weight || 0);
         if (r <= 0) return options[i];
@@ -469,7 +470,7 @@ const doTransmutase = (enzyme, substrates, cls, cell, env, envalExchange) => {
     let chosen = null;
     if (affordableUphill.length > 0 && downhillCandidates.length > 0) {
         const uphillBias = computeTransmutaseUphillBias(enzyme, cls, cell, env);
-        chosen = (Math.random() < uphillBias)
+        chosen = (chance(uphillBias))
             ? chooseWeightedOption(affordableUphill)
             : chooseWeightedOption(downhillCandidates);
     } else if (affordableUphill.length > 0) {
@@ -554,7 +555,7 @@ const fragmentComposition = (comp) => {
 
     if (atoms.length < 2) return [];
 
-    atoms = Chalkboard.stat.shuffle(atoms);
+    shuffleInPlace(atoms);
     const firstCount = Math.max(1, Math.min(atoms.length - 1, Math.round(atoms.length * 0.6)));
     const a1 = {};
     for (let i = 0; i < firstCount; i++) a1[atoms[i]] = (a1[atoms[i]] || 0) + 1;

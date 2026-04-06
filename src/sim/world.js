@@ -1,5 +1,6 @@
 import { createMolecule, ELEMENT_ORDER } from "./chem.js";
 import { Cell } from "./cell.js";
+import { chance, pick, randomInt, randomRange } from "./rng.js";
 
 const DIFFUSION_WHEEL_SIZE = 4096;
 const DIFFUSION_WHEEL_MASK = DIFFUSION_WHEEL_SIZE - 1;
@@ -28,7 +29,7 @@ export class World {
             this._tileDiffusionRotor[ti] = (hash ^ (hash >>> 16)) & 3;
         }
 
-        this.baseEnval = Chalkboard.numb.random(-1, 1);
+        this.baseEnval = randomRange(-1, 1);
 
         this.grid = [];
         for (let x = 0; x < width; x++) {
@@ -93,12 +94,12 @@ export class World {
     seedMolecules() {
         const arr = [];
         arr.push(createMolecule({ A: 1 }));
-        if (Math.random() < 0.6) arr.push(createMolecule({ B: 1 }));
-        if (Math.random() < 0.45) arr.push(createMolecule({ C: 1 }));
-        if (Math.random() < 0.12) arr.push(createMolecule({ D: 1 }));
-        if (Math.random() < 0.08) arr.push(createMolecule({ E: 1 }));
-        if (Math.random() < 0.05) arr.push(createMolecule({ F: 1 }));
-        if (Math.random() < 0.05) arr.push(createMolecule({ B: 1, C: 1 }));
+        if (chance(0.6)) arr.push(createMolecule({ B: 1 }));
+        if (chance(0.45)) arr.push(createMolecule({ C: 1 }));
+        if (chance(0.12)) arr.push(createMolecule({ D: 1 }));
+        if (chance(0.08)) arr.push(createMolecule({ E: 1 }));
+        if (chance(0.05)) arr.push(createMolecule({ F: 1 }));
+        if (chance(0.05)) arr.push(createMolecule({ B: 1, C: 1 }));
         return arr;
     }
 
@@ -108,8 +109,8 @@ export class World {
         let y = -1;
 
         for (let attempts = 0; attempts < maxAttempts; attempts++) {
-            const rx = Math.floor(Math.random() * this.width);
-            const ry = Math.floor(Math.random() * this.height);
+            const rx = randomInt(this.width);
+            const ry = randomInt(this.height);
             if (this.grid[rx][ry].cells.length === 0) {
                 x = rx;
                 y = ry;
@@ -571,7 +572,7 @@ export class World {
 
     addProductAround(centerX, centerY, product) {
         const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
-        const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
+        const [nx, ny] = pick(ring);
         const cloneComp = Object.assign({}, product.composition || {});
         const clone = createMolecule(cloneComp, product.bondMultiplier || 1.0);
         const tile = this.grid[nx][ny];
@@ -581,7 +582,7 @@ export class World {
     addEnvalAround(centerX, centerY, envalDelta) {
         if (!Number.isFinite(envalDelta) || envalDelta === 0) return;
         const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
-        const [nx, ny] = ring[Math.floor(Math.random() * ring.length)];
+        const [nx, ny] = pick(ring);
         this.adjustTileEnval(this.grid[nx][ny], envalDelta);
     }
 

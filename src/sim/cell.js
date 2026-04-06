@@ -1,5 +1,6 @@
 import { ENZYME_CLASSES, attemptReaction } from "./bio.js";
 import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, createMolecule, maskToString, normalizeSpecificityMask, refreshMoleculeDerivedState } from "./chem.js";
+import { chance, random, randomInt } from "./rng.js";
 
 export class Cell {
     constructor(genome) {
@@ -8,7 +9,7 @@ export class Cell {
         this.molecules = [];
         this.timeWithoutFood = 0;
         this.state = "active";
-        this.lineageId = genome.lineageId || Math.floor(Math.random() * 1e9);
+        this.lineageId = genome.lineageId || randomInt(1e9);
         this.birthSimTime = this.birthSimTime ?? (window.SIM_TIME || 0);
         this.deathSimTime = null;
         this._highlight = false;
@@ -133,7 +134,7 @@ export class Cell {
 
         const internalCount = this.totalInternalAtoms();
         if (internalCount < (this.genome.desiredElementReserve * 2) && tileMolecules.length > 0) {
-            const idx = Math.floor(Math.random() * tileMolecules.length);
+            const idx = randomInt(tileMolecules.length);
             let take = tileMolecules[idx];
             if (take) {
                 if (world && typeof world._removeMoleculeFromTile === "function") take = world._removeMoleculeFromTile(tile, idx) || take;
@@ -196,13 +197,13 @@ export class Cell {
             if (have < reserve) return false;
         }
         const prob = enzyme.secretionProb ?? this.genome.defaultSecretionProb ?? 0.15;
-        return Math.random() < prob;
+        return chance(prob);
     }
 
     countInternalElement(el) {
-        const arr = [];
-        for (let i = 0; i < this.molecules.length; i++) arr.push(this.molecules[i].composition[el] || 0);
-        return Chalkboard.stat.sum(arr);
+        let total = 0;
+        for (let i = 0; i < this.molecules.length; i++) total += this.molecules[i].composition[el] || 0;
+        return total;
     }
 
     consumeSubstrates(substrates, tile) {
@@ -264,12 +265,12 @@ export class Cell {
         const worldAvgEnval = world ? world.avgEnval : 0;
         const childGenome = mutateGenome(this.genome, worldAvgEnval);
 
-        const childEnergy = this.energy * (0.5 + (Math.random() - 0.5) * 0.1);
+        const childEnergy = this.energy * (0.5 + (random() - 0.5) * 0.1);
         this.energy = Math.max(0, this.energy - childEnergy);
 
         const childMolecules = [];
         for (let i = this.molecules.length - 1; i >= 0; i--) {
-            if (Math.random() < 0.5) {
+            if (chance(0.5)) {
                 childMolecules.push(this.molecules[i]);
                 this.molecules.splice(i, 1);
             }
@@ -304,7 +305,7 @@ export class Cell {
                 return;
             }
 
-            const [px, py] = candidates[Math.floor(Math.random() * candidates.length)];
+            const [px, py] = candidates[randomInt(candidates.length)];
             world.grid[px][py].cells.push(child);
             child._worldRef = world;
             child._tileX = px;
@@ -329,7 +330,7 @@ export class Cell {
             window.__recordCellBirth(child);
         }
 
-        if (Math.random() < (this.genome.postDivideMortality ?? 0.0)) this._dieAndRelease(tile);
+        if (chance(this.genome.postDivideMortality ?? 0.0)) this._dieAndRelease(tile);
     }
 
     getDominantElement() {
@@ -362,19 +363,19 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         for (let i = 0; i < g.enzymes.length; i++) applyEnzymeClassDefaults(g.enzymes[i]);
     }
 
-    if (Math.random() < mut) {
-        g.reproThreshold = Math.max(0.1, g.reproThreshold * (1 + (Math.random() - 0.5) * 0.2));
+    if (chance(mut)) {
+        g.reproThreshold = Math.max(0.1, g.reproThreshold * (1 + (random() - 0.5) * 0.2));
     }
-    if (Math.random() < mut) {
-        g.decayTime = Math.max(50, Math.round(g.decayTime * (1 + (Math.random() - 0.5) * 0.2)));
+    if (chance(mut)) {
+        g.decayTime = Math.max(50, Math.round(g.decayTime * (1 + (random() - 0.5) * 0.2)));
     }
-    if (Math.random() < mut) {
-        g.defaultSecretionProb = clamp01((g.defaultSecretionProb ?? 0.15) + (Math.random() - 0.5) * 0.2);
+    if (chance(mut)) {
+        g.defaultSecretionProb = clamp01((g.defaultSecretionProb ?? 0.15) + (random() - 0.5) * 0.2);
     }
-    if (Math.random() < mut * 0.5) {
+    if (chance(mut * 0.5)) {
         g.envalStressFactor = Math.max(
             0.001,
-            (g.envalStressFactor ?? 0.02) * (1 + (Math.random() - 0.5) * 0.3)
+            (g.envalStressFactor ?? 0.02) * (1 + (random() - 0.5) * 0.3)
         );
     }
 
@@ -384,42 +385,42 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         const en = g.enzymes[i];
         applyEnzymeClassDefaults(en);
 
-        if (Math.random() < mut) {
-            if (Math.random() < mut) {
+        if (chance(mut)) {
+            if (chance(mut)) {
                 en.specificityMask = mutateSpecificityMask(en.specificityMask);
             }
-            if (Math.random() < mut * 0.2) {
+            if (chance(mut * 0.2)) {
                 const classes = Object.keys(ENZYME_CLASSES);
-                en.type = classes[Math.floor(Math.random() * classes.length)];
+                en.type = classes[randomInt(classes.length)];
                 applyEnzymeClassDefaults(en);
             }
-            if (Math.random() < mut) {
+            if (chance(mut)) {
                 en.envalSigma = Math.max(
                     0.02,
-                    (en.envalSigma ?? 0.18) * (1 + (Math.random() - 0.5) * 0.35)
+                    (en.envalSigma ?? 0.18) * (1 + (random() - 0.5) * 0.35)
                 );
             }
-            if (Math.random() < mut) {
-                en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (Math.random() - 0.5) * 0.2);
+            if (chance(mut)) {
+                en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (random() - 0.5) * 0.2);
             }
-            if (Math.random() < mut) {
+            if (chance(mut)) {
                 const cls = ENZYME_CLASSES[en.type] || {};
                 en.envalThroughput = Math.max(
                     0.01,
-                    (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (Math.random() - 0.5) * 0.4)
+                    (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (random() - 0.5) * 0.4)
                 );
             }
-            if (en.type === "anabolase" && Math.random() < mut) {
+            if (en.type === "anabolase" && chance(mut)) {
                 const cls = ENZYME_CLASSES[en.type] || {};
                 en.bondMultiplier = Math.max(
                     1.01,
-                    (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (Math.random() - 0.5) * 0.18)
+                    (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (random() - 0.5) * 0.18)
                 );
             }
-            if (en.type === "transmutase" && Math.random() < mut) {
+            if (en.type === "transmutase" && chance(mut)) {
                 const cls = ENZYME_CLASSES[en.type] || {};
                 en.downhillHarvestFraction = clamp01(
-                    (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (Math.random() - 0.5) * 0.08
+                    (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (random() - 0.5) * 0.08
                 );
             }
         }
@@ -427,19 +428,19 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         applyEnzymeClassDefaults(en);
     }
 
-    if (Math.random() < mut * 0.3 && g.enzymes.length > 0) {
-        const idx = Math.floor(Math.random() * g.enzymes.length);
+    if (chance(mut * 0.3) && g.enzymes.length > 0) {
+        const idx = randomInt(g.enzymes.length);
         g.enzymes.splice(idx, 1);
-    } else if (Math.random() < mut * 0.3 && g.enzymes.length < 6) {
+    } else if (chance(mut * 0.3) && g.enzymes.length < 6) {
         const classes = Object.keys(ENZYME_CLASSES);
-        const type = classes[Math.floor(Math.random() * classes.length)];
+        const type = classes[randomInt(classes.length)];
         const cls = ENZYME_CLASSES[type] || {};
         const enzyme = {
             type,
             specificityMask: makeRandomSpecificityMask(),
-            envalSigma: 0.16 + Math.random() * 0.08,
+            envalSigma: 0.16 + random() * 0.08,
             envalThroughput: cls.envalThroughput ?? 0.10,
-            secretionProb: Math.random()
+            secretionProb: random()
         };
         applyEnzymeClassDefaults(enzyme);
         g.enzymes.push(enzyme);
@@ -474,7 +475,7 @@ const applyEnzymeClassDefaults = (enzyme) => {
     if (!enzyme || !enzyme.type) return enzyme;
     const cls = ENZYME_CLASSES[enzyme.type] || {};
 
-    if (typeof enzyme.envalSigma !== "number") enzyme.envalSigma = 0.16 + Math.random() * 0.08;
+    if (typeof enzyme.envalSigma !== "number") enzyme.envalSigma = 0.16 + random() * 0.08;
     if (typeof enzyme.envalThroughput !== "number") enzyme.envalThroughput = cls.envalThroughput ?? 0.10;
     if (typeof enzyme.secretionProb !== "number") enzyme.secretionProb = 0.15;
 
@@ -536,17 +537,17 @@ const defaultSpecificityMaskForType = (type) => {
     return ALL_ELEMENT_MASK;
 };
 
-const pickRandom = (arr) => arr[(Math.random() * arr.length) | 0];
+const pickRandom = (arr) => arr[randomInt(arr.length)];
 
 const makeRandomSpecificityMask = () => {
     const shuffled = ELEMENT_ORDER.slice();
     for (let i = shuffled.length - 1; i > 0; i--) {
-        const j = (Math.random() * (i + 1)) | 0;
+        const j = randomInt(i + 1);
         const tmp = shuffled[i];
         shuffled[i] = shuffled[j];
         shuffled[j] = tmp;
     }
-    const targetCount = 1 + ((Math.random() * 3) | 0);
+    const targetCount = 1 + randomInt(3);
     let mask = 0;
     for (let i = 0; i < targetCount; i++) mask |= ELEMENT_MASKS[shuffled[i]] || 0;
     return normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
@@ -568,7 +569,7 @@ const mutateSpecificityMask = (mask) => {
     if (present.length <= 1) return next | pickRandom(absent);
     if (absent.length === 0) return next & ~pickRandom(present);
 
-    if (Math.random() < 0.5) next |= pickRandom(absent);
+    if (chance(0.5)) next |= pickRandom(absent);
     else next &= ~pickRandom(present);
 
     return normalizeSpecificityMask(next, ALL_ELEMENT_MASK);
@@ -581,10 +582,10 @@ const mutateOptimalEnval = (parentEnval, worldAvgEnval, floor = 0.03) => {
 
     if (step < floor) {
         step = floor;
-        if (towardSign === 0) towardSign = Math.random() < 0.5 ? -1 : 1;
+        if (towardSign === 0) towardSign = chance(0.5) ? -1 : 1;
     }
 
-    const r = Math.random();
+    const r = random();
     if (r < 0.5) return parentEnval;
     if (r < 0.75) return parentEnval + towardSign * step;
     return parentEnval - towardSign * step;
