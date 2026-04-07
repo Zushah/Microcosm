@@ -31,6 +31,7 @@ const sfc32 = (a, b, c, d) => {
 
 let _seed = "";
 let _nextFloat = null;
+let _gaussianSpare = null;
 
 const ensureGenerator = () => {
     if (!_nextFloat) setSeed(createRandomSeed());
@@ -51,6 +52,7 @@ export const createRandomSeed = () => {
 
 export const setSeed = (seed) => {
     _seed = `${seed ?? ""}`;
+    _gaussianSpare = null;
     const seedFactory = xmur3(_seed);
     _nextFloat = sfc32(seedFactory(), seedFactory(), seedFactory(), seedFactory());
     for (let i = 0; i < 12; i++) _nextFloat();
@@ -60,6 +62,29 @@ export const setSeed = (seed) => {
 export const getSeed = () => _seed;
 
 export const random = () => ensureGenerator()();
+
+export const randomGaussian = (mean = 0, stddev = 1) => {
+    const center = Number.isFinite(mean) ? mean : 0;
+    const sigma = Number.isFinite(stddev) ? stddev : 0;
+    if (!(sigma > 0)) return center;
+
+    if (_gaussianSpare !== null) {
+        const spare = _gaussianSpare;
+        _gaussianSpare = null;
+        return center + spare * sigma;
+    }
+
+    let u = 0;
+    let v = 0;
+    while (u <= Number.EPSILON) u = random();
+    while (v <= Number.EPSILON) v = random();
+
+    const magnitude = Math.sqrt(-2 * Math.log(u));
+    const theta = 2 * Math.PI * v;
+
+    _gaussianSpare = magnitude * Math.sin(theta);
+    return center + (magnitude * Math.cos(theta) * sigma);
+};
 
 export const randomRange = (min, max) => min + (max - min) * random();
 

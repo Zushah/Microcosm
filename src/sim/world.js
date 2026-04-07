@@ -1,6 +1,7 @@
 import { createMolecule, ELEMENT_ORDER } from "./chem.js";
 import { Cell } from "./cell.js";
 import { chance, pick, randomInt, randomRange } from "./rng.js";
+import { resolvePredationOutcome } from "./eco.js";
 
 const DIFFUSION_WHEEL_SIZE = 4096;
 const DIFFUSION_WHEEL_MASK = DIFFUSION_WHEEL_SIZE - 1;
@@ -154,18 +155,85 @@ export class World {
                     if (cell._worldRef !== this) cell._worldRef = this;
                     cell.step(env, tile);
                 }
-                let write = 0;
-                for (let i = 0; i < cells.length; i++) {
-                    const c = cells[i];
-                    if (c.state !== "dead") {
-                        if (write !== i) cells[write] = c;
-                        write++;
-                    }
-                }
-                if (write !== cells.length) cells.length = write;
+                this._compactDeadCells(tile);
             }
         }
+        this._resolvePredation();
         this.diffuseEnval();
+    }
+
+    _compactDeadCells(tile) {
+        const cells = tile && tile.cells;
+        if (!cells || cells.length === 0) return;
+        let write = 0;
+        for (let i = 0; i < cells.length; i++) {
+            const cell = cells[i];
+            if (cell && cell.state !== "dead") {
+                if (write !== i) cells[write] = cell;
+                write++;
+            }
+        }
+        if (write !== cells.length) cells.length = write;
+    }
+
+    _resolvePredation() {
+        const grid = this.grid;
+        const xNext = this._xNext;
+        const yNext = this._yNext;
+        const shouldCheckRight = this.width > 1;
+        const shouldCheckDown = this.height > 1;
+        const singleHorizontalPair = this.width === 2;
+        const singleVerticalPair = this.height === 2;
+
+        for (let x = 0; x < this.width; x++) {
+            for (let y = 0; y < this.height; y++) {
+                const tile = grid[x][y];
+
+                if (shouldCheckRight && (!singleHorizontalPair || x === 0)) {
+                    const rightTile = grid[xNext[x]][y];
+                    if (rightTile && rightTile !== tile) this._resolvePredationBetweenTiles(tile, rightTile);
+                }
+
+                if (shouldCheckDown && (!singleVerticalPair || y === 0)) {
+                    const downTile = grid[x][yNext[y]];
+                    if (downTile && downTile !== tile) this._resolvePredationBetweenTiles(tile, downTile);
+                }
+            }
+        }
+    }
+
+    _resolvePredationBetweenTiles(tileA, tileB) {
+        const cellsA = tileA && tileA.cells;
+        const cellsB = tileB && tileB.cells;
+        if (!cellsA || !cellsB || cellsA.length === 0 || cellsB.length === 0) return;
+
+        for (let i = 0; i < cellsA.length; i++) {
+            const cellA = cellsA[i];
+            if (!cellA || cellA.state === "dead") continue;
+
+            for (let j = 0; j < cellsB.length; j++) {
+                const cellB = cellsB[j];
+                if (!cellB || cellB.state === "dead") continue;
+
+                const outcome = resolvePredationOutcome(cellA, cellB);
+                if (!outcome) continue;
+
+                this._executePredationOutcome(outcome, tileA, tileB);
+                if (cellA.state === "dead") break;
+            }
+        }
+
+        this._compactDeadCells(tileA);
+        this._compactDeadCells(tileB);
+    }
+
+    _executePredationOutcome(outcome, tileA, tileB) {
+        if (!outcome || !outcome.winner || !outcome.loser) return;
+        if (outcome.winner.state === "dead" || outcome.loser.state === "dead") return;
+
+        const loserTile = tileA && tileA.cells && tileA.cells.includes(outcome.loser) ? tileA : tileB;
+        outcome.winner.absorbConsumedCell(outcome.loser, outcome);
+        outcome.loser._dieByConsumption(loserTile);
     }
 
     _unscheduleMoleculeDiffusion(molecule) {

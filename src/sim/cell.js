@@ -1,6 +1,7 @@
 import { ENZYME_CLASSES, attemptReaction } from "./bio.js";
 import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, createMolecule, maskToString, normalizeSpecificityMask, refreshMoleculeDerivedState } from "./chem.js";
-import { chance, random, randomInt } from "./rng.js";
+import { chance, random, randomGaussian, randomInt } from "./rng.js";
+import { cloneEnzyme, isCombatEnzymeType, mutateCombatLevel, normalizeCombatLevel } from "./eco.js";
 
 export class Cell {
     constructor(genome) {
@@ -333,6 +334,89 @@ export class Cell {
         if (chance(this.genome.postDivideMortality ?? 0.0)) this._dieAndRelease(tile);
     }
 
+    absorbConsumedCell(victim, combatOutcome = null) {
+        if (!victim || victim === this) return;
+
+        const previousEnzymes = (this.genome && Array.isArray(this.genome.enzymes))
+            ? this.genome.enzymes.map((enzyme) => cloneEnzyme(enzyme))
+            : [];
+
+        if (!this.genome) this.genome = { enzymes: [] };
+        if (!Array.isArray(this.genome.enzymes)) this.genome.enzymes = [];
+
+        const victimEnzymes = (victim.genome && Array.isArray(victim.genome.enzymes))
+            ? victim.genome.enzymes
+            : [];
+        for (let i = 0; i < victimEnzymes.length; i++) {
+            const absorbed = cloneEnzyme(victimEnzymes[i]);
+            applyEnzymeClassDefaults(absorbed);
+            this.genome.enzymes.push(absorbed);
+        }
+
+        if (typeof window !== "undefined" && typeof window.__recordCellGenomeChange === "function") {
+            window.__recordCellGenomeChange(this, previousEnzymes);
+        }
+
+        const absorbedEnergy = Math.max(0, victim.energy || 0);
+        if (absorbedEnergy > 0) {
+            this.energy += absorbedEnergy;
+            this.timeWithoutFood = Math.max(0, this.timeWithoutFood - absorbedEnergy * 0.2);
+        }
+
+        if (Array.isArray(victim.molecules) && victim.molecules.length > 0) {
+            for (let i = 0; i < victim.molecules.length; i++) this.molecules.push(victim.molecules[i]);
+        }
+
+        victim.energy = 0;
+        victim.molecules = [];
+        if (victim.genome && Array.isArray(victim.genome.enzymes)) victim.genome.enzymes = [];
+
+        if (combatOutcome) {
+            const ageAtEvent = this.getAgeSecSim ? this.getAgeSecSim() : 0;
+            this._pushReactionLog({
+                enzymeType: "attackase",
+                substrates: [`lineage:${victim.lineageId}`],
+                product: "phagocytosis",
+                byproducts: [],
+                deltaE: Number(absorbedEnergy.toFixed(3)),
+                chemicalDelta: 0,
+                envalEnergy: 0,
+                bondEnergyDelta: 0,
+                bondEnergyRaw: 0,
+                transmutationEnergyDelta: 0,
+                transmutationEnergyRaw: 0,
+                catalyticCost: 0,
+                localEnval: 0,
+                envalInput: 0,
+                envalOutput: 0,
+                deltaEnval: 0,
+                substrateAtomEnergy: 0,
+                productAtomEnergy: 0,
+                substrateBondEnergy: 0,
+                productBondEnergy: 0,
+                rawDelta: 0,
+                attackLevel: combatOutcome.winnerAttack || 0,
+                defenseLevel: combatOutcome.loserDefense || 0,
+                attackMargin: combatOutcome.winnerMargin || 0,
+                ageAtEventSec: Number(ageAtEvent.toFixed(3)),
+                simTime: window.SIM_TIME || 0
+            });
+        }
+    }
+
+    _dieByConsumption(tile) {
+        this.energy = 0;
+        this.molecules = [];
+        this.deathSimTime = window.SIM_TIME || 0;
+        this.state = "dead";
+        if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") {
+            window.__recordLineageDeath(this.lineageId);
+        }
+        if (typeof window !== "undefined" && typeof window.__recordCellDeath === "function") {
+            window.__recordCellDeath(this);
+        }
+    }
+
     getDominantElement() {
         const counts = {};
         for (const m of this.molecules) for (const el in m.composition) counts[el] = (counts[el] || 0) + m.composition[el];
@@ -386,42 +470,46 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         applyEnzymeClassDefaults(en);
 
         if (chance(mut)) {
-            if (chance(mut)) {
+            if (!isCombatEnzymeType(en.type) && chance(mut)) {
                 en.specificityMask = mutateSpecificityMask(en.specificityMask);
             }
             if (chance(mut * 0.2)) {
-                const classes = Object.keys(ENZYME_CLASSES);
-                en.type = classes[randomInt(classes.length)];
+                en.type = pickRandom(EVOLVABLE_ENZYME_TYPES);
+                if (isCombatEnzymeType(en.type)) delete en.level;
                 applyEnzymeClassDefaults(en);
             }
-            if (chance(mut)) {
-                en.envalSigma = Math.max(
-                    0.02,
-                    (en.envalSigma ?? 0.18) * (1 + (random() - 0.5) * 0.35)
-                );
-            }
-            if (chance(mut)) {
-                en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (random() - 0.5) * 0.2);
-            }
-            if (chance(mut)) {
-                const cls = ENZYME_CLASSES[en.type] || {};
-                en.envalThroughput = Math.max(
-                    0.01,
-                    (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (random() - 0.5) * 0.4)
-                );
-            }
-            if (en.type === "anabolase" && chance(mut)) {
-                const cls = ENZYME_CLASSES[en.type] || {};
-                en.bondMultiplier = Math.max(
-                    1.01,
-                    (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (random() - 0.5) * 0.18)
-                );
-            }
-            if (en.type === "transmutase" && chance(mut)) {
-                const cls = ENZYME_CLASSES[en.type] || {};
-                en.downhillHarvestFraction = clamp01(
-                    (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (random() - 0.5) * 0.08
-                );
+            if (isCombatEnzymeType(en.type)) {
+                en.level = mutateCombatLevel(en.level);
+            } else {
+                if (chance(mut)) {
+                    en.envalSigma = Math.max(
+                        0.02,
+                        (en.envalSigma ?? 0.18) * (1 + (random() - 0.5) * 0.35)
+                    );
+                }
+                if (chance(mut)) {
+                    en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (random() - 0.5) * 0.2);
+                }
+                if (chance(mut)) {
+                    const cls = ENZYME_CLASSES[en.type] || {};
+                    en.envalThroughput = Math.max(
+                        0.01,
+                        (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (random() - 0.5) * 0.4)
+                    );
+                }
+                if (en.type === "anabolase" && chance(mut)) {
+                    const cls = ENZYME_CLASSES[en.type] || {};
+                    en.bondMultiplier = Math.max(
+                        1.01,
+                        (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (random() - 0.5) * 0.18)
+                    );
+                }
+                if (en.type === "transmutase" && chance(mut)) {
+                    const cls = ENZYME_CLASSES[en.type] || {};
+                    en.downhillHarvestFraction = clamp01(
+                        (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (random() - 0.5) * 0.08
+                    );
+                }
             }
         }
 
@@ -432,18 +520,7 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         const idx = randomInt(g.enzymes.length);
         g.enzymes.splice(idx, 1);
     } else if (chance(mut * 0.3) && g.enzymes.length < 6) {
-        const classes = Object.keys(ENZYME_CLASSES);
-        const type = classes[randomInt(classes.length)];
-        const cls = ENZYME_CLASSES[type] || {};
-        const enzyme = {
-            type,
-            specificityMask: makeRandomSpecificityMask(),
-            envalSigma: 0.16 + random() * 0.08,
-            envalThroughput: cls.envalThroughput ?? 0.10,
-            secretionProb: random()
-        };
-        applyEnzymeClassDefaults(enzyme);
-        g.enzymes.push(enzyme);
+        g.enzymes.push(makeRandomEnzyme(pickRandom(EVOLVABLE_ENZYME_TYPES)));
     }
 
     g.reproThreshold = Math.max(0.01, g.reproThreshold);
@@ -473,6 +550,28 @@ const snapshotMolecules = (molecules) => {
 
 const applyEnzymeClassDefaults = (enzyme) => {
     if (!enzyme || !enzyme.type) return enzyme;
+
+    if (isCombatEnzymeType(enzyme.type)) {
+        if (!Number.isFinite(enzyme.level)) enzyme.level = normalizeCombatLevel(randomGaussian(100, 10), 100);
+        enzyme.level = normalizeCombatLevel(enzyme.level);
+        delete enzyme.specificityMask;
+        delete enzyme.envalSigma;
+        delete enzyme.envalThroughput;
+        delete enzyme.secretionProb;
+        delete enzyme.bondMultiplier;
+        delete enzyme.bondCostFraction;
+        delete enzyme.bondHarvestFraction;
+        delete enzyme.downhillHarvestFraction;
+        delete enzyme.transmuteProb;
+        delete enzyme.transmuteHarvestFraction;
+        delete enzyme.harvestFraction;
+        delete enzyme.transportRate;
+        delete enzyme.activeCostPerAtom;
+        delete enzyme.affinity;
+        delete enzyme._affinityMask;
+        return enzyme;
+    }
+
     const cls = ENZYME_CLASSES[enzyme.type] || {};
 
     if (typeof enzyme.envalSigma !== "number") enzyme.envalSigma = 0.16 + random() * 0.08;
@@ -512,6 +611,7 @@ const applyEnzymeClassDefaults = (enzyme) => {
         delete enzyme.downhillHarvestFraction;
     }
 
+    delete enzyme.level;
     delete enzyme.transmuteProb;
     delete enzyme.transmuteHarvestFraction;
     delete enzyme.harvestFraction;
@@ -535,6 +635,22 @@ const defaultSpecificityMaskForType = (type) => {
     if (type === "catabolase") return maskFromLetters("ABC");
     if (type === "transmutase") return ALL_ELEMENT_MASK;
     return ALL_ELEMENT_MASK;
+};
+
+const EVOLVABLE_ENZYME_TYPES = Object.freeze([...Object.keys(ENZYME_CLASSES), "attackase", "defensase"]);
+
+const makeRandomEnzyme = (type) => {
+    if (isCombatEnzymeType(type)) return { type, level: normalizeCombatLevel(randomGaussian(100, 10), 100) };
+    const cls = ENZYME_CLASSES[type] || {};
+    const enzyme = {
+        type,
+        specificityMask: makeRandomSpecificityMask(),
+        envalSigma: 0.16 + random() * 0.08,
+        envalThroughput: cls.envalThroughput ?? 0.10,
+        secretionProb: random()
+    };
+    applyEnzymeClassDefaults(enzyme);
+    return enzyme;
 };
 
 const pickRandom = (arr) => arr[randomInt(arr.length)];

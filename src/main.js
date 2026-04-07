@@ -1,7 +1,8 @@
 import { World } from "./sim/world.js";
 import { CanvasRenderer } from "./render/canvas.js";
 import { ALL_ELEMENT_MASK, ELEMENTS, ELEMENT_MASKS, maskToElements, maskToString, normalizeSpecificityMask } from "./sim/chem.js";
-import { chance, createRandomSeed, random, randomInt, setSeed } from "./sim/rng.js";
+import { chance, createRandomSeed, random, randomGaussian, randomInt, setSeed } from "./sim/rng.js";
+import { isCombatEnzymeType, normalizeCombatLevel } from "./sim/eco.js";
 
 const SEED_QUERY_PARAM = "seed";
 
@@ -119,6 +120,10 @@ const randomGenome = () => {
                 bondHarvestFraction: 1.00,
                 envalSigma: 0.16 + random() * 0.08,
                 envalThroughput: 0.14
+            },
+            {
+                type: "defensase",
+                level: normalizeCombatLevel(normalizeCombatLevel(randomGaussian(100, 10), 100))
             }
         ],
         reproThreshold: 2 + random() * 6,
@@ -491,10 +496,14 @@ const specificityLabel = (enzyme) => {
     return letters === "ABCDEF" ? "ALL" : letters;
 };
 
-const enzymeDisplayName = (enzyme) => `${specificityLabel(enzyme)}-${enzyme.type || "enzyme"}`;
+const enzymeDisplayName = (enzyme) => {
+    if (enzyme && isCombatEnzymeType(enzyme.type)) return `${normalizeCombatLevel(enzyme.level)}-${enzyme.type}`;
+    return `${specificityLabel(enzyme)}-${enzyme.type || "enzyme"}`;
+};
 
 const enzymeSignature = (e) => {
     const type = e.type || "any";
+    if (isCombatEnzymeType(type)) return `${type}|level:${normalizeCombatLevel(e.level)}`;
     const specificity = specificityLetters(e);
     const bm = (typeof e.bondMultiplier === "number") ? e.bondMultiplier.toFixed(2) : "bmX";
     const hb = (typeof e.bondHarvestFraction === "number") ? e.bondHarvestFraction.toFixed(2) : "hbX";
@@ -503,6 +512,8 @@ const enzymeSignature = (e) => {
     const et = (typeof e.envalThroughput === "number") ? e.envalThroughput.toFixed(2) : "etX";
     return `${type}|spec:${specificity}|bm:${bm}|hb:${hb}|hd:${hd}|es:${es}|et:${et}`;
 };
+
+const snapshotEnzymesForStats = (enzymes) => Array.isArray(enzymes) ? enzymes.map((enzyme) => ({ ...enzyme })) : [];
 
 const livingCells = new Set();
 const lineageCounts = new Map();
@@ -532,11 +543,31 @@ const trackCellBirth = (cell) => {
     const lineageId = cell.lineageId;
     bumpCounter(lineageCounts, lineageId, 1);
     getOrCreateSet(lineageCells, lineageId).add(cell);
-    if (cell.genome && Array.isArray(cell.genome.enzymes)) {
-        for (const e of cell.genome.enzymes) {
-            const sig = enzymeSignature(e);
-            bumpCounter(enzymeSignatureCounts, sig, 1);
-        }
+    const enzymeSnapshot = snapshotEnzymesForStats(cell.genome && cell.genome.enzymes);
+    cell._statsEnzymeSnapshot = enzymeSnapshot;
+    for (const e of enzymeSnapshot) {
+        const sig = enzymeSignature(e);
+        bumpCounter(enzymeSignatureCounts, sig, 1);
+    }
+};
+
+const trackCellGenomeChange = (cell, previousEnzymes = null) => {
+    if (!cell) return;
+    if (!livingCells.has(cell)) return;
+
+    const prior = Array.isArray(previousEnzymes)
+        ? previousEnzymes
+        : snapshotEnzymesForStats(cell._statsEnzymeSnapshot);
+    for (const e of prior) {
+        const sig = enzymeSignature(e);
+        bumpCounter(enzymeSignatureCounts, sig, -1);
+    }
+
+    const nextSnapshot = snapshotEnzymesForStats(cell.genome && cell.genome.enzymes);
+    cell._statsEnzymeSnapshot = nextSnapshot;
+    for (const e of nextSnapshot) {
+        const sig = enzymeSignature(e);
+        bumpCounter(enzymeSignatureCounts, sig, 1);
     }
 };
 
@@ -551,16 +582,19 @@ const trackCellDeath = (cell) => {
         set.delete(cell);
         if (set.size === 0) lineageCells.delete(lineageId);
     }
-    if (cell.genome && Array.isArray(cell.genome.enzymes)) {
-        for (const e of cell.genome.enzymes) {
-            const sig = enzymeSignature(e);
-            bumpCounter(enzymeSignatureCounts, sig, -1);
-        }
+    const enzymeSnapshot = Array.isArray(cell._statsEnzymeSnapshot)
+        ? cell._statsEnzymeSnapshot
+        : snapshotEnzymesForStats(cell.genome && cell.genome.enzymes);
+    for (const e of enzymeSnapshot) {
+        const sig = enzymeSignature(e);
+        bumpCounter(enzymeSignatureCounts, sig, -1);
     }
+    cell._statsEnzymeSnapshot = [];
 };
 
 window.__recordCellBirth = trackCellBirth;
 window.__recordCellDeath = trackCellDeath;
+window.__recordCellGenomeChange = trackCellGenomeChange;
 
 const rebuildStatsIndex = () => {
     livingCells.clear();
@@ -710,6 +744,9 @@ const formatReactionExpression = (ev) => {
     if (ev && ev.enzymeType === "transmutase" && ev.transmutedFrom && ev.transmutedTo) {
         expr += ` [${ev.transmutedFrom}→${ev.transmutedTo}]`;
     }
+    if (ev && ev.enzymeType === "attackase" && typeof ev.attackLevel === "number" && typeof ev.defenseLevel === "number") {
+        expr += ` [${ev.attackLevel}>${ev.defenseLevel}]`;
+    }
     return expr;
 };
 
@@ -725,6 +762,9 @@ const formatEnergyTerm = (v) => {
 };
 
 const enzymeParameterString = (enzyme, genome) => {
+    if (enzyme && isCombatEnzymeType(enzyme.type)) {
+        return `level:${normalizeCombatLevel(enzyme.level)}`;
+    }
     const sigma = (enzyme.envalSigma ?? 0.18).toFixed(2);
     const throughput = (enzyme.envalThroughput ?? 0).toFixed(3);
     const secretion = (enzyme.secretionProb ?? genome.defaultSecretionProb ?? 0).toFixed(2);
