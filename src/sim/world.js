@@ -231,8 +231,11 @@ export class World {
         const occupiedCount = this._occupiedTileCount;
         const tileRight = this._tileRight;
         const tileDown = this._tileDown;
+        const tileDownRight = this._tileDownRight;
+        const tileUpRight = this._tileUpRight;
         const shouldCheckRight = this.width > 1;
         const shouldCheckDown = this.height > 1;
+        const shouldCheckDiagonal = this.width > 1 && this.height > 1;
         const singleHorizontalPair = this.width === 2;
         const singleVerticalPair = this.height === 2;
 
@@ -254,6 +257,19 @@ export class World {
                 const downTile = tiles[tileDown[tileIndex]];
                 if (downTile && downTile !== tile && downTile.cells && downTile.cells.length > 0) {
                     this._resolvePredationBetweenTiles(tile, downTile);
+                }
+            }
+
+            if (shouldCheckDiagonal) {
+                const checkDiagonalAtTile = singleHorizontalPair ? (x === 0) : (!singleVerticalPair || y === 0);
+                if (!checkDiagonalAtTile) continue;
+                const downRightTile = tiles[tileDownRight[tileIndex]];
+                if (downRightTile && downRightTile !== tile && downRightTile.cells && downRightTile.cells.length > 0) {
+                    this._resolvePredationBetweenTiles(tile, downRightTile);
+                }
+                const upRightTile = tiles[tileUpRight[tileIndex]];
+                if (upRightTile && upRightTile !== tile && upRightTile !== downRightTile && upRightTile.cells && upRightTile.cells.length > 0) {
+                    this._resolvePredationBetweenTiles(tile, upRightTile);
                 }
             }
         }
