@@ -38,11 +38,9 @@ export const sumCombatLevels = (enzymes, type) => {
 };
 
 const getCellCombatTotals = (cell) => {
+    if (cell && Number.isFinite(cell.combatAttackTotal) && Number.isFinite(cell.combatDefenseTotal)) return { attack: cell.combatAttackTotal, defense: cell.combatDefenseTotal };
     const enzymes = cell && cell.genome ? cell.genome.enzymes : null;
-    return {
-        attack: sumCombatLevels(enzymes, "attackase"),
-        defense: sumCombatLevels(enzymes, "defensase")
-    };
+    return { attack: sumCombatLevels(enzymes, "attackase"), defense: sumCombatLevels(enzymes, "defensase") };
 };
 
 export const resolvePredationOutcome = (cellA, cellB) => {

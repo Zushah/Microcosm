@@ -1,7 +1,9 @@
 import { ENZYME_CLASSES, attemptReaction } from "./bio.js";
-import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, createMolecule, maskToString, normalizeSpecificityMask, refreshMoleculeDerivedState } from "./chem.js";
+import { ALL_ELEMENT_MASK, ELEMENT_MASKS, ELEMENT_ORDER, compositionToElementMask, maskToString, normalizeSpecificityMask, refreshMoleculeDerivedState } from "./chem.js";
 import { chance, random, randomGaussian, randomInt } from "./rng.js";
 import { cloneEnzyme, isCombatEnzymeType, mutateCombatLevel, normalizeCombatLevel } from "./eco.js";
+
+const INTERNAL_ELEMENT_INDEX = { A: 0, B: 1, C: 2, D: 3, E: 4, F: 5 };
 
 export class Cell {
     constructor(genome) {
@@ -17,6 +19,10 @@ export class Cell {
         this.reactionLog = [];
         this.reactionLogMax = 40;
         this.maintenanceCostPerSec = genome.maintenanceCostPerSec ?? 0.05;
+        this._internalElementCounts = new Int32Array(6);
+        this._internalAtomCount = 0;
+        this._internalCompositionDirty = false;
+        this._refreshCombatTotals();
     }
 
     step(env, tile) {
@@ -28,14 +34,11 @@ export class Cell {
         const internalMolecules = this.molecules;
         const world = tile.__world;
 
-        const refreshEnv = () => {
-            if (!world || !tile) return;
+        if (world && tile) {
             env.enval = tile.enval;
             env.localEnval = world.getLocalEnvalAverage(tile.__x, tile.__y, 2);
             env.avgEnval = world.avgEnval;
-        };
-
-        refreshEnv();
+        }
 
         for (const enzyme of this.genome.enzymes) {
             const localEnvalBefore = env.localEnval ?? tile.enval ?? 0;
@@ -49,6 +52,7 @@ export class Cell {
             const logConsumed = snapshotMolecules(result.consumed || []);
             const logProduced = snapshotMolecule(result.produced || null);
             const logByproducts = snapshotMolecules(result.byproducts || []);
+            const normalizedSpecificity = normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK);
 
             const eDelta = result.energyDelta || 0;
             if (eDelta !== 0) {
@@ -62,7 +66,10 @@ export class Cell {
                 if (this.shouldSecrete(result.produced, enzyme)) {
                     if (world) world.addProductAround(tile.__x, tile.__y, result.produced);
                     else tileMolecules.push(result.produced);
-                } else internalMolecules.push(result.produced);
+                } else {
+                    internalMolecules.push(result.produced);
+                    this._markInternalCompositionDirty();
+                }
             }
 
             if (result.byproducts && result.byproducts.length > 0) {
@@ -72,23 +79,30 @@ export class Cell {
 
             const envalInput = result.envalInput || 0;
             const envalOutput = result.envalOutput || 0;
+            let envalChanged = false;
             if (envalInput !== 0) {
                 if (world && typeof world.adjustTileEnval === "function") world.adjustTileEnval(tile, -envalInput);
                 else tile.enval -= envalInput;
+                envalChanged = true;
             }
             if (envalOutput !== 0) {
                 if (world && typeof world.addEnvalAround === "function") world.addEnvalAround(tile.__x, tile.__y, envalOutput);
                 else tile.enval += envalOutput;
+                envalChanged = true;
             }
 
-            refreshEnv();
+            if (envalChanged && world && tile) {
+                env.enval = tile.enval;
+                env.localEnval = world.getLocalEnvalAverage(tile.__x, tile.__y, 2);
+                env.avgEnval = world.avgEnval;
+            }
 
             const ageAtEvent = (typeof this.getAgeSecSim === "function") ? this.getAgeSecSim() : 0;
 
             this._pushReactionLog({
                 enzymeType: enzyme.type || "unknown",
-                specificityMask: normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK),
-                specificity: maskToString(normalizeSpecificityMask(enzyme.specificityMask, ALL_ELEMENT_MASK)),
+                specificityMask: normalizedSpecificity,
+                specificity: maskToString(normalizedSpecificity),
                 consumed: logConsumed,
                 produced: logProduced,
                 byproducts: logByproducts,
@@ -141,10 +155,9 @@ export class Cell {
                 if (world && typeof world._removeMoleculeFromTile === "function") take = world._removeMoleculeFromTile(tile, idx) || take;
                 else tileMolecules.splice(idx, 1);
                 internalMolecules.push(take);
+                this._markInternalCompositionDirty();
             }
         }
-
-        refreshEnv();
 
         const localEnval = env.localEnval ?? tile.enval ?? 0;
         const optimalEnval = (typeof this.genome.optimalEnval === "number") ? this.genome.optimalEnval : 0;
@@ -170,6 +183,7 @@ export class Cell {
             for (const m of this.molecules) world._addMoleculeToTile(tile, m);
         } else if (tile && tile.molecules) for (const m of this.molecules) tile.molecules.push(m);
         this.molecules = [];
+        this._resetInternalCompositionCache();
         this.deathSimTime = window.SIM_TIME || 0;
         this.state = "dead";
         if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") {
@@ -186,9 +200,8 @@ export class Cell {
     }
 
     totalInternalAtoms() {
-        let s = 0;
-        for (const m of this.molecules) s += m.size || 0;
-        return s;
+        this._ensureInternalCompositionCache();
+        return this._internalAtomCount;
     }
 
     shouldSecrete(product, enzyme) {
@@ -202,9 +215,10 @@ export class Cell {
     }
 
     countInternalElement(el) {
-        let total = 0;
-        for (let i = 0; i < this.molecules.length; i++) total += this.molecules[i].composition[el] || 0;
-        return total;
+        this._ensureInternalCompositionCache();
+        const idx = INTERNAL_ELEMENT_INDEX[el];
+        if (idx === undefined) return 0;
+        return this._internalElementCounts[idx] || 0;
     }
 
     consumeSubstrates(substrates, tile) {
@@ -212,6 +226,7 @@ export class Cell {
         const tilePool = tile && tile.molecules ? tile.molecules : null;
         const cellPool = this.molecules;
         const world = tile && tile.__world;
+        let changedInternalMolecules = false;
         const subtractFromPool = (pool, subComp) => {
             if (!pool) return false;
             for (let i = 0; i < pool.length; i++) {
@@ -226,6 +241,7 @@ export class Cell {
                     m.composition[el] -= subComp[el];
                     if (m.composition[el] <= 0) delete m.composition[el];
                 }
+                if (pool === cellPool) changedInternalMolecules = true;
                 if (Object.keys(m.composition).length === 0) {
                     if (pool === tilePool && world && typeof world._removeMoleculeFromTile === "function" && m.__tile === tile) world._removeMoleculeFromTile(tile, i);
                     else pool.splice(i, 1);
@@ -255,10 +271,12 @@ export class Cell {
             const idx2 = cellPool.indexOf(sub);
             if (idx2 !== -1) {
                 cellPool.splice(idx2, 1);
+                changedInternalMolecules = true;
                 continue;
             }
             if (!subtractFromPool(tilePool, sub.composition)) subtractFromPool(cellPool, sub.composition);
         }
+        if (changedInternalMolecules) this._markInternalCompositionDirty();
     }
 
     divide(tile) {
@@ -276,10 +294,12 @@ export class Cell {
                 this.molecules.splice(i, 1);
             }
         }
+        if (childMolecules.length > 0) this._markInternalCompositionDirty();
 
         const child = new Cell(childGenome);
         child.energy = childEnergy;
         child.molecules = childMolecules;
+        if (childMolecules.length > 0) child._markInternalCompositionDirty();
         child.lineageId = this.lineageId;
         child.birthSimTime = window.SIM_TIME || 0;
 
@@ -352,6 +372,7 @@ export class Cell {
             applyEnzymeClassDefaults(absorbed);
             this.genome.enzymes.push(absorbed);
         }
+        this._refreshCombatTotals();
 
         if (typeof window !== "undefined" && typeof window.__recordCellGenomeChange === "function") {
             window.__recordCellGenomeChange(this, previousEnzymes);
@@ -365,10 +386,12 @@ export class Cell {
 
         if (Array.isArray(victim.molecules) && victim.molecules.length > 0) {
             for (let i = 0; i < victim.molecules.length; i++) this.molecules.push(victim.molecules[i]);
+            this._markInternalCompositionDirty();
         }
 
         victim.energy = 0;
         victim.molecules = [];
+        victim._resetInternalCompositionCache();
         if (victim.genome && Array.isArray(victim.genome.enzymes)) victim.genome.enzymes = [];
 
         if (combatOutcome) {
@@ -407,6 +430,7 @@ export class Cell {
     _dieByConsumption(tile) {
         this.energy = 0;
         this.molecules = [];
+        this._resetInternalCompositionCache();
         this.deathSimTime = window.SIM_TIME || 0;
         this.state = "dead";
         if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") {
@@ -430,6 +454,64 @@ export class Cell {
         const b = this.birthSimTime || 0;
         const d = this.deathSimTime != null ? this.deathSimTime : (window.SIM_TIME || 0);
         return (d - b);
+    }
+
+    _refreshCombatTotals() {
+        const enzymes = (this.genome && Array.isArray(this.genome.enzymes))
+            ? this.genome.enzymes
+            : [];
+        let attack = 0;
+        let defense = 0;
+        for (let i = 0; i < enzymes.length; i++) {
+            const enzyme = enzymes[i];
+            if (!enzyme) continue;
+            if (enzyme.type === "attackase") attack += normalizeCombatLevel(enzyme.level);
+            else if (enzyme.type === "defensase") defense += normalizeCombatLevel(enzyme.level);
+        }
+        this.combatAttackTotal = attack;
+        this.combatDefenseTotal = defense;
+    }
+
+    _markInternalCompositionDirty() {
+        this._internalCompositionDirty = true;
+    }
+
+    _resetInternalCompositionCache() {
+        this._internalElementCounts[0] = 0;
+        this._internalElementCounts[1] = 0;
+        this._internalElementCounts[2] = 0;
+        this._internalElementCounts[3] = 0;
+        this._internalElementCounts[4] = 0;
+        this._internalElementCounts[5] = 0;
+        this._internalAtomCount = 0;
+        this._internalCompositionDirty = false;
+    }
+
+    _ensureInternalCompositionCache() {
+        if (!this._internalCompositionDirty) return;
+        const counts = this._internalElementCounts;
+        counts[0] = 0;
+        counts[1] = 0;
+        counts[2] = 0;
+        counts[3] = 0;
+        counts[4] = 0;
+        counts[5] = 0;
+        let totalAtoms = 0;
+        for (let i = 0; i < this.molecules.length; i++) {
+            const molecule = this.molecules[i];
+            const comp = molecule && molecule.composition ? molecule.composition : null;
+            if (!comp) continue;
+            for (const el in comp) {
+                const idx = INTERNAL_ELEMENT_INDEX[el];
+                if (idx === undefined) continue;
+                const count = comp[el] || 0;
+                if (count <= 0) continue;
+                counts[idx] += count;
+                totalAtoms += count;
+            }
+        }
+        this._internalAtomCount = totalAtoms;
+        this._internalCompositionDirty = false;
     }
 
 }
@@ -535,7 +617,10 @@ const clamp01 = (v) => {
 
 const snapshotMolecule = (molecule) => {
     if (!molecule || !molecule.composition) return null;
-    return createMolecule(Object.assign({}, molecule.composition), molecule.bondMultiplier || 1.0);
+    return {
+        composition: Object.assign({}, molecule.composition),
+        bondMultiplier: molecule.bondMultiplier || 1.0
+    };
 };
 
 const snapshotMolecules = (molecules) => {

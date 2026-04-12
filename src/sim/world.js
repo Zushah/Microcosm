@@ -1,12 +1,17 @@
 import { createMolecule, ELEMENT_ORDER } from "./chem.js";
 import { Cell } from "./cell.js";
-import { chance, pick, randomInt, randomRange } from "./rng.js";
+import { chance, randomInt, randomRange } from "./rng.js";
 import { resolvePredationOutcome } from "./eco.js";
 
 const DIFFUSION_WHEEL_SIZE = 4096;
 const DIFFUSION_WHEEL_MASK = DIFFUSION_WHEEL_SIZE - 1;
 const TILE_ELEMENT_STRIDE = ELEMENT_ORDER.length;
 const ELEMENT_INDEX = { A: 0, B: 1, C: 2, D: 3, E: 4, F: 5 };
+const LOCAL_ENVAL_RADIUS = 2;
+const LOCAL_ENVAL_WINDOW_AREA = (LOCAL_ENVAL_RADIUS * 2 + 1) ** 2;
+const LOCAL_ENVAL_INV_WINDOW_AREA = 1 / LOCAL_ENVAL_WINDOW_AREA;
+const MOORE_WITH_CENTER_DX = [-1, -1, -1, 0, 0, 1, 1, 1, 0];
+const MOORE_WITH_CENTER_DY = [-1, 0, 1, -1, 1, -1, 0, 1, 0];
 
 export class World {
     constructor(width, height) {
@@ -23,6 +28,16 @@ export class World {
         this._tileElementCounts = new Int32Array(this._tileCount * TILE_ELEMENT_STRIDE);
         this._tileMassCounts = new Int32Array(this._tileCount);
         this._tileDiffusionRotor = new Uint8Array(this._tileCount);
+        this._tileLeft = new Int32Array(this._tileCount);
+        this._tileRight = new Int32Array(this._tileCount);
+        this._tileUp = new Int32Array(this._tileCount);
+        this._tileDown = new Int32Array(this._tileCount);
+        this._tileUpLeft = new Int32Array(this._tileCount);
+        this._tileUpRight = new Int32Array(this._tileCount);
+        this._tileDownLeft = new Int32Array(this._tileCount);
+        this._tileDownRight = new Int32Array(this._tileCount);
+        this._occupiedTileIndices = new Int32Array(this._tileCount);
+        this._occupiedTileCount = 0;
         for (let ti = 0; ti < this._tileCount; ti++) {
             let hash = (ti ^ 0x9e3779b9) >>> 0;
             hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b) >>> 0;
@@ -66,9 +81,33 @@ export class World {
 
         this.envalSum = this.baseEnval * this._tileCount;
         this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
+        const h = this.height;
 
         for (let ti = 0; ti < this._tileCount; ti++) {
             const tile = this._tilesFlat[ti];
+            this._eCur[ti] = tile.enval;
+            this._eNext[ti] = tile.enval;
+            const x = tile.__x;
+            const y = tile.__y;
+            const xL = this._xPrev[x];
+            const xR = this._xNext[x];
+            const yU = this._yPrev[y];
+            const yD = this._yNext[y];
+            const idx = ti;
+
+            const idxL = xL * h + y;
+            const idxR = xR * h + y;
+            const idxU = x * h + yU;
+            const idxD = x * h + yD;
+            this._tileLeft[idx] = idxL;
+            this._tileRight[idx] = idxR;
+            this._tileUp[idx] = idxU;
+            this._tileDown[idx] = idxD;
+            this._tileUpLeft[idx] = xL * h + yU;
+            this._tileUpRight[idx] = xR * h + yU;
+            this._tileDownLeft[idx] = xL * h + yD;
+            this._tileDownRight[idx] = xR * h + yD;
+
             const mols = tile.molecules;
             for (let mi = 0; mi < mols.length; mi++) {
                 const m = mols[mi];
@@ -137,27 +176,37 @@ export class World {
     step() {
         this.diffuseMolecules();
         const dtSec = this.dt / 1000;
-        const grid = this.grid;
+        const tiles = this._tilesFlat;
+        const tileCount = this._tileCount;
+        const occupiedTileIndices = this._occupiedTileIndices;
+        let occupiedTileCount = 0;
         const env = this._sharedEnv || (this._sharedEnv = { enval: 0, localEnval: 0, avgEnval: 0, dt: dtSec });
         env.dt = dtSec;
         env.avgEnval = this.avgEnval;
-        for (let x = 0; x < this.width; x++) {
-            const col = grid[x];
-            for (let y = 0; y < this.height; y++) {
-                const tile = col[y];
-                const cells = tile.cells;
-                if (!cells || cells.length === 0) continue;
-                env.enval = tile.enval;
-                env.localEnval = this.getLocalEnvalAverage(x, y, 2);
-                env.avgEnval = this.avgEnval;
-                for (let i = 0; i < cells.length; i++) {
-                    const cell = cells[i];
-                    if (cell._worldRef !== this) cell._worldRef = this;
-                    cell.step(env, tile);
+        for (let tileIndex = 0; tileIndex < tileCount; tileIndex++) {
+            const tile = tiles[tileIndex];
+            const cells = tile.cells;
+            if (!cells || cells.length === 0) continue;
+            env.enval = tile.enval;
+            env.avgEnval = this.avgEnval;
+            let sawDeadCell = false;
+            for (let i = 0; i < cells.length; i++) {
+                const cell = cells[i];
+                if (!cell) {
+                    sawDeadCell = true;
+                    continue;
                 }
-                this._compactDeadCells(tile);
+                if (cell._worldRef !== this) cell._worldRef = this;
+                cell.step(env, tile);
+                if (cell.state === "dead") sawDeadCell = true;
+            }
+            if (sawDeadCell) this._compactDeadCells(tile);
+            if (tile.cells.length > 0) {
+                occupiedTileIndices[occupiedTileCount] = tileIndex;
+                occupiedTileCount++;
             }
         }
+        this._occupiedTileCount = occupiedTileCount;
         this._resolvePredation();
         this.diffuseEnval();
     }
@@ -177,32 +226,186 @@ export class World {
     }
 
     _resolvePredation() {
-        const grid = this.grid;
-        const xNext = this._xNext;
-        const yNext = this._yNext;
+        const tiles = this._tilesFlat;
+        const occupied = this._occupiedTileIndices;
+        const occupiedCount = this._occupiedTileCount;
+        const tileRight = this._tileRight;
+        const tileDown = this._tileDown;
         const shouldCheckRight = this.width > 1;
         const shouldCheckDown = this.height > 1;
         const singleHorizontalPair = this.width === 2;
         const singleVerticalPair = this.height === 2;
 
-        for (let x = 0; x < this.width; x++) {
-            for (let y = 0; y < this.height; y++) {
-                const tile = grid[x][y];
+        for (let i = 0; i < occupiedCount; i++) {
+            const tileIndex = occupied[i];
+            const tile = tiles[tileIndex];
+            if (!tile || !tile.cells || tile.cells.length === 0) continue;
+            const x = tile.__x;
+            const y = tile.__y;
 
-                if (shouldCheckRight && (!singleHorizontalPair || x === 0)) {
-                    const rightTile = grid[xNext[x]][y];
-                    if (rightTile && rightTile !== tile) this._resolvePredationBetweenTiles(tile, rightTile);
+            if (shouldCheckRight && (!singleHorizontalPair || x === 0)) {
+                const rightTile = tiles[tileRight[tileIndex]];
+                if (rightTile && rightTile !== tile && rightTile.cells && rightTile.cells.length > 0) {
+                    this._resolvePredationBetweenTiles(tile, rightTile);
                 }
+            }
 
-                if (shouldCheckDown && (!singleVerticalPair || y === 0)) {
-                    const downTile = grid[x][yNext[y]];
-                    if (downTile && downTile !== tile) this._resolvePredationBetweenTiles(tile, downTile);
+            if (shouldCheckDown && (!singleVerticalPair || y === 0)) {
+                const downTile = tiles[tileDown[tileIndex]];
+                if (downTile && downTile !== tile && downTile.cells && downTile.cells.length > 0) {
+                    this._resolvePredationBetweenTiles(tile, downTile);
                 }
             }
         }
     }
 
     _resolvePredationBetweenTiles(tileA, tileB) {
+        const cellsA = tileA && tileA.cells;
+        const cellsB = tileB && tileB.cells;
+        if (!cellsA || !cellsB || cellsA.length === 0 || cellsB.length === 0) return;
+        let compactA = false;
+        let compactB = false;
+        let hasAliveA = false;
+        let hasAliveB = false;
+        let maxAttackA = 0;
+        let maxAttackB = 0;
+        let minDefenseA = Infinity;
+        let minDefenseB = Infinity;
+
+        for (let i = 0; i < cellsA.length; i++) {
+            const cell = cellsA[i];
+            if (!cell || cell.state === "dead") {
+                compactA = true;
+                continue;
+            }
+            const attack = cell.combatAttackTotal;
+            const defense = cell.combatDefenseTotal;
+            if (!Number.isFinite(attack) || !Number.isFinite(defense)) {
+                return this._resolvePredationBetweenTilesFallback(tileA, tileB);
+            }
+            hasAliveA = true;
+            if (attack > maxAttackA) maxAttackA = attack;
+            if (defense < minDefenseA) minDefenseA = defense;
+        }
+
+        for (let j = 0; j < cellsB.length; j++) {
+            const cell = cellsB[j];
+            if (!cell || cell.state === "dead") {
+                compactB = true;
+                continue;
+            }
+            const attack = cell.combatAttackTotal;
+            const defense = cell.combatDefenseTotal;
+            if (!Number.isFinite(attack) || !Number.isFinite(defense)) {
+                return this._resolvePredationBetweenTilesFallback(tileA, tileB);
+            }
+            hasAliveB = true;
+            if (attack > maxAttackB) maxAttackB = attack;
+            if (defense < minDefenseB) minDefenseB = defense;
+        }
+
+        if (!hasAliveA || !hasAliveB) {
+            if (compactA) this._compactDeadCells(tileA);
+            if (compactB) this._compactDeadCells(tileB);
+            return;
+        }
+
+        if (maxAttackA <= minDefenseB && maxAttackB <= minDefenseA) {
+            if (compactA) this._compactDeadCells(tileA);
+            if (compactB) this._compactDeadCells(tileB);
+            return;
+        }
+
+        for (let i = 0; i < cellsA.length; i++) {
+            const cellA = cellsA[i];
+            if (!cellA || cellA.state === "dead") {
+                compactA = true;
+                continue;
+            }
+            const aAttack = cellA.combatAttackTotal;
+            const aDefense = cellA.combatDefenseTotal;
+            if (aAttack <= minDefenseB && maxAttackB <= aDefense) continue;
+
+            for (let j = 0; j < cellsB.length; j++) {
+                const cellB = cellsB[j];
+                if (!cellB || cellB.state === "dead") {
+                    compactB = true;
+                    continue;
+                }
+                if (cellA.lineageId === cellB.lineageId) continue;
+
+                const bAttack = cellB.combatAttackTotal;
+                const bDefense = cellB.combatDefenseTotal;
+                const aCanKill = aAttack > 0 && aAttack > bDefense;
+                const bCanKill = bAttack > 0 && bAttack > aDefense;
+                if (!aCanKill && !bCanKill) continue;
+
+                let outcome = null;
+                if (aCanKill && !bCanKill) {
+                    outcome = {
+                        winner: cellA,
+                        loser: cellB,
+                        winnerAttack: aAttack,
+                        winnerDefense: aDefense,
+                        loserAttack: bAttack,
+                        loserDefense: bDefense,
+                        winnerMargin: aAttack - bDefense,
+                        loserMargin: bAttack - aDefense
+                    };
+                } else if (bCanKill && !aCanKill) {
+                    outcome = {
+                        winner: cellB,
+                        loser: cellA,
+                        winnerAttack: bAttack,
+                        winnerDefense: bDefense,
+                        loserAttack: aAttack,
+                        loserDefense: aDefense,
+                        winnerMargin: bAttack - aDefense,
+                        loserMargin: aAttack - bDefense
+                    };
+                } else {
+                    const aMargin = aAttack - bDefense;
+                    const bMargin = bAttack - aDefense;
+                    if (aMargin === bMargin) continue;
+                    if (aMargin > bMargin) {
+                        outcome = {
+                            winner: cellA,
+                            loser: cellB,
+                            winnerAttack: aAttack,
+                            winnerDefense: aDefense,
+                            loserAttack: bAttack,
+                            loserDefense: bDefense,
+                            winnerMargin: aMargin,
+                            loserMargin: bMargin
+                        };
+                    } else {
+                        outcome = {
+                            winner: cellB,
+                            loser: cellA,
+                            winnerAttack: bAttack,
+                            winnerDefense: bDefense,
+                            loserAttack: aAttack,
+                            loserDefense: aDefense,
+                            winnerMargin: bMargin,
+                            loserMargin: aMargin
+                        };
+                    }
+                }
+
+                const loserTile = outcome.loser === cellA ? tileA : tileB;
+                this._executePredationOutcome(outcome, loserTile);
+                if (loserTile === tileA) compactA = true;
+                else compactB = true;
+
+                if (cellA.state === "dead") break;
+            }
+        }
+
+        if (compactA) this._compactDeadCells(tileA);
+        if (compactB) this._compactDeadCells(tileB);
+    }
+
+    _resolvePredationBetweenTilesFallback(tileA, tileB) {
         const cellsA = tileA && tileA.cells;
         const cellsB = tileB && tileB.cells;
         if (!cellsA || !cellsB || cellsA.length === 0 || cellsB.length === 0) return;
@@ -218,7 +421,8 @@ export class World {
                 const outcome = resolvePredationOutcome(cellA, cellB);
                 if (!outcome) continue;
 
-                this._executePredationOutcome(outcome, tileA, tileB);
+                const loserTile = outcome.loser === cellA ? tileA : tileB;
+                this._executePredationOutcome(outcome, loserTile);
                 if (cellA.state === "dead") break;
             }
         }
@@ -227,11 +431,9 @@ export class World {
         this._compactDeadCells(tileB);
     }
 
-    _executePredationOutcome(outcome, tileA, tileB) {
+    _executePredationOutcome(outcome, loserTile) {
         if (!outcome || !outcome.winner || !outcome.loser) return;
         if (outcome.winner.state === "dead" || outcome.loser.state === "dead") return;
-
-        const loserTile = tileA && tileA.cells && tileA.cells.includes(outcome.loser) ? tileA : tileB;
         outcome.winner.absorbConsumedCell(outcome.loser, outcome);
         outcome.loser._dieByConsumption(loserTile);
     }
@@ -262,7 +464,7 @@ export class World {
     _scheduleMoleculeDiffusion(molecule) {
         if (!molecule) return;
         this._unscheduleMoleculeDiffusion(molecule);
-        const wait = molecule.diffusionPeriod || (molecule.diffusionRate > 0 ? Math.max(1, Math.round(1 / molecule.diffusionRate)) : 0);
+        const wait = this._getMoleculeDiffusionWait(molecule);
         if (!(wait > 0)) {
             molecule.__diffusionTick = 0;
             return;
@@ -295,9 +497,15 @@ export class World {
         bucket.push(molecule);
     }
 
-    _applyTileCompositionDelta(tile, composition, sign) {
-        if (!tile || !composition || !Number.isFinite(sign) || sign === 0) return;
-        const tileIndex = tile.__i;
+    _getMoleculeDiffusionWait(molecule) {
+        if (!molecule) return 0;
+        if (molecule.diffusionPeriod) return molecule.diffusionPeriod;
+        if (!(molecule.diffusionRate > 0)) return 0;
+        return Math.max(1, Math.round(1 / molecule.diffusionRate));
+    }
+
+    _applyTileCompositionDeltaByIndex(tileIndex, composition, sign) {
+        if (!composition || !Number.isFinite(sign) || sign === 0) return;
         if (!Number.isInteger(tileIndex) || tileIndex < 0) return;
         const base = tileIndex * TILE_ELEMENT_STRIDE;
         let totalDelta = 0;
@@ -312,6 +520,12 @@ export class World {
         if (totalDelta !== 0) this._tileMassCounts[tileIndex] += sign * totalDelta;
     }
 
+    _applyTileCompositionDelta(tile, composition, sign) {
+        if (!tile || !composition || !Number.isFinite(sign) || sign === 0) return;
+        const tileIndex = tile.__i;
+        this._applyTileCompositionDeltaByIndex(tileIndex, composition, sign);
+    }
+
     getTileElementCount(tile, element) {
         if (!tile) return 0;
         const elementIndex = ELEMENT_INDEX[element];
@@ -324,6 +538,11 @@ export class World {
     _getTileCompositionDensity(tile, composition) {
         if (!tile || !composition) return 0;
         const tileIndex = tile.__i;
+        return this._getTileCompositionDensityByIndex(tileIndex, composition);
+    }
+
+    _getTileCompositionDensityByIndex(tileIndex, composition) {
+        if (!composition) return 0;
         if (!Number.isInteger(tileIndex) || tileIndex < 0) return 0;
         const base = tileIndex * TILE_ELEMENT_STRIDE;
         let density = 0;
@@ -382,11 +601,11 @@ export class World {
         const bucket = wheel[tick & DIFFUSION_WHEEL_MASK];
         if (!bucket || bucket.length === 0) return;
 
-        const grid = this.grid;
-        const xPrev = this._xPrev;
-        const xNext = this._xNext;
-        const yPrev = this._yPrev;
-        const yNext = this._yNext;
+        const tiles = this._tilesFlat;
+        const tileLeft = this._tileLeft;
+        const tileRight = this._tileRight;
+        const tileUp = this._tileUp;
+        const tileDown = this._tileDown;
 
         let i = 0;
         while (i < bucket.length) {
@@ -422,19 +641,18 @@ export class World {
             m.__diffusionWheelPos = -1;
 
             const tile = m.__tile;
-            const x = tile.__x;
-            const y = tile.__y;
+            const srcTileIndex = tile.__i;
+            const rightIndex = tileRight[srcTileIndex];
+            const leftIndex = tileLeft[srcTileIndex];
+            const downIndex = tileDown[srcTileIndex];
+            const upIndex = tileUp[srcTileIndex];
 
             const composition = m.composition;
-            const srcDensity = this._getTileCompositionDensity(tile, composition);
-            const rightTile = grid[xNext[x]][y];
-            const leftTile = grid[xPrev[x]][y];
-            const downTile = grid[x][yNext[y]];
-            const upTile = grid[x][yPrev[y]];
-            const rightDensity = this._getTileCompositionDensity(rightTile, composition);
-            const leftDensity = this._getTileCompositionDensity(leftTile, composition);
-            const downDensity = this._getTileCompositionDensity(downTile, composition);
-            const upDensity = this._getTileCompositionDensity(upTile, composition);
+            const srcDensity = this._getTileCompositionDensityByIndex(srcTileIndex, composition);
+            const rightDensity = this._getTileCompositionDensityByIndex(rightIndex, composition);
+            const leftDensity = this._getTileCompositionDensityByIndex(leftIndex, composition);
+            const downDensity = this._getTileCompositionDensityByIndex(downIndex, composition);
+            const upDensity = this._getTileCompositionDensityByIndex(upIndex, composition);
             let minDensity = srcDensity;
             let tieMask = 0;
 
@@ -455,7 +673,7 @@ export class World {
                 tieMask = 8;
             } else if (upDensity === minDensity && upDensity < srcDensity) tieMask |= 8;
             if (tieMask === 0) {
-                const wait = m.diffusionPeriod || (m.diffusionRate > 0 ? Math.max(1, Math.round(1 / m.diffusionRate)) : 0);
+                const wait = this._getMoleculeDiffusionWait(m);
                 if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
                 continue;
             }
@@ -474,26 +692,32 @@ export class World {
                 else if (tieMask === 4) chosenDir = 2;
                 else chosenDir = 3;
             } else {
-                const rotorIndex = tile.__i;
-                const rotorStart = this._tileDiffusionRotor[rotorIndex] & 3;
+                const rotorStart = this._tileDiffusionRotor[srcTileIndex] & 3;
                 for (let step = 0; step < 4; step++) {
                     const dir = (rotorStart + step) & 3;
                     if ((tieMask & (1 << dir)) !== 0) {
                         chosenDir = dir;
-                        this._tileDiffusionRotor[rotorIndex] = (dir + 1) & 3;
+                        this._tileDiffusionRotor[srcTileIndex] = (dir + 1) & 3;
                         break;
                     }
                 }
             }
 
-            let destTile = null;
-            if (chosenDir === 0) destTile = rightTile;
-            else if (chosenDir === 1) destTile = leftTile;
-            else if (chosenDir === 2) destTile = downTile;
-            else if (chosenDir === 3) destTile = upTile;
+            let destTileIndex = -1;
+            if (chosenDir === 0) destTileIndex = rightIndex;
+            else if (chosenDir === 1) destTileIndex = leftIndex;
+            else if (chosenDir === 2) destTileIndex = downIndex;
+            else if (chosenDir === 3) destTileIndex = upIndex;
 
+            if (destTileIndex < 0) {
+                const wait = this._getMoleculeDiffusionWait(m);
+                if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
+                continue;
+            }
+
+            const destTile = tiles[destTileIndex];
             if (!destTile) {
-                const wait = m.diffusionPeriod || (m.diffusionRate > 0 ? Math.max(1, Math.round(1 / m.diffusionRate)) : 0);
+                const wait = this._getMoleculeDiffusionWait(m);
                 if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
                 continue;
             }
@@ -511,67 +735,49 @@ export class World {
             }
 
             const destMols = destTile.molecules;
-            this._applyTileCompositionDelta(tile, m.composition, -1);
-            this._applyTileCompositionDelta(destTile, m.composition, 1);
+            this._applyTileCompositionDeltaByIndex(srcTileIndex, m.composition, -1);
+            this._applyTileCompositionDeltaByIndex(destTileIndex, m.composition, 1);
             m.__tile = destTile;
             m.__tileIndex = destMols.length;
             m.__lastDiffusionDir = chosenDir;
             destMols.push(m);
 
-            const wait = m.diffusionPeriod || (m.diffusionRate > 0 ? Math.max(1, Math.round(1 / m.diffusionRate)) : 0);
+            const wait = this._getMoleculeDiffusionWait(m);
             if (wait > 0) this._queueMoleculeDiffusionAt(m, (tick + wait) >>> 0);
         }
     }
 
     diffuseEnval() {
-        const w = this.width;
-        const h = this.height;
         const tileCount = this._tileCount;
         const tiles = this._tilesFlat;
-
         const eCur = this._eCur;
         const eNext = this._eNext;
-
-        for (let i = 0; i < tileCount; i++) {
-            const tile = tiles[i];
-            eCur[i] = tile.enval;
-        }
-
-        const xPrev = this._xPrev;
-        const xNext = this._xNext;
-        const yPrev = this._yPrev;
-        const yNext = this._yNext;
+        const tileLeft = this._tileLeft;
+        const tileRight = this._tileRight;
+        const tileUp = this._tileUp;
+        const tileDown = this._tileDown;
+        const tileUpLeft = this._tileUpLeft;
+        const tileUpRight = this._tileUpRight;
+        const tileDownLeft = this._tileDownLeft;
+        const tileDownRight = this._tileDownRight;
 
         const alpha = 0.18;
         const oneMinusAlpha = 1 - alpha;
         const inv9 = 1 / 9;
 
-        for (let x = 0; x < w; x++) {
-            const xL = xPrev[x];
-            const xR = xNext[x];
-            const row = x * h;
-            const rowL = xL * h;
-            const rowR = xR * h;
-
-            for (let y = 0; y < h; y++) {
-                const yU = yPrev[y];
-                const yD = yNext[y];
-
-                const iC = row + y;
-                const iLU = rowL + yU;
-                const iL = rowL + y;
-                const iLD = rowL + yD;
-                const iU = row + yU;
-                const iD = row + yD;
-                const iRU = rowR + yU;
-                const iR = rowR + y;
-                const iRD = rowR + yD;
-
-                const eSum = eCur[iC] + eCur[iLU] + eCur[iL] + eCur[iLD] + eCur[iU] + eCur[iD] + eCur[iRU] + eCur[iR] + eCur[iRD];
-                const eAvg = eSum * inv9;
-
-                eNext[iC] = alpha * eAvg + oneMinusAlpha * eCur[iC];
-            }
+        for (let i = 0; i < tileCount; i++) {
+            const eCenter = eCur[i];
+            const eSum = eCenter
+                + eCur[tileLeft[i]]
+                + eCur[tileRight[i]]
+                + eCur[tileUp[i]]
+                + eCur[tileDown[i]]
+                + eCur[tileUpLeft[i]]
+                + eCur[tileUpRight[i]]
+                + eCur[tileDownLeft[i]]
+                + eCur[tileDownRight[i]];
+            const eAvg = eSum * inv9;
+            eNext[i] = alpha * eAvg + oneMinusAlpha * eCenter;
         }
 
         let sumE = 0;
@@ -584,12 +790,16 @@ export class World {
         }
         this.envalSum = sumE;
         this.avgEnval = tileCount > 0 ? (sumE / tileCount) : (this.baseEnval ?? 0);
+        this._eCur = eNext;
+        this._eNext = eCur;
     }
 
     adjustTileEnval(tile, delta) {
         if (!tile) return;
         if (!Number.isFinite(delta) || delta === 0) return;
         tile.enval += delta;
+        const tileIndex = tile.__i;
+        if (Number.isInteger(tileIndex) && tileIndex >= 0) this._eCur[tileIndex] = tile.enval;
         this.envalSum += delta;
         this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
     }
@@ -614,7 +824,12 @@ export class World {
         for (let xi = 0; xi < xIndices.length; xi++) {
             const x = xIndices[xi];
             const col = this.grid[x];
-            for (let yi = 0; yi < yIndices.length; yi++) col[yIndices[yi]].enval += intensity;
+            for (let yi = 0; yi < yIndices.length; yi++) {
+                const tile = col[yIndices[yi]];
+                tile.enval += intensity;
+                const tileIndex = tile.__i;
+                if (Number.isInteger(tileIndex) && tileIndex >= 0) this._eCur[tileIndex] = tile.enval;
+            }
         }
 
         const affectedTileCount = xIndices.length * yIndices.length;
@@ -624,14 +839,48 @@ export class World {
     }
 
     getLocalEnvalAverage(centerX, centerY, radius = 2) {
+        if (radius === LOCAL_ENVAL_RADIUS) {
+            const width = this.width;
+            const height = this.height;
+            const x = ((centerX % width) + width) % width;
+            const y = ((centerY % height) + height) % height;
+            const xPrev = this._xPrev;
+            const xNext = this._xNext;
+            const yPrev = this._yPrev;
+            const yNext = this._yNext;
+            const xM1 = xPrev[x];
+            const xP1 = xNext[x];
+            const xM2 = xPrev[xM1];
+            const xP2 = xNext[xP1];
+            const yM1 = yPrev[y];
+            const yP1 = yNext[y];
+            const yM2 = yPrev[yM1];
+            const yP2 = yNext[yP1];
+            const eCur = this._eCur;
+            const rowM2 = xM2 * height;
+            const rowM1 = xM1 * height;
+            const row0 = x * height;
+            const rowP1 = xP1 * height;
+            const rowP2 = xP2 * height;
+            const sum =
+                eCur[rowM2 + yM2] + eCur[rowM2 + yM1] + eCur[rowM2 + y] + eCur[rowM2 + yP1] + eCur[rowM2 + yP2]
+                + eCur[rowM1 + yM2] + eCur[rowM1 + yM1] + eCur[rowM1 + y] + eCur[rowM1 + yP1] + eCur[rowM1 + yP2]
+                + eCur[row0 + yM2] + eCur[row0 + yM1] + eCur[row0 + y] + eCur[row0 + yP1] + eCur[row0 + yP2]
+                + eCur[rowP1 + yM2] + eCur[rowP1 + yM1] + eCur[rowP1 + y] + eCur[rowP1 + yP1] + eCur[rowP1 + yP2]
+                + eCur[rowP2 + yM2] + eCur[rowP2 + yM1] + eCur[rowP2 + y] + eCur[rowP2 + yP1] + eCur[rowP2 + yP2];
+            return sum * LOCAL_ENVAL_INV_WINDOW_AREA;
+        }
+
         let sum = 0;
         let count = 0;
+        const eCur = this._eCur;
+        const height = this.height;
         for (let dx = -radius; dx <= radius; dx++) {
             const x = (centerX + dx + this.width) % this.width;
-            const col = this.grid[x];
+            const row = x * height;
             for (let dy = -radius; dy <= radius; dy++) {
                 const y = (centerY + dy + this.height) % this.height;
-                sum += col[y].enval;
+                sum += eCur[row + y];
                 count++;
             }
         }
@@ -639,8 +888,9 @@ export class World {
     }
 
     addProductAround(centerX, centerY, product) {
-        const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
-        const [nx, ny] = pick(ring);
+        const choice = randomInt(9);
+        const nx = (centerX + MOORE_WITH_CENTER_DX[choice] + this.width) % this.width;
+        const ny = (centerY + MOORE_WITH_CENTER_DY[choice] + this.height) % this.height;
         const cloneComp = Object.assign({}, product.composition || {});
         const clone = createMolecule(cloneComp, product.bondMultiplier || 1.0);
         const tile = this.grid[nx][ny];
@@ -649,8 +899,9 @@ export class World {
 
     addEnvalAround(centerX, centerY, envalDelta) {
         if (!Number.isFinite(envalDelta) || envalDelta === 0) return;
-        const ring = this.mooreNeighbors(centerX, centerY).concat([[centerX, centerY]]);
-        const [nx, ny] = pick(ring);
+        const choice = randomInt(9);
+        const nx = (centerX + MOORE_WITH_CENTER_DX[choice] + this.width) % this.width;
+        const ny = (centerY + MOORE_WITH_CENTER_DY[choice] + this.height) % this.height;
         this.adjustTileEnval(this.grid[nx][ny], envalDelta);
     }
 
