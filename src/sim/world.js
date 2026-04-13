@@ -821,37 +821,63 @@ export class World {
     }
 
 
-    applyEnvalBrush(centerX, centerY, brushWidth, brushHeight, intensity) {
-        if (!Number.isFinite(intensity) || intensity === 0) return 0;
+    _normalizeBrushSpan(span, worldSpan) {
+        return Math.max(1, Math.min(worldSpan, Math.round(Number(span) || 1)));
+    }
 
-        const width = Math.max(1, Math.min(this.width, Math.round(Number(brushWidth) || 1)));
-        const height = Math.max(1, Math.min(this.height, Math.round(Number(brushHeight) || 1)));
+    _brushAxisIndices(start, span, worldSpan) {
+        const out = [];
+        if (span >= worldSpan) {
+            for (let i = 0; i < worldSpan; i++) out.push(i);
+            return out;
+        }
+        for (let offset = 0; offset < span; offset++) out.push(((start + offset) % worldSpan + worldSpan) % worldSpan);
+        return out;
+    }
+
+    _forEachBrushTile(centerX, centerY, brushWidth, brushHeight, visitor) {
+        const width = this._normalizeBrushSpan(brushWidth, this.width);
+        const height = this._normalizeBrushSpan(brushHeight, this.height);
         const startX = centerX - Math.floor(width * 0.5);
         const startY = centerY - Math.floor(height * 0.5);
-
-        const xIndices = [];
-        const yIndices = [];
-
-        if (width >= this.width) for (let x = 0; x < this.width; x++) xIndices.push(x);
-        else for (let dx = 0; dx < width; dx++) xIndices.push(((startX + dx) % this.width + this.width) % this.width);
-        if (height >= this.height) for (let y = 0; y < this.height; y++) yIndices.push(y);
-        else for (let dy = 0; dy < height; dy++) yIndices.push(((startY + dy) % this.height + this.height) % this.height);
-
+        const xIndices = this._brushAxisIndices(startX, width, this.width);
+        const yIndices = this._brushAxisIndices(startY, height, this.height);
         for (let xi = 0; xi < xIndices.length; xi++) {
             const x = xIndices[xi];
             const col = this.grid[x];
             for (let yi = 0; yi < yIndices.length; yi++) {
-                const tile = col[yIndices[yi]];
-                tile.enval += intensity;
-                const tileIndex = tile.__i;
-                if (Number.isInteger(tileIndex) && tileIndex >= 0) this._eCur[tileIndex] = tile.enval;
+                const y = yIndices[yi];
+                visitor(col[y], x, y);
             }
         }
+        return xIndices.length * yIndices.length;
+    }
 
-        const affectedTileCount = xIndices.length * yIndices.length;
+    applyEnvalBrush(centerX, centerY, brushWidth, brushHeight, intensity) {
+        if (!Number.isFinite(intensity) || intensity === 0) return 0;
+        const affectedTileCount = this._forEachBrushTile(centerX, centerY, brushWidth, brushHeight, (tile) => {
+            tile.enval += intensity;
+            const tileIndex = tile.__i;
+            if (Number.isInteger(tileIndex) && tileIndex >= 0) this._eCur[tileIndex] = tile.enval;
+        });
         this.envalSum += intensity * affectedTileCount;
         this.avgEnval = this._tileCount > 0 ? (this.envalSum / this._tileCount) : (this.baseEnval ?? 0);
         return affectedTileCount;
+    }
+
+    applyGenomeBrush(centerX, centerY, brushWidth, brushHeight, enzyme) {
+        if (!enzyme || !enzyme.type) return 0;
+        let modifiedCellCount = 0;
+        this._forEachBrushTile(centerX, centerY, brushWidth, brushHeight, (tile) => {
+            const cells = tile && tile.cells;
+            if (!cells || cells.length === 0) return;
+            for (let i = 0; i < cells.length; i++) {
+                const cell = cells[i];
+                if (!cell || cell.state === "dead" || typeof cell.addEnzymeToGenome !== "function") continue;
+                if (cell.addEnzymeToGenome(enzyme)) modifiedCellCount++;
+            }
+        });
+        return modifiedCellCount;
     }
 
     getLocalEnvalAverage(centerX, centerY, radius = 2) {

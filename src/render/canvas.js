@@ -104,6 +104,7 @@ export class CanvasRenderer {
         this.brushWidth = 10;
         this.brushHeight = 10;
         this.brushIntensity = 0;
+        this.brushKind = "enval";
         this._lineageRgbCache = new Map();
         this._dpr = 1;
         this._instanceStrideFloats = 8;
@@ -185,10 +186,11 @@ export class CanvasRenderer {
         this._applyIdleCursor();
     }
 
-    setEditBrush(width, height, intensity = 0) {
+    setEditBrush(width, height, intensity = 0, kind = "enval") {
         this.brushWidth = Math.max(1, Math.min(this.world.width, Math.round(Number(width) || 1)));
         this.brushHeight = Math.max(1, Math.min(this.world.height, Math.round(Number(height) || 1)));
         this.brushIntensity = Number.isFinite(intensity) ? intensity : 0;
+        this.brushKind = kind === "genome" ? "genome" : "enval";
     }
 
     setTileColorMode(mode) {
@@ -477,6 +479,7 @@ export class CanvasRenderer {
     }
 
     _brushPreviewColor01() {
+        if (this.brushKind === "genome") return [0.56, 0.26, 0.82];
         if (this.brushIntensity > 0) return [0.95, 0.56, 0.12];
         if (this.brushIntensity < 0) return [0.18, 0.43, 0.92];
         return [0.35, 0.35, 0.35];

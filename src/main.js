@@ -1,8 +1,9 @@
 import { World } from "./sim/world.js";
 import { CanvasRenderer } from "./render/canvas.js";
-import { ALL_ELEMENT_MASK, ELEMENTS, ELEMENT_MASKS, maskToElements, maskToString, normalizeSpecificityMask } from "./sim/chem.js";
+import { ALL_ELEMENT_MASK, ELEMENTS, ELEMENT_MASKS, maskToString, normalizeSpecificityMask } from "./sim/chem.js";
 import { chance, createRandomSeed, random, randomGaussian, randomInt, setSeed } from "./sim/rng.js";
 import { isCombatEnzymeType, normalizeCombatLevel } from "./sim/eco.js";
+import { applyEnzymeClassDefaults, defaultSpecificityMaskForType } from "./sim/cell.js";
 
 const SEED_QUERY_PARAM = "seed";
 
@@ -20,6 +21,14 @@ const seedUrl = (seed) => {
 const currentRunSeed = setSeed(normalizeSeedValue(new URL(window.location.href).searchParams.get(SEED_QUERY_PARAM)));
 window.MICROCOSM_SEED = currentRunSeed;
 window.history.replaceState(null, "", seedUrl(currentRunSeed).toString());
+
+const EDIT_BRUSH_TYPES = Object.freeze(["enval", "genome"]);
+const GENOME_BRUSH_ENZYME_TYPES = Object.freeze(["anabolase", "catabolase", "transmutase", "defensase", "attackase"]);
+const METABOLIC_GENOME_BRUSH_ENZYME_TYPES = Object.freeze(["anabolase", "catabolase", "transmutase"]);
+const METABOLIC_GENOME_BRUSH_ENZYME_TYPE_SET = new Set(METABOLIC_GENOME_BRUSH_ENZYME_TYPES);
+const DEFAULT_GENOME_BRUSH_ENZYME_CLASS = "anabolase";
+const DEFAULT_GENOME_BRUSH_LEVEL = 100;
+const DEFAULT_GENOME_BRUSH_ENVAL_SIGMA = 0.18;
 
 const restartWithSeed = (value) => {
     const nextSeed = normalizeSeedValue(value);
@@ -173,12 +182,24 @@ if (!elementsDiv) {
 
 let selectedCell = null;
 
+const defaultGenomeBrushSpecificity = (type = DEFAULT_GENOME_BRUSH_ENZYME_CLASS) => {
+    const normalizedType = GENOME_BRUSH_ENZYME_TYPES.includes(type) ? type : DEFAULT_GENOME_BRUSH_ENZYME_CLASS;
+    const mask = defaultSpecificityMaskForType(normalizedType);
+    const text = maskToString(mask);
+    return text === "ABCDEF" ? "ALL" : text;
+};
+
 const interactionState = {
     mode: "explore",
     tileColorMode: "enval",
     brushWidth: 10,
     brushHeight: 10,
+    brushType: "enval",
     brushIntensity: 0.00,
+    genomeBrushEnzymeClass: DEFAULT_GENOME_BRUSH_ENZYME_CLASS,
+    genomeBrushSpecificity: defaultGenomeBrushSpecificity(DEFAULT_GENOME_BRUSH_ENZYME_CLASS),
+    genomeBrushLevel: DEFAULT_GENOME_BRUSH_LEVEL,
+    genomeBrushEnvalSigma: DEFAULT_GENOME_BRUSH_ENVAL_SIGMA,
     panelOpen: true
 };
 
@@ -192,9 +213,24 @@ const interactionUi = {
     editSettings: null,
     brushWidthInput: null,
     brushHeightInput: null,
+    brushTypeInput: null,
+    envalBrushSettings: null,
     brushIntensityInput: null,
+    genomeBrushSettings: null,
+    genomeBrushEnzymeClassInput: null,
+    genomeBrushValueLabel: null,
+    genomeBrushValueInput: null,
+    genomeBrushValueNote: null,
+    genomeBrushEnvalSigmaRow: null,
+    genomeBrushEnvalSigmaInput: null,
     modeNote: null
 };
+
+const isGenomeBrushMetabolicType = (type) => METABOLIC_GENOME_BRUSH_ENZYME_TYPE_SET.has(type);
+
+const normalizeBrushType = (value) => EDIT_BRUSH_TYPES.includes(value) ? value : "enval";
+
+const normalizeGenomeBrushEnzymeClass = (value) => GENOME_BRUSH_ENZYME_TYPES.includes(value) ? value : DEFAULT_GENOME_BRUSH_ENZYME_CLASS;
 
 const clampBrushSpan = (value, maxValue, fallback) => {
     const parsed = Math.round(Number(value));
@@ -213,41 +249,180 @@ const formatBrushIntensity = (value) => {
     return String(value);
 };
 
+const parseGenomeBrushSpecificityMask = (value) => {
+    const compact = `${value ?? ""}`.toUpperCase().replace(/[\s,]+/g, "");
+    if (!compact) return null;
+    if (compact === "ALL") return ALL_ELEMENT_MASK;
+    if (!/^[A-F]+$/.test(compact)) return null;
+    let mask = 0;
+    for (let i = 0; i < compact.length; i++) mask |= ELEMENT_MASKS[compact[i]] || 0;
+    return normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
+};
+
+const formatGenomeBrushSpecificity = (value, fallback = defaultGenomeBrushSpecificity(DEFAULT_GENOME_BRUSH_ENZYME_CLASS)) => {
+    const mask = parseGenomeBrushSpecificityMask(value);
+    if (!mask) return fallback;
+    const text = maskToString(mask);
+    return text === "ABCDEF" ? "ALL" : text;
+};
+
+const parseGenomeBrushLevel = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) return null;
+    return normalizeCombatLevel(parsed);
+};
+
+const parseGenomeBrushEnvalSigma = (value) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return parsed;
+};
+
+const updateGenomeBrushValueValidity = () => {
+    const input = interactionUi.genomeBrushValueInput;
+    if (!input) return true;
+    const enzymeClass = normalizeGenomeBrushEnzymeClass(interactionState.genomeBrushEnzymeClass);
+    if (isGenomeBrushMetabolicType(enzymeClass)) {
+        const specificityMask = parseGenomeBrushSpecificityMask(input.value);
+        input.setCustomValidity(specificityMask ? "" : "Use letters A-F only, or enter ALL.");
+        return Boolean(specificityMask);
+    }
+    const level = parseGenomeBrushLevel(input.value);
+    input.setCustomValidity(level ? "" : "Enter a positive integer level.");
+    return Boolean(level);
+};
+
+const updateGenomeBrushEnvalSigmaValidity = () => {
+    const input = interactionUi.genomeBrushEnvalSigmaInput;
+    if (!input) return true;
+    if (input.disabled) {
+        input.setCustomValidity("");
+        return true;
+    }
+    const sigma = parseGenomeBrushEnvalSigma(input.value);
+    input.setCustomValidity(sigma ? "" : "Enter an envalSigma greater than 0.");
+    return Boolean(sigma);
+};
+
+const commitGenomeBrushValueInput = (reportValidity = false) => {
+    if (!interactionUi.genomeBrushValueInput) return true;
+    const enzymeClass = normalizeGenomeBrushEnzymeClass(interactionState.genomeBrushEnzymeClass);
+    if (isGenomeBrushMetabolicType(enzymeClass)) {
+        const specificityMask = parseGenomeBrushSpecificityMask(interactionUi.genomeBrushValueInput.value);
+        if (!specificityMask) {
+            updateGenomeBrushValueValidity();
+            if (reportValidity) interactionUi.genomeBrushValueInput.reportValidity();
+            syncInteractionUi();
+            return false;
+        }
+        interactionState.genomeBrushSpecificity = formatGenomeBrushSpecificity(
+            interactionUi.genomeBrushValueInput.value,
+            defaultGenomeBrushSpecificity(enzymeClass)
+        );
+        syncInteractionUi();
+        return true;
+    }
+    const level = parseGenomeBrushLevel(interactionUi.genomeBrushValueInput.value);
+    if (!level) {
+        updateGenomeBrushValueValidity();
+        if (reportValidity) interactionUi.genomeBrushValueInput.reportValidity();
+        syncInteractionUi();
+        return false;
+    }
+    interactionState.genomeBrushLevel = level;
+    syncInteractionUi();
+    return true;
+};
+
+const commitGenomeBrushEnvalSigmaInput = (reportValidity = false) => {
+    if (!interactionUi.genomeBrushEnvalSigmaInput || interactionUi.genomeBrushEnvalSigmaInput.disabled) return true;
+    const sigma = parseGenomeBrushEnvalSigma(interactionUi.genomeBrushEnvalSigmaInput.value);
+    if (!sigma) {
+        updateGenomeBrushEnvalSigmaValidity();
+        if (reportValidity) interactionUi.genomeBrushEnvalSigmaInput.reportValidity();
+        syncInteractionUi();
+        return false;
+    }
+    interactionState.genomeBrushEnvalSigma = sigma;
+    syncInteractionUi();
+    return true;
+};
+
+const buildGenomeBrushEnzyme = () => {
+    const enzymeClass = normalizeGenomeBrushEnzymeClass(interactionUi.genomeBrushEnzymeClassInput ? interactionUi.genomeBrushEnzymeClassInput.value : interactionState.genomeBrushEnzymeClass);
+    interactionState.genomeBrushEnzymeClass = enzymeClass;
+    const enzyme = { type: enzymeClass };
+    if (isGenomeBrushMetabolicType(enzymeClass)) {
+        const specificitySource = interactionUi.genomeBrushValueInput ? interactionUi.genomeBrushValueInput.value : interactionState.genomeBrushSpecificity;
+        const sigmaSource = interactionUi.genomeBrushEnvalSigmaInput ? interactionUi.genomeBrushEnvalSigmaInput.value : interactionState.genomeBrushEnvalSigma;
+        const specificityMask = parseGenomeBrushSpecificityMask(specificitySource);
+        const envalSigma = parseGenomeBrushEnvalSigma(sigmaSource);
+        if (!specificityMask || !envalSigma) return null;
+        interactionState.genomeBrushSpecificity = formatGenomeBrushSpecificity(specificitySource, defaultGenomeBrushSpecificity(enzymeClass));
+        interactionState.genomeBrushEnvalSigma = envalSigma;
+        enzyme.specificityMask = specificityMask;
+        enzyme.envalSigma = envalSigma;
+    } else {
+        const levelSource = interactionUi.genomeBrushValueInput ? interactionUi.genomeBrushValueInput.value : interactionState.genomeBrushLevel;
+        const level = parseGenomeBrushLevel(levelSource);
+        if (!level) return null;
+        interactionState.genomeBrushLevel = level;
+        enzyme.level = level;
+    }
+    applyEnzymeClassDefaults(enzyme);
+    return enzyme;
+};
+
 const syncInteractionUi = () => {
     renderer.setInteractionMode(interactionState.mode);
     renderer.setTileColorMode(interactionState.tileColorMode);
-    renderer.setEditBrush(
-        interactionState.brushWidth,
-        interactionState.brushHeight,
-        interactionState.brushIntensity
-    );
-
+    renderer.setEditBrush(interactionState.brushWidth, interactionState.brushHeight, interactionState.brushIntensity, interactionState.brushType);
     const panel = interactionUi.panel;
     if (!panel) return;
-
     const isEditMode = interactionState.mode === "edit";
-
+    const isGenomeBrush = interactionState.brushType === "genome";
+    const enzymeClass = normalizeGenomeBrushEnzymeClass(interactionState.genomeBrushEnzymeClass);
+    const isMetabolicGenomeBrush = isGenomeBrushMetabolicType(enzymeClass);
     panel.classList.toggle("isCollapsed", !interactionState.panelOpen);
     interactionUi.toggle.textContent = interactionState.panelOpen ? "❮" : "❯";
     interactionUi.toggle.setAttribute("aria-label", interactionState.panelOpen ? "Collapse controls" : "Expand controls");
-
     for (const button of interactionUi.modeButtons) {
         const active = button.dataset.mode === interactionState.mode;
         button.classList.toggle("isActive", active);
         button.setAttribute("aria-pressed", active ? "true" : "false");
     }
-
     interactionUi.editSettings.classList.toggle("isDisabled", !isEditMode);
     interactionUi.brushWidthInput.disabled = !isEditMode;
     interactionUi.brushHeightInput.disabled = !isEditMode;
-    interactionUi.brushIntensityInput.disabled = !isEditMode;
-
+    interactionUi.brushTypeInput.disabled = !isEditMode;
+    interactionUi.brushIntensityInput.disabled = !isEditMode || isGenomeBrush;
+    interactionUi.genomeBrushEnzymeClassInput.disabled = !isEditMode || !isGenomeBrush;
+    interactionUi.genomeBrushValueInput.disabled = !isEditMode || !isGenomeBrush;
+    interactionUi.genomeBrushEnvalSigmaInput.disabled = !isEditMode || !isGenomeBrush || !isMetabolicGenomeBrush;
+    interactionUi.envalBrushSettings.hidden = isGenomeBrush;
+    interactionUi.genomeBrushSettings.hidden = !isGenomeBrush;
+    interactionUi.genomeBrushEnvalSigmaRow.hidden = !isMetabolicGenomeBrush;
     interactionUi.tileColorModeInput.value = interactionState.tileColorMode;
     interactionUi.brushWidthInput.value = String(interactionState.brushWidth);
     interactionUi.brushHeightInput.value = String(interactionState.brushHeight);
+    interactionUi.brushTypeInput.value = interactionState.brushType;
     interactionUi.brushIntensityInput.value = formatBrushIntensity(interactionState.brushIntensity);
+    interactionUi.genomeBrushEnzymeClassInput.value = enzymeClass;
+    interactionUi.genomeBrushValueInput.type = isMetabolicGenomeBrush ? "text" : "number";
+    interactionUi.genomeBrushValueInput.placeholder = isMetabolicGenomeBrush ? "ABC or ALL" : "100";
+    interactionUi.genomeBrushValueInput.inputMode = isMetabolicGenomeBrush ? "text" : "numeric";
+    interactionUi.genomeBrushValueInput.min = isMetabolicGenomeBrush ? "" : "1";
+    interactionUi.genomeBrushValueInput.step = isMetabolicGenomeBrush ? "" : "1";
+    interactionUi.genomeBrushValueLabel.textContent = isMetabolicGenomeBrush ? "Specificity" : "Level";
+    interactionUi.genomeBrushValueNote.textContent = isMetabolicGenomeBrush ? "Use letters A-F only, or ALL. Example: ABC or BDF." : "Positive integer, minimum 1.";
+    interactionUi.genomeBrushValueInput.value = isMetabolicGenomeBrush ? interactionState.genomeBrushSpecificity : String(interactionState.genomeBrushLevel);
+    interactionUi.genomeBrushEnvalSigmaInput.value = String(interactionState.genomeBrushEnvalSigma);
+    updateGenomeBrushValueValidity();
+    updateGenomeBrushEnvalSigmaValidity();
     interactionUi.modeNote.textContent = isEditMode
-        ? "Right-click and drag to stamp the configured Δ enval across the rectangular brush footprint."
+        ? (isGenomeBrush
+            ? "Right-click and drag to add the configured enzyme to every cell inside the rectangular brush footprint. Empty tiles are ignored."
+            : "Right-click and drag to stamp the configured Δ enval across the rectangular brush footprint.")
         : "Left-drag pans, the mouse wheel zooms, left-click inspects a cell, and right-click inspects its lineage.";
 };
 
@@ -304,9 +479,47 @@ const createInteractionPanel = () => {
             </div>
             <div class="controlRow">
                 <label class="fieldLabel fieldLabelFull">
-                    <span>Δ enval / stamp</span>
-                    <input id="editBrushIntensity" type="number" step="0.01" value="${formatBrushIntensity(interactionState.brushIntensity)}">
+                    <span>Brush type</span>
+                    <select id="editBrushType">
+                        <option value="enval">Enval</option>
+                        <option value="genome">Genome</option>
+                    </select>
                 </label>
+            </div>
+            <div id="interactionEnvalBrushSettings">
+                <div class="controlRow">
+                    <label class="fieldLabel fieldLabelFull">
+                        <span>Δ enval / stamp</span>
+                        <input id="editBrushIntensity" type="number" step="0.01" value="${formatBrushIntensity(interactionState.brushIntensity)}">
+                    </label>
+                </div>
+            </div>
+            <div id="interactionGenomeBrushSettings" hidden>
+                <div class="controlRow">
+                    <label class="fieldLabel fieldLabelFull">
+                        <span>Enzyme class</span>
+                        <select id="editGenomeBrushEnzymeClass">
+                            <option value="anabolase">anabolase</option>
+                            <option value="catabolase">catabolase</option>
+                            <option value="transmutase">transmutase</option>
+                            <option value="defensase">defensase</option>
+                            <option value="attackase">attackase</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="controlRow">
+                    <label class="fieldLabel fieldLabelFull">
+                        <span id="editGenomeBrushValueLabel">Specificity</span>
+                        <input id="editGenomeBrushValue" type="text" spellcheck="false" autocomplete="off" placeholder="ABC or ALL" value="${interactionState.genomeBrushSpecificity}">
+                    </label>
+                    <div class="controlCaption" id="editGenomeBrushValueNote">Use letters A-F only, or ALL. Example: ABC or BDF.</div>
+                </div>
+                <div class="controlRow" id="interactionGenomeBrushEnvalSigmaRow">
+                    <label class="fieldLabel fieldLabelFull">
+                        <span>envalSigma</span>
+                        <input id="editGenomeBrushEnvalSigma" type="number" min="0.000001" step="0.01" value="${interactionState.genomeBrushEnvalSigma}">
+                    </label>
+                </div>
             </div>
         </div>
         <div class="controlCaption" id="interactionModeNote"></div>
@@ -322,7 +535,16 @@ const createInteractionPanel = () => {
     interactionUi.editSettings = panel.querySelector("#interactionEditSettings");
     interactionUi.brushWidthInput = panel.querySelector("#editBrushWidth");
     interactionUi.brushHeightInput = panel.querySelector("#editBrushHeight");
+    interactionUi.brushTypeInput = panel.querySelector("#editBrushType");
+    interactionUi.envalBrushSettings = panel.querySelector("#interactionEnvalBrushSettings");
     interactionUi.brushIntensityInput = panel.querySelector("#editBrushIntensity");
+    interactionUi.genomeBrushSettings = panel.querySelector("#interactionGenomeBrushSettings");
+    interactionUi.genomeBrushEnzymeClassInput = panel.querySelector("#editGenomeBrushEnzymeClass");
+    interactionUi.genomeBrushValueLabel = panel.querySelector("#editGenomeBrushValueLabel");
+    interactionUi.genomeBrushValueInput = panel.querySelector("#editGenomeBrushValue");
+    interactionUi.genomeBrushValueNote = panel.querySelector("#editGenomeBrushValueNote");
+    interactionUi.genomeBrushEnvalSigmaRow = panel.querySelector("#interactionGenomeBrushEnvalSigmaRow");
+    interactionUi.genomeBrushEnvalSigmaInput = panel.querySelector("#editGenomeBrushEnvalSigma");
     interactionUi.modeNote = panel.querySelector("#interactionModeNote");
 
     interactionUi.seedInput.value = currentRunSeed;
@@ -372,6 +594,11 @@ const createInteractionPanel = () => {
     });
     interactionUi.brushHeightInput.addEventListener("blur", syncInteractionUi);
 
+    interactionUi.brushTypeInput.addEventListener("change", () => {
+        interactionState.brushType = normalizeBrushType(interactionUi.brushTypeInput.value);
+        syncInteractionUi();
+    });
+
     interactionUi.brushIntensityInput.addEventListener("change", () => {
         interactionState.brushIntensity = parseBrushIntensity(
             interactionUi.brushIntensityInput.value,
@@ -381,6 +608,23 @@ const createInteractionPanel = () => {
     });
     interactionUi.brushIntensityInput.addEventListener("blur", syncInteractionUi);
 
+    interactionUi.genomeBrushEnzymeClassInput.addEventListener("change", () => {
+        const prevClass = normalizeGenomeBrushEnzymeClass(interactionState.genomeBrushEnzymeClass);
+        const nextClass = normalizeGenomeBrushEnzymeClass(interactionUi.genomeBrushEnzymeClassInput.value);
+        interactionState.genomeBrushEnzymeClass = nextClass;
+        if (isGenomeBrushMetabolicType(nextClass) && !isGenomeBrushMetabolicType(prevClass)) {
+            interactionState.genomeBrushSpecificity = defaultGenomeBrushSpecificity(nextClass);
+        }
+        syncInteractionUi();
+    });
+
+    interactionUi.genomeBrushValueInput.addEventListener("input", () => updateGenomeBrushValueValidity());
+    interactionUi.genomeBrushValueInput.addEventListener("change", () => commitGenomeBrushValueInput(true));
+    interactionUi.genomeBrushValueInput.addEventListener("blur", () => commitGenomeBrushValueInput(false));
+    interactionUi.genomeBrushEnvalSigmaInput.addEventListener("input", () => updateGenomeBrushEnvalSigmaValidity());
+    interactionUi.genomeBrushEnvalSigmaInput.addEventListener("change", () => commitGenomeBrushEnvalSigmaInput(true));
+    interactionUi.genomeBrushEnvalSigmaInput.addEventListener("blur", () => commitGenomeBrushEnvalSigmaInput(false));
+
     syncInteractionUi();
 };
 
@@ -388,13 +632,16 @@ createInteractionPanel();
 
 renderer.onEditBrushStroke = (x, y) => {
     if (interactionState.mode !== "edit") return;
-    world.applyEnvalBrush(
-        x,
-        y,
-        interactionState.brushWidth,
-        interactionState.brushHeight,
-        interactionState.brushIntensity
-    );
+    if (interactionState.brushType === "genome") {
+        const enzyme = buildGenomeBrushEnzyme();
+        if (!enzyme) {
+            if (!updateGenomeBrushValueValidity()) interactionUi.genomeBrushValueInput.reportValidity();
+            else if (!updateGenomeBrushEnvalSigmaValidity()) interactionUi.genomeBrushEnvalSigmaInput.reportValidity();
+            return;
+        }
+        const modifiedCellCount = world.applyGenomeBrush(x, y, interactionState.brushWidth, interactionState.brushHeight, enzyme);
+        if (modifiedCellCount <= 0) return;
+    } else world.applyEnvalBrush(x, y, interactionState.brushWidth, interactionState.brushHeight, interactionState.brushIntensity);
     lastHudUpdateMs = 0;
     lastInfoUpdateMs = 0;
 };
@@ -432,7 +679,6 @@ const createPlayPauseButton = () => {
     btn.style.borderRadius = "6px";
     btn.style.cursor = "pointer";
     document.body.appendChild(btn);
-
     btn.addEventListener("click", () => {
         paused = !paused;
         btn.textContent = paused ? "Play" : "Pause";

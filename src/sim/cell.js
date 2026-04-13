@@ -199,6 +199,19 @@ export class Cell {
         if (this.reactionLog.length > this.reactionLogMax) this.reactionLog.length = this.reactionLogMax;
     }
 
+    addEnzymeToGenome(enzyme) {
+        if (!enzyme || !enzyme.type || this.state === "dead") return null;
+        if (!this.genome) this.genome = {};
+        if (!Array.isArray(this.genome.enzymes)) this.genome.enzymes = [];
+        const previousEnzymes = this.genome.enzymes.map((entry) => cloneEnzyme(entry));
+        const nextEnzyme = cloneEnzyme(enzyme);
+        applyEnzymeClassDefaults(nextEnzyme);
+        this.genome.enzymes.push(nextEnzyme);
+        this._refreshCombatTotals();
+        if (typeof window !== "undefined" && typeof window.__recordCellGenomeChange === "function") window.__recordCellGenomeChange(this, previousEnzymes);
+        return nextEnzyme;
+    }
+
     totalInternalAtoms() {
         this._ensureInternalCompositionCache();
         return this._internalAtomCount;
@@ -633,7 +646,7 @@ const snapshotMolecules = (molecules) => {
     return out;
 };
 
-const applyEnzymeClassDefaults = (enzyme) => {
+export const applyEnzymeClassDefaults = (enzyme) => {
     if (!enzyme || !enzyme.type) return enzyme;
 
     if (isCombatEnzymeType(enzyme.type)) {
@@ -715,7 +728,7 @@ const maskFromLetters = (letters) => {
     return normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
 };
 
-const defaultSpecificityMaskForType = (type) => {
+export const defaultSpecificityMaskForType = (type) => {
     if (type === "anabolase") return maskFromLetters("ABC");
     if (type === "catabolase") return maskFromLetters("ABC");
     if (type === "transmutase") return ALL_ELEMENT_MASK;
