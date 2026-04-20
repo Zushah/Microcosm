@@ -3,6 +3,10 @@
     --hud-text: #eaeaea;
     --panel-bg: rgba(255, 255, 255, 0.95);
     --panel-text: #111;
+    --hud-top: 8px;
+    --hud-height: 36px;
+    --hud-gap-below: 10px;
+    --floating-panels-top: calc(var(--hud-top) + var(--hud-height) + var(--hud-gap-below));
 }
 
 html, body {
@@ -22,13 +26,14 @@ html, body {
 
 #hud {
     position: fixed;
-    top: 8px;
+    top: var(--hud-top);
     left: 8px;
     right: 8px;
-    height: 36px;
+    min-height: 28px;
     display: flex;
+    flex-wrap: nowrap;
     align-items: center;
-    gap: 16px;
+    gap: 10px;
     padding: 6px 12px;
     background: var(--hud-bg);
     color: var(--hud-text);
@@ -39,7 +44,7 @@ html, body {
 
 #infoPanel {
     position: fixed;
-    top: 54px;
+    top: var(--floating-panels-top);
     right: 8px;
     width: 300px;
     max-height: calc(100vh - 64px);
@@ -60,9 +65,19 @@ html, body {
 
 .statItem {
     display: inline-flex;
-    min-width: 100px;
-    gap: 10px;
     align-items: center;
+    flex: 0 0 auto;
+    min-width: 0;
+    line-height: 1.25;
+    padding: 1px 4px;
+    white-space: nowrap;
+}
+
+#statElements {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .smallNote {
@@ -73,7 +88,7 @@ html, body {
 
 #interactionPanel {
     position: fixed;
-    top: 54px;
+    top: var(--floating-panels-top);
     left: 8px;
     width: 292px;
     padding: 12px;
@@ -93,6 +108,33 @@ html, body {
 #interactionPanel h3 {
     margin: 0;
     font-size: 15px;
+}
+
+.panelControlActions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0 28px 10px 0;
+}
+
+.panelActionPrimary {
+    width: 100%;
+}
+
+.panelActionRow {
+    display: flex;
+    gap: 8px;
+}
+
+.panelActionRow .inlineActionButton {
+    flex: 1;
+}
+
+.panelActionLink {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
 }
 
 #interactionPanelToggle {
@@ -151,10 +193,6 @@ html, body {
     color: #fff;
 }
 
-#interactionEditSettings.isDisabled {
-    opacity: 0.5;
-}
-
 .brushGrid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -209,4 +247,146 @@ html, body {
     background: rgba(0,0,0,0.04);
     color: rgba(0,0,0,0.45);
     cursor: not-allowed;
+}
+
+#startupInfoModal {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    padding: 14px;
+    box-sizing: border-box;
+    background: rgba(0,0,0,0.5);
+}
+
+#startupInfoModal[hidden] {
+    display: none;
+}
+
+#startupInfoCard {
+    position: relative;
+    width: min(86vw, 86vh);
+    height: min(86vw, 86vh);
+    max-width: 820px;
+    max-height: 820px;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    background: #fff;
+    color: #111;
+    border-radius: 12px;
+    box-shadow: 0 16px 42px rgba(0,0,0,0.3);
+    line-height: 1.45;
+}
+
+#startupInfoCard h1 {
+    margin: 0 0 8px;
+    font-size: 30px;
+}
+
+#startupInfoCard h3 {
+    margin: 14px 0 6px;
+    font-size: 15px;
+}
+
+#startupInfoCard ul {
+    margin: 8px 0 8px 20px;
+    padding: 0;
+}
+
+#startupInfoCard li {
+    margin: 6px 0;
+}
+
+#startupInfoCard hr {
+    border: none;
+    border-top: 1px solid rgba(0,0,0,0.15);
+    margin: 10px 0;
+}
+
+#startupInfoCard h2 {
+    margin: 0 0 6px;
+    font-size: 17px;
+}
+
+#startupInfoClose {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 2;
+    padding: 6px 10px;
+    border: 1px solid rgba(0,0,0,0.2);
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    cursor: pointer;
+    font: inherit;
+}
+
+#startupInfoScroll {
+    height: 100%;
+    overflow: auto;
+    padding: 48px 20px 20px;
+    box-sizing: border-box;
+}
+
+.startupLead {
+    margin: 0 0 8px;
+    text-align: center;
+}
+
+.startupTitle {
+    text-align: center;
+    letter-spacing: 0.22em;
+}
+
+.startupSection {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(0,0,0,0.1);
+}
+
+#startupInfoCard .startupSection:first-of-type {
+    margin-top: 10px;
+    padding-top: 0;
+    border-top: none;
+}
+
+.startupSection p {
+    margin: 7px 0;
+}
+
+.mathBlock {
+    margin: 6px 0;
+    padding: 6px 8px;
+    overflow-x: auto;
+    background: #fff;
+    border-radius: 6px;
+}
+
+#startupInfoCard .katex-display, #startupInfoCard .katex {
+    background: #fff;
+}
+
+.inlineInfoHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.inlineCopyReactionsButton {
+    padding: 4px 8px;
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.2;
 }

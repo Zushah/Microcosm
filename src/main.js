@@ -172,6 +172,52 @@ const hud = {
     enzymeDiversity: document.getElementById("statEnzymeDiversity")
 };
 
+const startupInfoUi = {
+    modal: document.getElementById("startupInfoModal"),
+    closeButton: document.getElementById("startupInfoClose"),
+    openButton: null,
+    pauseButton: null
+};
+let startupInfoMathRendered = false;
+
+const renderStartupInfoMath = () => {
+    if (!startupInfoUi.modal || startupInfoMathRendered) return;
+    if (typeof window.renderMathInElement !== "function") return;
+    window.renderMathInElement(startupInfoUi.modal, {
+        delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "\\(", right: "\\)", display: false }
+        ],
+        throwOnError: false
+    });
+    startupInfoMathRendered = true;
+};
+
+const openStartupInfoModal = () => {
+    if (!startupInfoUi.modal) return;
+    startupInfoUi.modal.hidden = false;
+    startupInfoUi.modal.setAttribute("aria-hidden", "false");
+    renderStartupInfoMath();
+};
+
+const closeStartupInfoModal = () => {
+    if (!startupInfoUi.modal) return;
+    startupInfoUi.modal.hidden = true;
+    startupInfoUi.modal.setAttribute("aria-hidden", "true");
+};
+
+if (startupInfoUi.modal) {
+    openStartupInfoModal();
+    if (typeof window.renderMathInElement !== "function") {
+        window.addEventListener("load", () => renderStartupInfoMath(), { once: true });
+    }
+    startupInfoUi.modal.addEventListener("click", (event) => {
+        if (event.target === startupInfoUi.modal) closeStartupInfoModal();
+    });
+}
+
+if (startupInfoUi.closeButton) startupInfoUi.closeButton.addEventListener("click", () => closeStartupInfoModal());
+
 let elementsDiv = document.getElementById("statElements");
 if (!elementsDiv) {
     elementsDiv = document.createElement("div");
@@ -179,6 +225,18 @@ if (!elementsDiv) {
     elementsDiv.className = "statItem";
     hud.population.parentElement.insertBefore(elementsDiv, hud.population.nextSibling);
 }
+
+const hudRoot = document.getElementById("hud");
+let hudHeightPx = 0;
+const syncHudLayout = () => {
+    if (!hudRoot) return;
+    const nextHeight = Math.max(1, Math.ceil(hudRoot.getBoundingClientRect().height));
+    if (nextHeight === hudHeightPx) return;
+    hudHeightPx = nextHeight;
+    document.documentElement.style.setProperty("--hud-height", `${nextHeight}px`);
+};
+
+window.addEventListener("resize", () => syncHudLayout());
 
 let selectedCell = null;
 
@@ -209,6 +267,7 @@ const interactionUi = {
     seedInput: null,
     seedSetButton: null,
     modeButtons: [],
+    tileColorRow: null,
     tileColorModeInput: null,
     editSettings: null,
     brushWidthInput: null,
@@ -391,7 +450,12 @@ const syncInteractionUi = () => {
         button.classList.toggle("isActive", active);
         button.setAttribute("aria-pressed", active ? "true" : "false");
     }
-    interactionUi.editSettings.classList.toggle("isDisabled", !isEditMode);
+    if (interactionUi.tileColorRow) {
+        interactionUi.tileColorRow.hidden = isEditMode;
+        interactionUi.tileColorRow.style.display = isEditMode ? "none" : "";
+    }
+    interactionUi.tileColorModeInput.disabled = isEditMode;
+    interactionUi.editSettings.hidden = !isEditMode;
     interactionUi.brushWidthInput.disabled = !isEditMode;
     interactionUi.brushHeightInput.disabled = !isEditMode;
     interactionUi.brushTypeInput.disabled = !isEditMode;
@@ -431,6 +495,13 @@ const createInteractionPanel = () => {
     panel.id = "interactionPanel";
     panel.innerHTML = `
         <button id="interactionPanelToggle" type="button" aria-label="Collapse controls">❮</button>
+        <div class="panelControlActions">
+            <button class="inlineActionButton panelActionPrimary" id="panelPauseSimulationBtn" type="button">Pause Simulation</button>
+            <div class="panelActionRow">
+                <button class="inlineActionButton" id="panelInfoButton" type="button">Info</button>
+                <a class="inlineActionButton panelActionLink" href="https://github.com/Zushah/Microcosm" id="panelGithubButton" rel="noopener noreferrer" target="_blank">GitHub</a>
+            </div>
+        </div>
         <h3>Interaction</h3>
         <div class="controlRow">
             <div class="seedRow">
@@ -449,7 +520,7 @@ const createInteractionPanel = () => {
                 <button class="modeOption" data-mode="edit" type="button">Edit</button>
             </div>
         </div>
-        <div class="controlRow">
+        <div class="controlRow" id="interactionTileColorRow">
             <label class="fieldLabel fieldLabelFull">
                 <span>Tile coloring</span>
                 <select id="tileColorMode">
@@ -531,6 +602,7 @@ const createInteractionPanel = () => {
     interactionUi.seedInput = panel.querySelector("#seedInput");
     interactionUi.seedSetButton = panel.querySelector("#seedSetButton");
     interactionUi.modeButtons = [...panel.querySelectorAll(".modeOption")];
+    interactionUi.tileColorRow = panel.querySelector("#interactionTileColorRow");
     interactionUi.tileColorModeInput = panel.querySelector("#tileColorMode");
     interactionUi.editSettings = panel.querySelector("#interactionEditSettings");
     interactionUi.brushWidthInput = panel.querySelector("#editBrushWidth");
@@ -546,6 +618,10 @@ const createInteractionPanel = () => {
     interactionUi.genomeBrushEnvalSigmaRow = panel.querySelector("#interactionGenomeBrushEnvalSigmaRow");
     interactionUi.genomeBrushEnvalSigmaInput = panel.querySelector("#editGenomeBrushEnvalSigma");
     interactionUi.modeNote = panel.querySelector("#interactionModeNote");
+    startupInfoUi.openButton = panel.querySelector("#panelInfoButton");
+    startupInfoUi.pauseButton = panel.querySelector("#panelPauseSimulationBtn");
+
+    if (startupInfoUi.openButton) startupInfoUi.openButton.addEventListener("click", () => openStartupInfoModal());
 
     interactionUi.seedInput.value = currentRunSeed;
     interactionUi.seedSetButton.addEventListener("click", () => {
@@ -629,6 +705,7 @@ const createInteractionPanel = () => {
 };
 
 createInteractionPanel();
+syncHudLayout();
 
 renderer.onEditBrushStroke = (x, y) => {
     if (interactionState.mode !== "edit") return;
@@ -665,26 +742,18 @@ renderer.onCellRightClick = (x, y, tile, topCell) => {
 };
 
 let paused = false;
-const createPlayPauseButton = () => {
-    const btn = document.createElement("button");
-    btn.id = "playPauseBtn";
-    btn.textContent = "Pause";
-    btn.style.position = "fixed";
-    btn.style.top = "10px";
-    btn.style.right = "10px";
-    btn.style.zIndex = 9999;
-    btn.style.padding = "6px 10px";
-    btn.style.background = "#fff";
-    btn.style.border = "1px solid rgba(0,0,0,0.12)";
-    btn.style.borderRadius = "6px";
-    btn.style.cursor = "pointer";
-    document.body.appendChild(btn);
-    btn.addEventListener("click", () => {
-        paused = !paused;
-        btn.textContent = paused ? "Play" : "Pause";
-    });
+const updatePauseButtonLabel = () => {
+    if (!startupInfoUi.pauseButton) return;
+    startupInfoUi.pauseButton.textContent = paused ? "Resume Simulation" : "Pause Simulation";
 };
-createPlayPauseButton();
+
+if (startupInfoUi.pauseButton) {
+    startupInfoUi.pauseButton.addEventListener("click", () => {
+        paused = !paused;
+        updatePauseButtonLabel();
+    });
+    updatePauseButtonLabel();
+}
 
 for (let i = 0; i < 32; i++) world.spawnRandomCell(randomGenome);
 
@@ -937,7 +1006,8 @@ const updateHud = () => {
     }
     const avgEnval = Number.isFinite(world.avgEnval) ? world.avgEnval : (world.baseEnval ?? 0);
     parts.push(`enval_avg:${avgEnval.toFixed(3)}`);
-    elementsDiv.textContent = parts.join("  •  ");
+    elementsDiv.textContent = parts.join("  |  ");
+    syncHudLayout();
 };
 
 const compositionToString = (comp) => {
@@ -1089,6 +1159,10 @@ const buildCellInfoHtml = (cell) => {
         reactionHtml += "</tbody></table>";
     }
 
+    const copyReactionsButtonHtml = (cell.reactionLog && cell.reactionLog.length > 0)
+        ? "<button id='copyReactionsBtnInline' type='button' class='inlineCopyReactionsButton'>Copy reactions</button>"
+        : "";
+
     const deathNote = (cell.deathSimTime !== null && cell.deathSimTime !== undefined) ? " (dead)" : "";
 
     return {
@@ -1102,7 +1176,10 @@ const buildCellInfoHtml = (cell) => {
             <div><strong>Dominant element:</strong> ${dom}</div>
             <div style="margin-top:6px;"><strong>Internal molecules</strong>${moleculesHtml}</div>
             <div style="margin-top:6px;"><strong>Enzymes</strong>${enzymesHtml}</div>
-            <div style="margin-top:6px;"><strong>Recent reactions</strong>${reactionHtml}</div>
+            <div style="margin-top:6px;">
+                <div class="inlineInfoHeader"><strong>Recent reactions</strong>${copyReactionsButtonHtml}</div>
+                ${reactionHtml}
+            </div>
         `
     };
 };
@@ -1166,40 +1243,43 @@ const isSelectingInInfoPanel = () => {
     return panel.contains(range.commonAncestorContainer);
 };
 
-const createCopyReactionsButton = () => {
-    const btn = document.createElement("button");
-    btn.id = "copyReactionsBtn";
-    btn.textContent = "Copy reactions";
-    btn.style.position = "fixed";
-    btn.style.bottom = "10px";
-    btn.style.right = "10px";
-    btn.style.zIndex = 10000;
-    btn.style.padding = "6px 10px";
-    btn.style.background = "#fff";
-    btn.style.border = "1px solid rgba(0,0,0,0.12)";
-    btn.style.borderRadius = "6px";
-    btn.style.cursor = "pointer";
-    document.body.appendChild(btn);
+const isInteractingWithInfoPanel = () => {
+    const panel = document.getElementById("infoPanel");
+    if (!panel) return false;
+    const active = document.activeElement;
+    if (active && panel.contains(active)) return true;
+    if (panel.matches(":hover")) return true;
+    return false;
+};
 
-    btn.addEventListener("click", async () => {
-        if (!selectedCell || !selectedCell.reactionLog) return;
+const infoPanel = document.getElementById("infoPanel");
+if (infoPanel) {
+    infoPanel.addEventListener("click", async (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const button = target.closest("#copyReactionsBtnInline");
+        if (!button) return;
+        if (!selectedCell || !selectedCell.reactionLog || selectedCell.reactionLog.length === 0) return;
+
         const slice = selectedCell.reactionLog.slice(0, 20);
         const lines = slice.map((ev) => {
-            const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "—";
+            const time = (ev.ageAtEventSec !== undefined) ? Number(ev.ageAtEventSec).toFixed(3) : "-";
             const reactionStr = formatReactionExpression(ev);
-            return `[t=${time}s] ${reactionStr} | ΔE=${formatEnergyTerm(ev.deltaE)} | enval=${formatEnvalExchange(ev)} | Eenv=${formatEnergyTerm(ev.envalEnergy)} | Echem=${formatEnergyTerm(ev.chemicalDelta)} | Ebond=${formatEnergyTerm(ev.bondEnergyDelta)} | Etrans=${formatEnergyTerm(ev.transmutationEnergyDelta)} | Ecat=${formatEnergyTerm(ev.catalyticCost)}`;
+            return `[t=${time}s] ${reactionStr} | dE=${formatEnergyTerm(ev.deltaE)} | enval=${formatEnvalExchange(ev)} | Eenv=${formatEnergyTerm(ev.envalEnergy)} | Echem=${formatEnergyTerm(ev.chemicalDelta)} | Ebond=${formatEnergyTerm(ev.bondEnergyDelta)} | Etrans=${formatEnergyTerm(ev.transmutationEnergyDelta)} | Ecat=${formatEnergyTerm(ev.catalyticCost)}`;
         }).join("\n");
+
         try {
             await navigator.clipboard.writeText(lines);
-            btn.textContent = "Copied ✓";
-            setTimeout(() => btn.textContent = "Copy reactions", 900);
+            button.textContent = "Copied";
+            setTimeout(() => {
+                if (button.isConnected) button.textContent = "Copy reactions";
+            }, 900);
         } catch (e) {
             console.warn("copy failed", e);
-            alert("Copy failed — select and press Ctrl+C as fallback.");
+            alert("Copy failed - select and press Ctrl+C as fallback.");
         }
     });
-};
-createCopyReactionsButton();
+}
 
 const spawnChanceBasedOnPopulation = (pop) => {
     const carryingCapacity = world.width * world.height * 0.30;
@@ -1225,7 +1305,7 @@ const main = () => {
             lastHudUpdateMs = nowMs;
             refreshLineageRateSnapshots();
         }
-        if (!isSelectingInInfoPanel() && (nowMs - lastInfoUpdateMs >= INFO_UPDATE_INTERVAL_MS)) {
+        if (!isSelectingInInfoPanel() && !isInteractingWithInfoPanel() && (nowMs - lastInfoUpdateMs >= INFO_UPDATE_INTERVAL_MS)) {
             updateInfoPanel();
             lastInfoUpdateMs = nowMs;
         }
@@ -1269,7 +1349,7 @@ const main = () => {
         lastHudUpdateMs = nowMs;
         refreshLineageRateSnapshots();
     }
-    if (!isSelectingInInfoPanel() && (nowMs - lastInfoUpdateMs >= INFO_UPDATE_INTERVAL_MS)) {
+    if (!isSelectingInInfoPanel() && !isInteractingWithInfoPanel() && (nowMs - lastInfoUpdateMs >= INFO_UPDATE_INTERVAL_MS)) {
         updateInfoPanel();
         lastInfoUpdateMs = nowMs;
     }
