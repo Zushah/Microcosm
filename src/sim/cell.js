@@ -173,7 +173,7 @@ export class Cell {
         }
 
         if (this.energy >= this.genome.reproThreshold) {
-            this.divide(tile);
+            this.divide(tile, localEnval);
         }
     }
 
@@ -292,10 +292,20 @@ export class Cell {
         if (changedInternalMolecules) this._markInternalCompositionDirty();
     }
 
-    divide(tile) {
+    divide(tile, localAverageEnval = null) {
         const world = this._worldRef;
-        const worldAvgEnval = world ? world.avgEnval : 0;
-        const childGenome = mutateGenome(this.genome, worldAvgEnval);
+        const mutationReferenceEnval = Number.isFinite(localAverageEnval)
+            ? localAverageEnval
+            : (
+                world &&
+                tile &&
+                typeof tile.__x === "number" &&
+                typeof tile.__y === "number" &&
+                typeof world.getLocalEnvalAverage === "function"
+                    ? world.getLocalEnvalAverage(tile.__x, tile.__y, 2)
+                    : 0
+            );
+        const childGenome = mutateGenome(this.genome, mutationReferenceEnval);
 
         const childEnergy = this.energy * (0.5 + (random() - 0.5) * 0.1);
         this.energy = Math.max(0, this.energy - childEnergy);
@@ -529,13 +539,13 @@ export class Cell {
 
 }
 
-const mutateGenome = (genome, worldAvgEnval = 0) => {
+const mutateGenome = (genome, referenceEnval = 0) => {
     const g = JSON.parse(JSON.stringify(genome));
     const mut = g.mutationRate ?? 0.05;
-    const avgEnval = Number.isFinite(worldAvgEnval) ? worldAvgEnval : 0;
+    const envalReference = Number.isFinite(referenceEnval) ? referenceEnval : 0;
 
     if (typeof g.optimalEnval !== "number") {
-        g.optimalEnval = avgEnval;
+        g.optimalEnval = envalReference;
     }
 
     if (Array.isArray(g.enzymes)) {
@@ -558,7 +568,7 @@ const mutateGenome = (genome, worldAvgEnval = 0) => {
         );
     }
 
-    g.optimalEnval = mutateOptimalEnval(g.optimalEnval, avgEnval, g.envalMutationFloor ?? 0.03);
+    g.optimalEnval = mutateOptimalEnval(g.optimalEnval, envalReference, g.envalMutationFloor ?? 0.03);
 
     for (let i = 0; i < g.enzymes.length; i++) {
         const en = g.enzymes[i];
@@ -789,10 +799,10 @@ const mutateSpecificityMask = (mask) => {
     return normalizeSpecificityMask(next, ALL_ELEMENT_MASK);
 };
 
-const mutateOptimalEnval = (parentEnval, worldAvgEnval, floor = 0.03) => {
-    const midpoint = (parentEnval + worldAvgEnval) / 2;
+const mutateOptimalEnval = (parentEnval, referenceEnval, floor = 0.03) => {
+    const midpoint = (parentEnval + referenceEnval) / 2;
     let step = Math.abs(parentEnval - midpoint);
-    let towardSign = Math.sign(worldAvgEnval - parentEnval);
+    let towardSign = Math.sign(referenceEnval - parentEnval);
 
     if (step < floor) {
         step = floor;

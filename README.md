@@ -130,17 +130,17 @@ Successful predation performs a phagocytosis-like assimilation event: the loser 
 
 Founders are seeded with an optimal enval drawn from a narrow band around the current world-average enval and initially carry an **anabolase**, a **catabolase**, and one Gaussian-sampled **defensase**. The metabolic founders still begin with **ABC** specificity, while attackase remains absent until it appears later by mutation or by enzyme class switching.
 
-During division, the offspring optimal enval is inherited by a biased midpoint rule. Let $`P`$ be the parental optimal enval and $`W`$ the current world-average enval. Define:
+During division, the offspring optimal enval is inherited by a biased midpoint rule. Let $`P`$ be the parental optimal enval and $`L`$ the dividing cell's current local-average enval. Define:
 ```math
-\delta = \max\left(\frac{|P - W|}{2},\ \varepsilon\right), \qquad \varepsilon = 0.03.
+\delta = \max\left(\frac{|P - L|}{2},\ \varepsilon\right), \qquad \varepsilon = 0.03.
 ```
 Then the offspring receives:
 ```math
 V'_{\mathrm{opt}} =
 \begin{cases}
 P, & \text{with probability } 0.50, \\
-P + \mathrm{sgn}(W - P)\,\delta, & \text{with probability } 0.25, \\
-P - \mathrm{sgn}(W - P)\,\delta, & \text{with probability } 0.25.
+P + \mathrm{sgn}(L - P)\,\delta, & \text{with probability } 0.25, \\
+P - \mathrm{sgn}(L - P)\,\delta, & \text{with probability } 0.25.
 \end{cases}
 ```
 Other genome parameters also mutate stochastically: reproduction threshold, decay time, default secretion probability, enval stress factor, enzyme specificity masks, enzyme class, combat-enzyme level, enval response width, secretion probability, enval throughput, anabolase bond multiplier, and transmutase downhill harvest fraction. Enzyme count may also increase or decrease over evolutionary time.

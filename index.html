@@ -149,14 +149,14 @@ h_d\,\Delta E_{\mathrm{raw}}, &amp; \Delta E_{\mathrm{raw}} \ge 0, \\
                     </ul>
                     <p>Successful predation performs a phagocytosis-like assimilation event: the loser is removed from the world, while the winner absorbs the loser's stored free energy, internal molecules, and enzyme inventory. Because absorbed enzymes are appended to the predator genome, combat and metabolic repertoires can both expand through ecological interactions rather than by descent alone.</p>
                     <p>Founders are seeded with an optimal enval drawn from a narrow band around the current world-average enval and initially carry an anabolase, a catabolase, and one Gaussian-sampled defensase. The metabolic founders still begin with ABC specificity, while attackase remains absent until it appears later by mutation or by enzyme class switching.</p>
-                    <p>During division, the offspring optimal enval is inherited by a biased midpoint rule. Let \(P\) be the parental optimal enval and \(W\) the current world-average enval. Define:</p>
-                    <div class="mathBlock">$$\delta = \max\left(\frac{|P - W|}{2},\ \varepsilon\right), \qquad \varepsilon = 0.03.$$</div>
+                    <p>During division, the offspring optimal enval is inherited by a biased midpoint rule. Let \(P\) be the parental optimal enval and \(L\) the dividing cell's current local-average enval. Define:</p>
+                    <div class="mathBlock">$$\delta = \max\left(\frac{|P - L|}{2},\ \varepsilon\right), \qquad \varepsilon = 0.03.$$</div>
                     <p>Then the offspring receives:</p>
                     <div class="mathBlock">$$V'_{\mathrm{opt}} =
 \begin{cases}
 P, &amp; \text{with probability } 0.50, \\
-P + \mathrm{sgn}(W - P)\,\delta, &amp; \text{with probability } 0.25, \\
-P - \mathrm{sgn}(W - P)\,\delta, &amp; \text{with probability } 0.25.
+P + \mathrm{sgn}(L - P)\,\delta, &amp; \text{with probability } 0.25, \\
+P - \mathrm{sgn}(L - P)\,\delta, &amp; \text{with probability } 0.25.
 \end{cases}$$</div>
                     <p>Other genome parameters also mutate stochastically: reproduction threshold, decay time, default secretion probability, enval stress factor, enzyme specificity masks, enzyme class, combat-enzyme level, enval response width, secretion probability, enval throughput, anabolase bond multiplier, and transmutase downhill harvest fraction. Enzyme count may also increase or decrease over evolutionary time.</p>
                     <p>The central ecological consequence is that successful lineages tend to destabilize the very field regime they exploit. Positive-adapted cells deplete positive enval and emit negative enval; negative-adapted cells deplete negative enval and emit positive enval. The intended macrodynamics are therefore cyclical succession, lineage turnover, and repeated ecological boom-bust behavior.</p>
