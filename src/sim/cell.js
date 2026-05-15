@@ -45,9 +45,7 @@ export class Cell {
             const result = attemptReaction(enzyme, tileMolecules, env, this, tile, internalMolecules);
             if (!result) continue;
 
-            if (result.elementDelta && typeof window !== "undefined" && typeof window.__recordElementDelta === "function") {
-                window.__recordElementDelta(result.elementDelta);
-            }
+            if (result.elementDelta && typeof window !== "undefined" && typeof window.__recordElementDelta === "function") window.__recordElementDelta(result.elementDelta);
 
             const logConsumed = snapshotMolecules(result.consumed || []);
             const logProduced = snapshotMolecule(result.produced || null);
@@ -131,11 +129,8 @@ export class Cell {
             });
         }
 
-        if (positiveEnergyGain > 1e-6) {
-            this.timeWithoutFood = Math.max(0, this.timeWithoutFood - positiveEnergyGain * 0.2);
-        } else {
-            this.timeWithoutFood += env.dt;
-        }
+        if (positiveEnergyGain > 1e-6) this.timeWithoutFood = Math.max(0, this.timeWithoutFood - positiveEnergyGain * 0.2);
+        else this.timeWithoutFood += env.dt;
 
         const loss = this.maintenanceCostPerSec * env.dt;
         if (loss > 0) {
@@ -166,15 +161,8 @@ export class Cell {
         const stressIncrement = Math.pow(dist, 1.6) * envalStressFactor * Math.max(1, this.genome.enzymes.length || 1);
 
         this.timeWithoutFood += stressIncrement;
-
-        if (this.timeWithoutFood > this.genome.decayTime) {
-            this._dieAndRelease(tile);
-            return;
-        }
-
-        if (this.energy >= this.genome.reproThreshold) {
-            this.divide(tile, localEnval);
-        }
+        if (this.timeWithoutFood > this.genome.decayTime) { this._dieAndRelease(tile); return; }
+        if (this.energy >= this.genome.reproThreshold) this.divide(tile, localEnval);
     }
 
     _dieAndRelease(tile) {
@@ -186,12 +174,8 @@ export class Cell {
         this._resetInternalCompositionCache();
         this.deathSimTime = window.SIM_TIME || 0;
         this.state = "dead";
-        if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") {
-            window.__recordLineageDeath(this.lineageId);
-        }
-        if (typeof window !== "undefined" && typeof window.__recordCellDeath === "function") {
-            window.__recordCellDeath(this);
-        }
+        if (typeof window !== "undefined" && typeof window.__recordLineageDeath === "function") window.__recordLineageDeath(this.lineageId);
+        if (typeof window !== "undefined" && typeof window.__recordCellDeath === "function") window.__recordCellDeath(this);
     }
 
     _pushReactionLog(entry) {
@@ -203,6 +187,7 @@ export class Cell {
         if (!enzyme || !enzyme.type || this.state === "dead") return null;
         if (!this.genome) this.genome = {};
         if (!Array.isArray(this.genome.enzymes)) this.genome.enzymes = [];
+        if (this.genome.enzymes.length >= 10) return null;
         const previousEnzymes = this.genome.enzymes.map((entry) => cloneEnzyme(entry));
         const nextEnzyme = cloneEnzyme(enzyme);
         applyEnzymeClassDefaults(nextEnzyme);
@@ -380,26 +365,16 @@ export class Cell {
     absorbConsumedCell(victim, combatOutcome = null) {
         if (!victim || victim === this) return;
 
-        const previousEnzymes = (this.genome && Array.isArray(this.genome.enzymes))
-            ? this.genome.enzymes.map((enzyme) => cloneEnzyme(enzyme))
-            : [];
+        const previousEnzymes = (this.genome && Array.isArray(this.genome.enzymes)) ? this.genome.enzymes.map((enzyme) => cloneEnzyme(enzyme)) : [];
 
         if (!this.genome) this.genome = { enzymes: [] };
         if (!Array.isArray(this.genome.enzymes)) this.genome.enzymes = [];
 
-        const victimEnzymes = (victim.genome && Array.isArray(victim.genome.enzymes))
-            ? victim.genome.enzymes
-            : [];
-        for (let i = 0; i < victimEnzymes.length; i++) {
-            const absorbed = cloneEnzyme(victimEnzymes[i]);
-            applyEnzymeClassDefaults(absorbed);
-            this.genome.enzymes.push(absorbed);
-        }
+        const victimEnzymes = (victim.genome && Array.isArray(victim.genome.enzymes)) ? victim.genome.enzymes : [];
+        const genomeChanged = absorbPredationEnzymes(this.genome.enzymes, victimEnzymes);
         this._refreshCombatTotals();
 
-        if (typeof window !== "undefined" && typeof window.__recordCellGenomeChange === "function") {
-            window.__recordCellGenomeChange(this, previousEnzymes);
-        }
+        if (genomeChanged && typeof window !== "undefined" && typeof window.__recordCellGenomeChange === "function") window.__recordCellGenomeChange(this, previousEnzymes);
 
         const absorbedEnergy = Math.max(0, victim.energy || 0);
         if (absorbedEnergy > 0) {
@@ -539,104 +514,112 @@ export class Cell {
 
 }
 
+const absorbPredationEnzymes = (predatorEnzymes, victimEnzymes) => {
+    if (!Array.isArray(predatorEnzymes) || !Array.isArray(victimEnzymes) || victimEnzymes.length === 0) return false;
+
+    let changed = false;
+    const addAbsorbedEnzyme = (enzyme) => {
+        if (predatorEnzymes.length >= 10) return;
+        const absorbed = cloneEnzyme(enzyme);
+        applyEnzymeClassDefaults(absorbed);
+        predatorEnzymes.push(absorbed);
+        changed = true;
+    };
+
+    const freeSlots = Math.max(0, 10 - predatorEnzymes.length);
+    if (freeSlots > 0) {
+        if (victimEnzymes.length <= freeSlots) for (let i = 0; i < victimEnzymes.length; i++) addAbsorbedEnzyme(victimEnzymes[i]);
+        else { const selectedIndices = selectRandomIndices(victimEnzymes.length, freeSlots); for (let i = 0; i < selectedIndices.length; i++) addAbsorbedEnzyme(victimEnzymes[selectedIndices[i]]); }
+        return changed;
+    }
+
+    const replacementIndices = selectRandomIndices(predatorEnzymes.length, predatorEnzymes.length);
+    let replacementIndex = 0;
+    for (let i = 0; i < victimEnzymes.length && replacementIndex < replacementIndices.length; i++) {
+        if (!chance(0.25)) continue;
+        const absorbed = cloneEnzyme(victimEnzymes[i]);
+        applyEnzymeClassDefaults(absorbed);
+        predatorEnzymes[replacementIndices[replacementIndex]] = absorbed;
+        replacementIndex++;
+        changed = true;
+    }
+
+    return changed;
+};
+
+const selectRandomIndices = (count, limit) => {
+    const indices = [];
+    for (let i = 0; i < count; i++) indices.push(i);
+    for (let i = 0; i < limit; i++) {
+        const swapIndex = i + randomInt(count - i);
+        const tmp = indices[i];
+        indices[i] = indices[swapIndex];
+        indices[swapIndex] = tmp;
+    }
+    indices.length = limit;
+    return indices;
+};
+
+const enforceEnzymeCountBounds = (genome) => {
+    if (!genome) return;
+    if (!Array.isArray(genome.enzymes)) genome.enzymes = [];
+    if (genome.enzymes.length > 10) genome.enzymes.length = 10;
+    if (genome.enzymes.length === 0) genome.enzymes.push(makeRandomEnzyme(pickRandom(EVOLVABLE_ENZYME_TYPES)));
+};
+
 const mutateGenome = (genome, referenceEnval = 0) => {
     const g = JSON.parse(JSON.stringify(genome));
     const mut = g.mutationRate ?? 0.05;
     const envalReference = Number.isFinite(referenceEnval) ? referenceEnval : 0;
 
-    if (typeof g.optimalEnval !== "number") {
-        g.optimalEnval = envalReference;
-    }
+    if (typeof g.optimalEnval !== "number") g.optimalEnval = envalReference;
 
-    if (Array.isArray(g.enzymes)) {
-        for (let i = 0; i < g.enzymes.length; i++) applyEnzymeClassDefaults(g.enzymes[i]);
-    }
+    if (!Array.isArray(g.enzymes)) g.enzymes = [];
+    for (let i = 0; i < g.enzymes.length; i++) applyEnzymeClassDefaults(g.enzymes[i]);
+    enforceEnzymeCountBounds(g);
 
-    if (chance(mut)) {
-        g.reproThreshold = Math.max(0.1, g.reproThreshold * (1 + (random() - 0.5) * 0.2));
-    }
-    if (chance(mut)) {
-        g.decayTime = Math.max(50, Math.round(g.decayTime * (1 + (random() - 0.5) * 0.2)));
-    }
-    if (chance(mut)) {
-        g.defaultSecretionProb = clamp01((g.defaultSecretionProb ?? 0.15) + (random() - 0.5) * 0.2);
-    }
-    if (chance(mut * 0.5)) {
-        g.envalStressFactor = Math.max(
-            0.001,
-            (g.envalStressFactor ?? 0.02) * (1 + (random() - 0.5) * 0.3)
-        );
-    }
+    if (chance(mut)) g.reproThreshold = Math.max(0.1, g.reproThreshold * (1 + (random() - 0.5) * 0.2));
+    if (chance(mut)) g.decayTime = Math.max(50, Math.round(g.decayTime * (1 + (random() - 0.5) * 0.2)));
+    if (chance(mut)) g.defaultSecretionProb = clamp01((g.defaultSecretionProb ?? 0.15) + (random() - 0.5) * 0.2);
+    if (chance(mut * 0.5)) g.envalStressFactor = Math.max(0.001, (g.envalStressFactor ?? 0.02) * (1 + (random() - 0.5) * 0.3));
 
     g.optimalEnval = mutateOptimalEnval(g.optimalEnval, envalReference, g.envalMutationFloor ?? 0.03);
 
     for (let i = 0; i < g.enzymes.length; i++) {
         const en = g.enzymes[i];
         applyEnzymeClassDefaults(en);
-
         if (chance(mut)) {
-            if (!isCombatEnzymeType(en.type) && chance(mut)) {
-                en.specificityMask = mutateSpecificityMask(en.specificityMask);
-            }
+            if (!isCombatEnzymeType(en.type) && chance(mut)) en.specificityMask = mutateSpecificityMask(en.specificityMask);
             if (chance(mut * 0.2)) {
                 en.type = pickRandom(EVOLVABLE_ENZYME_TYPES);
                 if (isCombatEnzymeType(en.type)) delete en.level;
                 applyEnzymeClassDefaults(en);
             }
-            if (isCombatEnzymeType(en.type)) {
-                en.level = mutateCombatLevel(en.level);
-            } else {
-                if (chance(mut)) {
-                    en.envalSigma = Math.max(
-                        0.02,
-                        (en.envalSigma ?? 0.18) * (1 + (random() - 0.5) * 0.35)
-                    );
-                }
-                if (chance(mut)) {
-                    en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (random() - 0.5) * 0.2);
-                }
-                if (chance(mut)) {
-                    const cls = ENZYME_CLASSES[en.type] || {};
-                    en.envalThroughput = Math.max(
-                        0.01,
-                        (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (random() - 0.5) * 0.4)
-                    );
-                }
-                if (en.type === "anabolase" && chance(mut)) {
-                    const cls = ENZYME_CLASSES[en.type] || {};
-                    en.bondMultiplier = Math.max(
-                        1.01,
-                        (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (random() - 0.5) * 0.18)
-                    );
-                }
-                if (en.type === "transmutase" && chance(mut)) {
-                    const cls = ENZYME_CLASSES[en.type] || {};
-                    en.downhillHarvestFraction = clamp01(
-                        (en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (random() - 0.5) * 0.08
-                    );
-                }
+            if (isCombatEnzymeType(en.type)) en.level = mutateCombatLevel(en.level);
+            else {
+                if (chance(mut)) en.envalSigma = Math.max(0.02, (en.envalSigma ?? 0.18) * (1 + (random() - 0.5) * 0.35));
+                if (chance(mut)) en.secretionProb = clamp01((en.secretionProb ?? 0.5) + (random() - 0.5) * 0.2);
+                if (chance(mut)) { const cls = ENZYME_CLASSES[en.type] || {}; en.envalThroughput = Math.max(0.01, (en.envalThroughput ?? cls.envalThroughput ?? 0.10) * (1 + (random() - 0.5) * 0.4)); }
+                if (en.type === "anabolase" && chance(mut)) { const cls = ENZYME_CLASSES[en.type] || {}; en.bondMultiplier = Math.max(1.01, (en.bondMultiplier ?? cls.bondMultiplier ?? 1.15) * (1 + (random() - 0.5) * 0.18)); }
+                if (en.type === "transmutase" && chance(mut)) { const cls = ENZYME_CLASSES[en.type] || {}; en.downhillHarvestFraction = clamp01((en.downhillHarvestFraction ?? cls.downhillHarvestFraction ?? 0.18) + (random() - 0.5) * 0.08); }
             }
         }
-
         applyEnzymeClassDefaults(en);
     }
 
-    if (chance(mut * 0.3) && g.enzymes.length > 0) {
+    if (chance(mut * 0.3) && g.enzymes.length > 1) {
         const idx = randomInt(g.enzymes.length);
         g.enzymes.splice(idx, 1);
-    } else if (chance(mut * 0.3) && g.enzymes.length < 6) {
-        g.enzymes.push(makeRandomEnzyme(pickRandom(EVOLVABLE_ENZYME_TYPES)));
-    }
+    } else if (chance(mut * 0.3) && g.enzymes.length < 10) g.enzymes.push(makeRandomEnzyme(pickRandom(EVOLVABLE_ENZYME_TYPES)));
 
+    enforceEnzymeCountBounds(g);
     g.reproThreshold = Math.max(0.01, g.reproThreshold);
     g.decayTime = Math.max(50, g.decayTime);
 
     return g;
 };
 
-const clamp01 = (v) => {
-    return Math.max(0, Math.min(1, v));
-};
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
 const snapshotMolecule = (molecule) => {
     if (!molecule || !molecule.composition) return null;
@@ -706,9 +689,7 @@ export const applyEnzymeClassDefaults = (enzyme) => {
         delete enzyme.bondCostFraction;
         delete enzyme.downhillHarvestFraction;
     } else if (enzyme.type === "transmutase") {
-        if (typeof enzyme.downhillHarvestFraction !== "number") {
-            enzyme.downhillHarvestFraction = cls.downhillHarvestFraction ?? 0.18;
-        }
+        if (typeof enzyme.downhillHarvestFraction !== "number") enzyme.downhillHarvestFraction = cls.downhillHarvestFraction ?? 0.18;
         delete enzyme.bondMultiplier;
         delete enzyme.bondCostFraction;
         delete enzyme.bondHarvestFraction;
@@ -732,9 +713,7 @@ export const applyEnzymeClassDefaults = (enzyme) => {
 
 const maskFromLetters = (letters) => {
     let mask = 0;
-    for (let i = 0; i < letters.length; i++) {
-        mask |= ELEMENT_MASKS[letters[i]] || 0;
-    }
+    for (let i = 0; i < letters.length; i++) mask |= ELEMENT_MASKS[letters[i]] || 0;
     return normalizeSpecificityMask(mask, ALL_ELEMENT_MASK);
 };
 
@@ -803,12 +782,7 @@ const mutateOptimalEnval = (parentEnval, referenceEnval, floor = 0.03) => {
     const midpoint = (parentEnval + referenceEnval) / 2;
     let step = Math.abs(parentEnval - midpoint);
     let towardSign = Math.sign(referenceEnval - parentEnval);
-
-    if (step < floor) {
-        step = floor;
-        if (towardSign === 0) towardSign = chance(0.5) ? -1 : 1;
-    }
-
+    if (step < floor) { step = floor; if (towardSign === 0) towardSign = chance(0.5) ? -1 : 1; }
     const r = random();
     if (r < 0.5) return parentEnval;
     if (r < 0.75) return parentEnval + towardSign * step;
