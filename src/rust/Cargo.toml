@@ -1,0 +1,8 @@
+[workspace]
+members = ["core", "cli", "wasm"]
+resolver = "2"
+
+[workspace.package]
+version = "0.17.2"
+edition = "2021"
+license = "MIT"

@@ -1,5 +1,6 @@
-node_modules/
-tools/
+src/rust/Cargo.lock
+src/rust/target/
+src/rust/out/
 *.log
 npm-debug.log*
 .DS_Store
