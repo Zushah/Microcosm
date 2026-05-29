@@ -237,11 +237,11 @@ export class MicrocosmRuntime {
         return this;
     }
 
-    step(ticks = 1) {
+    step(ticks = 1, options = {}) {
         this.assertReady();
         const count = Math.max(0, Number(ticks) | 0);
         if (count > 0) this.assertStatus(readUintStatus(this._functions.step(this._handle, count)), "microcosm_step");
-        this.refreshRenderBuffers();
+        if (options.refresh !== false) this.refreshRenderBuffers();
         return this._stats;
     }
 

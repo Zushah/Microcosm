@@ -10,214 +10,58 @@ https://www.github.com/Zushah/Microcosm
         <meta charset="utf-8">
         <title>Microcosm</title>
         <link href="./assets/logo.png" rel="icon" type="image/x-icon">
-        <style>
-            :root {
-                color-scheme: light;
-                --bg: #f6f6f6;
-                --panel: rgba(255, 255, 255, 0.96);
-                --panel-border: rgba(0, 0, 0, 0.08);
-                --text: #111;
-                --muted: #5b5b5b;
-                --good: #0b6b36;
-                --bad: #9f1d1d;
-            }
-
-            html, body {
-                min-height: 100%;
-                margin: 0;
-                font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
-                background: var(--bg);
-                color: var(--text);
-            }
-
-            body {
-                padding: 24px;
-                box-sizing: border-box;
-            }
-
-            h1, h2 {
-                margin: 0;
-            }
-
-            h1 {
-                letter-spacing: 0.12em;
-                font-size: 24px;
-            }
-
-            h2 {
-                font-size: 16px;
-            }
-
-            .shell {
-                display: grid;
-                grid-template-columns: minmax(0, 1fr);
-                gap: 16px;
-                max-width: 1180px;
-                margin: 0 auto;
-            }
-
-            .panel {
-                padding: 16px;
-                background: var(--panel);
-                border: 1px solid var(--panel-border);
-                border-radius: 12px;
-                box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08);
-            }
-
-            .controls {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 10px;
-                align-items: end;
-            }
-
-            .field {
-                display: flex;
-                flex-direction: column;
-                gap: 4px;
-                min-width: 260px;
-                font-size: 12px;
-                color: var(--muted);
-            }
-
-            .field input {
-                padding: 8px 10px;
-                border: 1px solid rgba(0, 0, 0, 0.14);
-                border-radius: 8px;
-                font: inherit;
-                color: var(--text);
-                background: #fff;
-            }
-
-            button {
-                padding: 9px 13px;
-                border: 1px solid rgba(0, 0, 0, 0.14);
-                border-radius: 8px;
-                background: #fff;
-                color: var(--text);
-                font: inherit;
-                cursor: pointer;
-            }
-
-            button:hover {
-                background: #f0f0f0;
-            }
-
-            #diagnostics {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                gap: 10px;
-                margin-top: 12px;
-            }
-
-            .datum {
-                display: flex;
-                flex-direction: column;
-                gap: 3px;
-                padding: 10px;
-                border: 1px solid rgba(0, 0, 0, 0.07);
-                border-radius: 10px;
-                background: #fff;
-                min-width: 0;
-            }
-
-            .datum span {
-                color: var(--muted);
-                font-size: 12px;
-            }
-
-            .datum strong {
-                overflow-wrap: anywhere;
-                font-size: 14px;
-            }
-
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 12px;
-                font-size: 13px;
-            }
-
-            th, td {
-                padding: 7px 8px;
-                border-bottom: 1px solid rgba(0, 0, 0, 0.08);
-                text-align: left;
-            }
-
-            th {
-                color: var(--muted);
-                font-weight: 600;
-            }
-
-            tr.isBad td {
-                color: var(--bad);
-            }
-
-            #samples {
-                margin-top: 12px;
-                display: grid;
-                gap: 8px;
-                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-                font-size: 12px;
-                overflow-wrap: anywhere;
-            }
-
-            #errors {
-                margin: 0;
-                min-height: 18px;
-                white-space: pre-wrap;
-                color: var(--bad);
-                font-size: 12px;
-                overflow: auto;
-            }
-
-            .canvasPlaceholder {
-                display: flex;
-                min-height: 160px;
-                align-items: center;
-                justify-content: center;
-                border: 1px dashed rgba(0, 0, 0, 0.18);
-                border-radius: 12px;
-                color: var(--muted);
-                background: rgba(255, 255, 255, 0.55);
-            }
-        </style>
+        <link rel="stylesheet" href="./src/styles/main-beta.css">
     </head>
     <body>
-        <main class="shell">
-            <section class="panel">
-                <h1>MICROCOSM</h1>
+        <main class="microcosmLayout">
+            <section class="panel visualPanel" aria-label="Microcosm visualization">
+                <canvas id="wasmgpuCanvas"></canvas>
             </section>
-            <section class="panel">
+            <section class="panel summaryPanel">
+                <header class="titleBlock">
+                    <h1>MICROCOSM</h1>
+                    <p class="subtitle">Rust computation - WasmGPU visualization</p>
+                    <div id="status">Loading...</div>
+                </header>
                 <div class="controls">
                     <label class="field">
                         <span>Seed</span>
-                        <input id="seedInput" type="text" spellcheck="false" autocomplete="off" placeholder="demo">
+                        <input id="seedInput" type="text" spellcheck="false" autocomplete="off" placeholder="42">
                     </label>
-                    <button id="pauseButton" type="button">Pause</button>
-                    <button id="stepButton" type="button">Step once</button>
-                    <button id="resetButton" type="button">Reset</button>
+                    <label class="field">
+                        <span>Display mode</span>
+                        <select id="displayMode"></select>
+                    </label>
+                    <div class="buttonRow">
+                        <button id="pauseButton" type="button">Pause</button>
+                        <button id="stepButton" type="button">Step once</button>
+                        <button id="resetButton" type="button">Reset</button>
+                    </div>
                 </div>
+                <section class="infoBlock">
+                    <h2>Renderer</h2>
+                    <div id="renderStats"></div>
+                </section>
             </section>
-            <section class="panel">
-                <h2>Runtime diagnostics</h2>
-                <div id="diagnostics"></div>
+            <section class="panel diagnosticsPanel">
+                <section class="infoBlock">
+                    <h2>Runtime diagnostics</h2>
+                    <div id="diagnostics"></div>
+                </section>
+                <section class="infoBlock growBlock">
+                    <h2>Render-buffer views</h2>
+                    <div id="views"></div>
+                </section>
             </section>
-            <section class="panel">
-                <h2>Render-buffer views</h2>
-                <div id="views"></div>
-            </section>
-            <section class="panel">
-                <h2>Live memory samples</h2>
-                <div id="samples"></div>
-            </section>
-            <section class="panel">
-                <h2>Canvas placeholder</h2>
-                <div class="canvasPlaceholder">WasmGPU rendering will be added soon.</div>
-            </section>
-            <section class="panel">
-                <h2>Errors</h2>
-                <pre id="errors"></pre>
+            <section class="panel detailsPanel">
+                <section class="infoBlock">
+                    <h2>Live memory samples</h2>
+                    <div id="samples"></div>
+                </section>
+                <section class="infoBlock errorBlock">
+                    <h2>Errors</h2>
+                    <pre id="errors"></pre>
+                </section>
             </section>
         </main>
         <script type="text/javascript" src="https://cdn.jsdelivr.net/gh/Zushah/WasmGPU@0.8.0/dist/WasmGPU.iife.min.js"></script>
