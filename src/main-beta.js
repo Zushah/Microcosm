@@ -1,6 +1,7 @@
 import { MicrocosmRuntime } from "./wasmgpu/runtime.js";
 import { MicrocosmRenderer } from "./wasmgpu/render.js";
 import { MicrocosmGUI } from "./wasmgpu/gui.js";
+import { MicrocosmInteraction } from "./wasmgpu/interact.js";
 
 const SEED_QUERY_PARAM = "seed";
 const STEP_MS = 10;
@@ -11,6 +12,7 @@ const gui = MicrocosmGUI.bind();
 
 let runtime = null;
 let renderer = null;
+let interaction = null;
 let paused = false;
 let animationFrameId = null;
 let lastWallTimeMs = performance.now();
@@ -50,7 +52,14 @@ const buildConfig = () => ({
     predation_enabled: true
 });
 
-const updateGui = () => gui.update({ runtime, renderer, paused, fps: fpsValue, tps: tpsValue });
+const updateGui = () => gui.update({ runtime, renderer, interaction, paused, fps: fpsValue, tps: tpsValue });
+
+const updateInteractionVisuals = () => {
+    if (!runtime || !runtime.ready || !renderer) return;
+    renderer.updateFromRuntime(runtime);
+    renderer.render();
+    updateGui();
+};
 
 const renderOnce = () => {
     if (!runtime || !runtime.ready || !renderer) return;
@@ -72,6 +81,7 @@ const resetRuntime = () => {
     const config = buildConfig();
     runtime.reset(config);
     window.history.replaceState(null, "", seedUrl(config.seed).toString());
+    if (interaction) interaction.clearSelection();
     renderer.updateFromRuntime(runtime);
     renderer.render();
     updateGui();
@@ -139,6 +149,7 @@ const frame = () => {
         tpsLastSampleMs = nowMs;
     }
     if (nowMs - lastHudUpdateMs >= HUD_UPDATE_INTERVAL_MS) {
+        if (interaction) interaction.refreshSelection();
         updateGui();
         lastHudUpdateMs = nowMs;
     }
@@ -161,6 +172,16 @@ const init = async () => {
             wasmUrl: new URL("./rust/microcosm.wasm", import.meta.url),
             config: buildConfig()
         });
+        interaction = MicrocosmInteraction.create({
+            runtime,
+            renderer,
+            canvas: gui.canvas,
+            mode: gui.mode,
+            brush: gui.brushOptions,
+            onChange: () => updateInteractionVisuals(),
+            onMutation: () => updateInteractionVisuals()
+        });
+        gui.setBrushOptions(interaction.brush);
         renderer.updateFromRuntime(runtime);
         renderer.render();
         gui.setStatus("Running Rust/WasmGPU Microcosm beta implementation");
@@ -169,6 +190,7 @@ const init = async () => {
         lastWallTimeMs = performance.now();
         animationFrameId = requestAnimationFrame(frame);
     } catch (error) {
+        if (interaction) { interaction.destroy(); interaction = null; }
         if (runtime) { runtime.destroy(); runtime = null; }
         if (renderer) { renderer.destroy(); renderer = null; }
         gui.setError(error);
@@ -179,11 +201,17 @@ gui.bindControls({
     pause: () => setPaused(!paused),
     step: () => { try { stepOnce(); } catch (error) { gui.setError(error); } },
     reset: () => { try { resetRuntime(); } catch (error) { gui.setError(error); } },
-    displayMode: (mode) => { try { applyDisplayMode(mode); } catch (error) { gui.setError(error); } }
+    displayMode: (mode) => { try { applyDisplayMode(mode); } catch (error) { gui.setError(error); } },
+    mode: (mode) => { try { if (interaction) interaction.setMode(mode); } catch (error) { gui.setError(error); } },
+    brush: (options) => { try { if (interaction) interaction.setBrushOptions(options); } catch (error) { gui.setError(error); } },
+    brushPreview: (options) => { try { if (interaction) interaction.setBrushOptions(options); } catch (error) { gui.setError(error); } },
+    clearSelection: () => { try { if (interaction) interaction.clearSelection(); } catch (error) { gui.setError(error); } },
+    clearLineage: () => { try { if (interaction) interaction.clearLineageSelection(); } catch (error) { gui.setError(error); } }
 });
 
 window.addEventListener("beforeunload", () => {
     if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+    if (interaction) interaction.destroy();
     if (renderer) renderer.destroy();
     if (runtime) runtime.destroy();
 });

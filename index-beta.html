@@ -32,6 +32,13 @@ https://www.github.com/Zushah/Microcosm
                         <span>Display mode</span>
                         <select id="displayMode"></select>
                     </label>
+                    <label class="field">
+                        <span>Interaction mode</span>
+                        <select id="interactionMode">
+                            <option value="explore">Explore</option>
+                            <option value="edit">Edit enval</option>
+                        </select>
+                    </label>
                     <div class="buttonRow">
                         <button id="pauseButton" type="button">Pause</button>
                         <button id="stepButton" type="button">Step once</button>
@@ -54,7 +61,49 @@ https://www.github.com/Zushah/Microcosm
                 </section>
             </section>
             <section class="panel detailsPanel">
-                <section class="infoBlock">
+                <section class="infoBlock inspectorBlock">
+                    <div class="sectionHeader">
+                        <h2>Interaction and inspection</h2>
+                        <div class="buttonRow compactButtons">
+                            <button id="clearSelectionButton" type="button">Clear selection</button>
+                            <button id="clearLineageButton" type="button">Clear lineage</button>
+                            <button id="copyInspectionButton" type="button">Copy JSON</button>
+                        </div>
+                    </div>
+                    <div class="brushControls">
+                        <label class="field">
+                            <span>Brush width</span>
+                            <input id="brushWidth" type="number" min="1" step="1" value="10">
+                        </label>
+                        <label class="field">
+                            <span>Brush height</span>
+                            <input id="brushHeight" type="number" min="1" step="1" value="10">
+                        </label>
+                        <label class="field">
+                            <span>Δ enval</span>
+                            <input id="brushDelta" type="number" step="0.01" value="0.05">
+                        </label>
+                    </div>
+                    <div class="inspectionGrid">
+                        <section>
+                            <h3>Hover tile</h3>
+                            <div id="hoverInspector" class="inspectorPane"></div>
+                        </section>
+                        <section>
+                            <h3>Selected tile</h3>
+                            <div id="tileInspector" class="inspectorPane"></div>
+                        </section>
+                        <section>
+                            <h3>Selected cell</h3>
+                            <div id="cellInspector" class="inspectorPane"></div>
+                        </section>
+                        <section>
+                            <h3>Lineage and edit</h3>
+                            <div id="lineageInspector" class="inspectorPane"></div>
+                        </section>
+                    </div>
+                </section>
+                <section class="infoBlock memoryBlock">
                     <h2>Live memory samples</h2>
                     <div id="samples"></div>
                 </section>

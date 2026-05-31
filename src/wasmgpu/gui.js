@@ -13,6 +13,8 @@ const DISPLAY_LABELS = Object.freeze({
     "element-f": "Element F presence"
 });
 
+const ELEMENT_KEYS = Object.freeze(["A", "B", "C", "D", "E", "F"]);
+
 const displayValue = (value) => {
     if (typeof value === "bigint") return value.toString();
     if (typeof value === "number") {
@@ -31,6 +33,17 @@ const formatArraySample = (array, count = 8) => {
     return out.length > 0 ? out.join(", ") : "—";
 };
 
+const detailRows = (rows) => rows.map(([label, value]) => `
+    <div class="detailRow">
+        <span>${label}</span>
+        <strong>${displayValue(value)}</strong>
+    </div>
+`).join("");
+
+const elementCountsText = (counts) => { if (!counts) return "—"; return ELEMENT_KEYS.map((key) => `${key}:${displayValue(counts[key])}`).join("  "); };
+
+const statusClass = (status) => status === "edit" ? "modeEdit" : "modeExplore";
+
 export class MicrocosmGUI {
     static bind(root = document) {
         return new MicrocosmGUI({
@@ -45,12 +58,24 @@ export class MicrocosmGUI {
             resetButton: root.getElementById("resetButton"),
             seedInput: root.getElementById("seedInput"),
             displayMode: root.getElementById("displayMode"),
+            interactionMode: root.getElementById("interactionMode"),
+            brushWidth: root.getElementById("brushWidth"),
+            brushHeight: root.getElementById("brushHeight"),
+            brushDelta: root.getElementById("brushDelta"),
+            clearSelectionButton: root.getElementById("clearSelectionButton"),
+            clearLineageButton: root.getElementById("clearLineageButton"),
+            copyInspectionButton: root.getElementById("copyInspectionButton"),
+            hoverInspector: root.getElementById("hoverInspector"),
+            tileInspector: root.getElementById("tileInspector"),
+            cellInspector: root.getElementById("cellInspector"),
+            lineageInspector: root.getElementById("lineageInspector"),
             canvas: root.getElementById("wasmgpuCanvas")
         });
     }
 
     constructor(elements) {
         this.elements = elements;
+        this._lastInspectionPayload = null;
         this.populateDisplayModes();
     }
 
@@ -70,6 +95,18 @@ export class MicrocosmGUI {
         return this.elements.displayMode ? this.elements.displayMode.value : "enval";
     }
 
+    get mode() {
+        return this.elements.interactionMode ? this.elements.interactionMode.value : "explore";
+    }
+
+    get brushOptions() {
+        return {
+            width: this.elements.brushWidth ? this.elements.brushWidth.value : 10,
+            height: this.elements.brushHeight ? this.elements.brushHeight.value : 10,
+            delta: this.elements.brushDelta ? this.elements.brushDelta.value : 0.05
+        };
+    }
+
     populateDisplayModes() {
         const select = this.elements.displayMode;
         if (!select) return;
@@ -82,6 +119,15 @@ export class MicrocosmGUI {
         if (this.elements.stepButton) this.elements.stepButton.addEventListener("click", () => handlers.step && handlers.step());
         if (this.elements.resetButton) this.elements.resetButton.addEventListener("click", () => handlers.reset && handlers.reset());
         if (this.elements.displayMode) this.elements.displayMode.addEventListener("change", () => handlers.displayMode && handlers.displayMode(this.displayMode));
+        if (this.elements.interactionMode) this.elements.interactionMode.addEventListener("change", () => handlers.mode && handlers.mode(this.mode));
+        for (const input of [this.elements.brushWidth, this.elements.brushHeight, this.elements.brushDelta]) {
+            if (!input) continue;
+            input.addEventListener("change", () => handlers.brush && handlers.brush(this.brushOptions));
+            input.addEventListener("input", () => handlers.brushPreview && handlers.brushPreview(this.brushOptions));
+        }
+        if (this.elements.clearSelectionButton) this.elements.clearSelectionButton.addEventListener("click", () => handlers.clearSelection && handlers.clearSelection());
+        if (this.elements.clearLineageButton) this.elements.clearLineageButton.addEventListener("click", () => handlers.clearLineage && handlers.clearLineage());
+        if (this.elements.copyInspectionButton) this.elements.copyInspectionButton.addEventListener("click", () => this.copyInspection());
         if (this.elements.seedInput) {
             this.elements.seedInput.addEventListener("keydown", (event) => {
                 if (event.key !== "Enter") return;
@@ -93,6 +139,16 @@ export class MicrocosmGUI {
 
     setPaused(paused) {
         if (this.elements.pauseButton) this.elements.pauseButton.textContent = paused ? "Resume" : "Pause";
+    }
+
+    setMode(mode) {
+        if (this.elements.interactionMode) this.elements.interactionMode.value = mode === "edit" ? "edit" : "explore";
+    }
+
+    setBrushOptions(options = {}) {
+        if (this.elements.brushWidth && options.width !== undefined) this.elements.brushWidth.value = String(options.width);
+        if (this.elements.brushHeight && options.height !== undefined) this.elements.brushHeight.value = String(options.height);
+        if (this.elements.brushDelta && options.delta !== undefined) this.elements.brushDelta.value = String(options.delta);
     }
 
     setStatus(text) {
@@ -116,6 +172,8 @@ export class MicrocosmGUI {
         if (!runtime || !runtime.ready) return;
         const stats = runtime.stats || {};
         const renderStats = renderer ? renderer.diagnostics : {};
+        const interaction = state.interaction ? state.interaction.state : null;
+        if (interaction) this.setMode(interaction.mode);
         const diagnostics = [
             ["Runtime", runtime.ready ? "ready" : "not ready"],
             ["Version", runtime.version],
@@ -146,6 +204,8 @@ export class MicrocosmGUI {
                 ["Display mode", renderStats.displayMode || "—"],
                 ["Tiles rendered", renderStats.tileCountRendered],
                 ["Cells rendered", renderStats.cellCountRendered],
+                ["Selected lineage", renderStats.selectedLineage],
+                ["Selected cell", renderStats.selectedCellId],
                 ["Renderer frames", renderStats.frameCount],
                 ["Paused", state.paused ? "yes" : "no"]
             ];
@@ -158,6 +218,68 @@ export class MicrocosmGUI {
         }
         this.updateViewTable(runtime);
         this.updateSamples(runtime);
+        this.updateInspection(interaction);
+    }
+
+    updateInspection(interaction) {
+        if (!interaction) return;
+        this._lastInspectionPayload = {
+            hoverTile: interaction.hoverTileInfo,
+            selectedTile: interaction.selectedTileInfo,
+            selectedCell: interaction.selectedCellInfo,
+            selectedLineageId: interaction.selectedLineageId,
+            mode: interaction.mode,
+            brush: interaction.brush
+        };
+        if (this.elements.hoverInspector) {
+            const tile = interaction.hoverTileInfo;
+            this.elements.hoverInspector.innerHTML = tile ? detailRows([
+                ["Tile", `${tile.x}, ${tile.y}`],
+                ["Enval", tile.enval],
+                ["Cell", tile.cell_id ?? "—"],
+                ["Molecules", tile.molecule_count],
+                ["Mass", tile.mass_count]
+            ]) : `<div class="smallNote">Move over the canvas to probe a tile.</div>`;
+        }
+        if (this.elements.tileInspector) {
+            const tile = interaction.selectedTileInfo;
+            this.elements.tileInspector.innerHTML = tile ? detailRows([
+                ["Tile", `${tile.x}, ${tile.y}`],
+                ["Tile id", tile.tile_id],
+                ["Enval", tile.enval],
+                ["Occupied cell", tile.cell_id ?? "—"],
+                ["Molecule count", tile.molecule_count],
+                ["Mass count", tile.mass_count],
+                ["Element counts", elementCountsText(tile.element_counts)],
+                ["Element mask", tile.element_mask]
+            ]) : `<div class="smallNote">Left-click a tile to select it.</div>`;
+        }
+        if (this.elements.cellInspector) {
+            const cell = interaction.selectedCellInfo;
+            this.elements.cellInspector.innerHTML = cell ? detailRows([
+                ["Cell id", cell.cell_id],
+                ["Tile", `${cell.x}, ${cell.y}`],
+                ["Lineage", cell.lineage_id],
+                ["Energy", cell.energy],
+                ["Age", `${displayValue(cell.age_seconds)}s`],
+                ["Optimal enval", cell.optimal_enval],
+                ["Local enval avg", cell.local_enval_average],
+                ["Enzymes", cell.enzyme_count],
+                ["Internal atoms", cell.internal_atom_count],
+                ["Attack", cell.combat_attack_total],
+                ["Defense", cell.combat_defense_total],
+                ["Repro threshold", cell.repro_threshold],
+                ["Decay time", cell.decay_time]
+            ]) : `<div class="smallNote">No active cell selected. Genome, molecule inventory, and reaction-log details are not exposed yet.</div>`;
+        }
+        if (this.elements.lineageInspector) {
+            this.elements.lineageInspector.innerHTML = detailRows([
+                ["Selected lineage", interaction.selectedLineageId ?? "—"],
+                ["Mode", `<span class="${statusClass(interaction.mode)}">${interaction.mode}</span>`],
+                ["Brush", `${interaction.brush.width} × ${interaction.brush.height}`],
+                ["Δ enval", interaction.brush.delta]
+            ]);
+        }
     }
 
     updateViewTable(runtime) {
@@ -192,5 +314,18 @@ export class MicrocosmGUI {
             <div><strong>cellEnergy[0..]</strong>: ${formatArraySample(runtime.views.cellEnergy && runtime.views.cellEnergy.array())}</div>
             <div><strong>cellLineage[0..]</strong>: ${formatArraySample(runtime.views.cellLineage && runtime.views.cellLineage.array())}</div>
         `;
+    }
+
+    async copyInspection() {
+        if (!this._lastInspectionPayload) return;
+        const text = JSON.stringify(this._lastInspectionPayload, null, 2);
+        try {
+            await navigator.clipboard.writeText(text);
+            if (this.elements.copyInspectionButton) {
+                const prev = this.elements.copyInspectionButton.textContent;
+                this.elements.copyInspectionButton.textContent = "Copied";
+                setTimeout(() => { if (this.elements.copyInspectionButton) this.elements.copyInspectionButton.textContent = prev; }, 900);
+            }
+        } catch (error) { this.setError(error); }
     }
 }

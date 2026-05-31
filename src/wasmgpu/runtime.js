@@ -285,6 +285,62 @@ export class MicrocosmRuntime {
         catch (error) { return `failed to read Rust last error: ${error.message}`; }
     }
 
+    readQueryResult(label = "microcosm.query_result") {
+        const length = Number(this._functions.queryResultLen());
+        if (length <= 0) throw new Error(`${label} returned an empty payload.`);
+        const text = this.readExportedString("microcosm_query_result_ptr", "microcosm_query_result_len", label);
+        try { return JSON.parse(text); }
+        catch (error) { throw new Error(`${label} returned invalid JSON: ${error.message}`); }
+    }
+
+    inspectTile(x, y) {
+        this.assertReady();
+        const tileX = Math.max(0, Number(x) | 0);
+        const tileY = Math.max(0, Number(y) | 0);
+        const status = readUintStatus(this._functions.inspectTile(this._handle, tileX, tileY));
+        this.assertStatus(status, "microcosm_inspect_tile");
+        return this.readQueryResult("microcosm.inspect_tile");
+    }
+
+    inspectCell(cellId) {
+        this.assertReady();
+        const id = Math.max(0, Number(cellId) | 0);
+        const status = readUintStatus(this._functions.inspectCell(this._handle, id));
+        this.assertStatus(status, "microcosm_inspect_cell");
+        return this.readQueryResult("microcosm.inspect_cell");
+    }
+
+    setTileEnval(x, y, value, options = {}) {
+        this.assertReady();
+        const status = readUintStatus(this._functions.setTileEnval(this._handle, Number(x) >>> 0, Number(y) >>> 0, Number(value)));
+        this.assertStatus(status, "microcosm_set_tile_enval");
+        if (options.refresh !== false) this.refreshRenderBuffers();
+        return this._stats;
+    }
+
+    adjustTileEnval(x, y, delta, options = {}) {
+        this.assertReady();
+        const status = readUintStatus(this._functions.adjustTileEnval(this._handle, Number(x) >>> 0, Number(y) >>> 0, Number(delta)));
+        this.assertStatus(status, "microcosm_adjust_tile_enval");
+        if (options.refresh !== false) this.refreshRenderBuffers();
+        return this._stats;
+    }
+
+    applyEnvalBrush(centerX, centerY, brushWidth, brushHeight, delta, options = {}) {
+        this.assertReady();
+        const width = Math.max(1, Number(brushWidth) | 0);
+        const height = Math.max(1, Number(brushHeight) | 0);
+        const status = readUintStatus(this._functions.brushEnvalRect(
+            this._handle,
+            Number(centerX) >>> 0, Number(centerY) >>> 0,
+            width >>> 0, height >>> 0,
+            Number(delta)
+        ));
+        this.assertStatus(status, "microcosm_brush_enval_rect");
+        if (options.refresh !== false) this.refreshRenderBuffers();
+        return this._stats;
+    }
+
     viewDiagnostics() {
         const expectedTileCount = this.tileCount, expectedCellCount = this.cellCount;
         return VIEW_DEFINITIONS.map((definition) => ({
@@ -320,7 +376,14 @@ export class MicrocosmRuntime {
             statsPtr: get("microcosm_stats_ptr"),
             tileCount: get("microcosm_tile_count"),
             cellCount: get("microcosm_cell_count"),
-            renderEpoch: get("microcosm_render_epoch")
+            renderEpoch: get("microcosm_render_epoch"),
+            queryResultPtr: get("microcosm_query_result_ptr"),
+            queryResultLen: get("microcosm_query_result_len"),
+            inspectTile: get("microcosm_inspect_tile"),
+            inspectCell: get("microcosm_inspect_cell"),
+            setTileEnval: get("microcosm_set_tile_enval"),
+            adjustTileEnval: get("microcosm_adjust_tile_enval"),
+            brushEnvalRect: get("microcosm_brush_enval_rect")
         };
     }
 

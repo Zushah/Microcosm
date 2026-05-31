@@ -15,19 +15,12 @@ const hslToRgb255 = (hDeg, s01, l01) => {
     let r1 = 0;
     let g1 = 0;
     let b1 = 0;
-    if (hp >= 0 && hp < 1) {
-        r1 = c; g1 = x; b1 = 0;
-    } else if (hp >= 1 && hp < 2) {
-        r1 = x; g1 = c; b1 = 0;
-    } else if (hp >= 2 && hp < 3) {
-        r1 = 0; g1 = c; b1 = x;
-    } else if (hp >= 3 && hp < 4) {
-        r1 = 0; g1 = x; b1 = c;
-    } else if (hp >= 4 && hp < 5) {
-        r1 = x; g1 = 0; b1 = c;
-    } else {
-        r1 = c; g1 = 0; b1 = x;
-    }
+    if (hp >= 0 && hp < 1) { r1 = c; g1 = x; b1 = 0; }
+    else if (hp >= 1 && hp < 2) { r1 = x; g1 = c; b1 = 0; }
+    else if (hp >= 2 && hp < 3) { r1 = 0; g1 = c; b1 = x; }
+    else if (hp >= 3 && hp < 4) { r1 = 0; g1 = x; b1 = c; }
+    else if (hp >= 4 && hp < 5) { r1 = x; g1 = 0; b1 = c; }
+    else { r1 = c; g1 = 0; b1 = x; }
     const m = l - c / 2;
     const r = Math.round((r1 + m) * 255);
     const g = Math.round((g1 + m) * 255);
@@ -120,6 +113,22 @@ const displayModeElement = (mode) => {
     return index >= 0 ? { element, index, mask: 1 << index } : null;
 };
 
+const axisInWrappedSpan = (value, start, span, size) => {
+    if (span >= size) return true;
+    const normalized = ((start % size) + size) % size;
+    const end = normalized + span;
+    return end <= size ? value >= normalized && value < end : value >= normalized || value < (end - size);
+};
+
+const tileInBrush = (x, y, brush, width, height) => {
+    if (!brush || !Number.isInteger(brush.x) || !Number.isInteger(brush.y)) return false;
+    const brushWidth = Math.max(1, Math.min(width, Number(brush.width) | 0));
+    const brushHeight = Math.max(1, Math.min(height, Number(brush.height) | 0));
+    const startX = brush.x - Math.floor(brushWidth * 0.5);
+    const startY = brush.y - Math.floor(brushHeight * 0.5);
+    return axisInWrappedSpan(x, startX, brushWidth, width) && axisInWrappedSpan(y, startY, brushHeight, height);
+};
+
 const updateLayerBounds = (cloud, width, height, z = 0) => {
     const halfWidth = Math.max(0.5, width * 0.5);
     const halfHeight = Math.max(0.5, height * 0.5);
@@ -159,6 +168,10 @@ export class MicrocosmRenderer {
         this._cellLayer = null;
         this._displayMode = options.displayMode || "enval";
         this._selectedLineage = null;
+        this._selectedTile = null;
+        this._selectedCellId = null;
+        this._hoverTile = null;
+        this._brushPreview = null;
         this._pausedVisualState = false;
         this._width = 0;
         this._height = 0;
@@ -192,6 +205,14 @@ export class MicrocosmRenderer {
         return this._displayMode;
     }
 
+    get width() {
+        return this._width;
+    }
+
+    get height() {
+        return this._height;
+    }
+
     get tileCountRendered() {
         return this._tileCount;
     }
@@ -211,7 +232,10 @@ export class MicrocosmRenderer {
             tileCountRendered: this._tileCount,
             cellCountRendered: this._cellCount,
             frameCount: this._frameCount,
-            world: this._width > 0 && this._height > 0 ? `${this._width} × ${this._height}` : "—"
+            world: this._width > 0 && this._height > 0 ? `${this._width} × ${this._height}` : "—",
+            selectedLineage: this._selectedLineage,
+            selectedCellId: this._selectedCellId,
+            selectedTile: this._selectedTile
         };
     }
 
@@ -287,6 +311,77 @@ export class MicrocosmRenderer {
 
     setSelectedLineage(lineageId) {
         this._selectedLineage = lineageId == null ? null : Number(lineageId) >>> 0;
+    }
+
+    setSelectedTile(tile) {
+        this._selectedTile = tile ? { x: Number(tile.x) | 0, y: Number(tile.y) | 0 } : null;
+    }
+
+    setSelectedCell(cellId) {
+        this._selectedCellId = cellId == null ? null : Number(cellId) >>> 0;
+    }
+
+    setHoverTile(tile) {
+        this._hoverTile = tile ? { x: Number(tile.x) | 0, y: Number(tile.y) | 0 } : null;
+    }
+
+    setBrushPreview(preview) {
+        this._brushPreview = preview ? {
+            x: Number(preview.x) | 0,
+            y: Number(preview.y) | 0,
+            width: Math.max(1, Number(preview.width) | 0),
+            height: Math.max(1, Number(preview.height) | 0)
+        } : null;
+    }
+
+    setInteractionState(state = {}) {
+        if (Object.prototype.hasOwnProperty.call(state, "selectedLineageId")) this.setSelectedLineage(state.selectedLineageId);
+        if (Object.prototype.hasOwnProperty.call(state, "selectedCellId")) this.setSelectedCell(state.selectedCellId);
+        if (Object.prototype.hasOwnProperty.call(state, "selectedTile")) this.setSelectedTile(state.selectedTile);
+        if (Object.prototype.hasOwnProperty.call(state, "hoverTile")) this.setHoverTile(state.hoverTile);
+        if (Object.prototype.hasOwnProperty.call(state, "brushPreview")) this.setBrushPreview(state.brushPreview);
+    }
+
+    canvasToWorld(clientX, clientY) {
+        if (!this._camera || this._width <= 0 || this._height <= 0) return null;
+        const rect = this._canvas.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+        const u = x / rect.width;
+        const v = y / rect.height;
+        return {
+            x: this._camera.left + u * (this._camera.right - this._camera.left),
+            y: this._camera.top - v * (this._camera.top - this._camera.bottom),
+            canvasX: x,
+            canvasY: y
+        };
+    }
+
+    worldToTile(worldX, worldY, options = {}) {
+        if (this._width <= 0 || this._height <= 0) return null;
+        let x = Math.floor(worldX + this._width * 0.5);
+        let y = Math.floor(this._height * 0.5 - worldY);
+        if (options.wrap) {
+            x = ((x % this._width) + this._width) % this._width;
+            y = ((y % this._height) + this._height) % this._height;
+            return { x, y, index: this.tileIndex(x, y) };
+        }
+        if (x < 0 || y < 0 || x >= this._width || y >= this._height) return null;
+        return { x, y, index: this.tileIndex(x, y) };
+    }
+
+    tileFromClient(clientX, clientY, options = {}) {
+        const world = this.canvasToWorld(clientX, clientY);
+        if (!world) return null;
+        const tile = this.worldToTile(world.x, world.y, options);
+        return tile ? { ...tile, worldX: world.x, worldY: world.y, canvasX: world.canvasX, canvasY: world.canvasY } : null;
+    }
+
+    tileIndex(x, y) {
+        if (this._height <= 0) return -1;
+        return (Number(x) | 0) * this._height + (Number(y) | 0);
     }
 
     setPausedVisualState(paused) {
@@ -396,24 +491,32 @@ export class MicrocosmRenderer {
         const mass = views.tileMass && views.tileMass.array();
         const molecules = views.tileMoleculeCount && views.tileMoleculeCount.array();
         const mask = views.tileElementMask && views.tileElementMask.array();
+        const selectedTileIndex = this._selectedTile ? this.tileIndex(this._selectedTile.x, this._selectedTile.y) : -1;
+        const hoverTileIndex = this._hoverTile ? this.tileIndex(this._hoverTile.x, this._hoverTile.y) : -1;
         for (let i = 0; i < count; i++) {
             const offset = i * 4;
-            if (mode === "enval") {
-                setEnvalRgb(colors, offset, enval ? enval[i] : 0);
-            } else if (mode === "occupancy") {
-                const occupied = occupancy && occupancy[i] !== EMPTY_CELL_ID;
-                setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, [46, 57, 72], occupied ? 0.92 : 0.0, 1);
-            } else if (mode === "mass") {
-                const intensity = 1 - Math.exp(-Math.max(0, mass ? mass[i] : 0) * 0.08);
-                setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, [86, 154, 112], intensity, 1);
-            } else if (mode === "molecules") {
-                const intensity = 1 - Math.exp(-Math.max(0, molecules ? molecules[i] : 0) * 0.30);
-                setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, [69, 139, 186], intensity, 1);
-            } else if (elementMode) {
-                const present = mask && ((mask[i] & elementMode.mask) !== 0);
-                setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, TILE_ELEMENT_RGB255[elementMode.element], present ? 1.0 : 0.0, 1);
-            } else {
-                setRgb255(colors, offset, TILE_NEUTRAL_RGB255, 1);
+            const x = Math.floor(i / this._height);
+            const y = i % this._height;
+            if (mode === "enval") { setEnvalRgb(colors, offset, enval ? enval[i] : 0); }
+            else if (mode === "occupancy") { const occupied = occupancy && occupancy[i] !== EMPTY_CELL_ID; setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, [46, 57, 72], occupied ? 0.92 : 0.0, 1); }
+            else if (mode === "mass") { const intensity = 1 - Math.exp(-Math.max(0, mass ? mass[i] : 0) * 0.08); setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, [86, 154, 112], intensity, 1); }
+            else if (mode === "molecules") { const intensity = 1 - Math.exp(-Math.max(0, molecules ? molecules[i] : 0) * 0.30); setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, [69, 139, 186], intensity, 1); }
+            else if (elementMode) { const present = mask && ((mask[i] & elementMode.mask) !== 0); setBlendRgb255(colors, offset, TILE_NEUTRAL_RGB255, TILE_ELEMENT_RGB255[elementMode.element], present ? 1.0 : 0.0, 1); }
+            else { setRgb255(colors, offset, TILE_NEUTRAL_RGB255, 1); }
+            if (this._brushPreview && tileInBrush(x, y, this._brushPreview, this._width, this._height)) {
+                colors[offset + 0] = Math.min(1, colors[offset + 0] * 0.72 + 0.28 * 0.56);
+                colors[offset + 1] = Math.min(1, colors[offset + 1] * 0.72 + 0.28 * 0.26);
+                colors[offset + 2] = Math.min(1, colors[offset + 2] * 0.72 + 0.28 * 0.82);
+            }
+            if (i === hoverTileIndex) {
+                colors[offset + 0] = Math.min(1, colors[offset + 0] * 0.65 + 0.35);
+                colors[offset + 1] = Math.min(1, colors[offset + 1] * 0.65 + 0.35);
+                colors[offset + 2] = Math.min(1, colors[offset + 2] * 0.65 + 0.35);
+            }
+            if (i === selectedTileIndex) {
+                colors[offset + 0] = Math.min(1, colors[offset + 0] * 0.35 + 0.65);
+                colors[offset + 1] = Math.min(1, colors[offset + 1] * 0.35 + 0.55);
+                colors[offset + 2] = Math.min(1, colors[offset + 2] * 0.35 + 0.10);
             }
         }
     }
@@ -437,21 +540,31 @@ export class MicrocosmRenderer {
         const cellY = views.cellY && views.cellY.array();
         const cellEnergy = views.cellEnergy && views.cellEnergy.array();
         const cellLineage = views.cellLineage && views.cellLineage.array();
+        const cellId = views.cellId && views.cellId.array();
         for (let i = 0; i < count; i++) {
             const offset = i * 4;
             const x = cellX ? cellX[i] : 0;
             const y = cellY ? cellY[i] : 0;
             const lineage = cellLineage ? cellLineage[i] : 0;
+            const id = cellId ? cellId[i] : 0;
             const color = lineageRgb01(lineage, this._lineageRgbCache);
-            const selected = this._selectedLineage === null || this._selectedLineage === (Number(lineage) >>> 0);
+            const lineageSelected = this._selectedLineage === null || this._selectedLineage === (Number(lineage) >>> 0);
+            const cellSelected = this._selectedCellId !== null && this._selectedCellId === (Number(id) >>> 0);
             points[offset + 0] = x + 0.5 - this._width * 0.5;
             points[offset + 1] = this._height * 0.5 - y - 0.5;
             points[offset + 2] = 1;
             points[offset + 3] = cellEnergy ? cellEnergy[i] : 0;
-            colors[offset + 0] = color[0];
-            colors[offset + 1] = color[1];
-            colors[offset + 2] = color[2];
-            colors[offset + 3] = selected ? 1.0 : 0.20;
+            if (cellSelected) {
+                colors[offset + 0] = 1.0;
+                colors[offset + 1] = 0.93;
+                colors[offset + 2] = 0.30;
+                colors[offset + 3] = 1.0;
+            } else {
+                colors[offset + 0] = color[0];
+                colors[offset + 1] = color[1];
+                colors[offset + 2] = color[2];
+                colors[offset + 3] = lineageSelected ? 1.0 : 0.20;
+            }
         }
         this._wgpu.gpu.queue.writeBuffer(layer.pointsBuffer, 0, points.buffer, points.byteOffset, points.byteLength);
         this._wgpu.gpu.queue.writeBuffer(layer.colorsBuffer, 0, colors.buffer, colors.byteOffset, colors.byteLength);

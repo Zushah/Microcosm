@@ -110,6 +110,10 @@ pub struct CellInspection {
     pub combat_attack_total: u32,
     pub combat_defense_total: u32,
     pub age_seconds: f64,
+    pub optimal_enval: f32,
+    pub local_enval_average: f32,
+    pub repro_threshold: f64,
+    pub decay_time: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1074,6 +1078,10 @@ impl World {
             combat_attack_total: cell.combat_attack_total,
             combat_defense_total: cell.combat_defense_total,
             age_seconds: (self.sim_time_seconds - cell.birth_sim_time).max(0.0),
+            optimal_enval: cell.genome.optimal_enval,
+            local_enval_average: self.default_local_enval_average(tile_id).unwrap_or(0.0),
+            repro_threshold: cell.genome.repro_threshold,
+            decay_time: cell.genome.decay_time,
         })
     }
 

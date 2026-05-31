@@ -1,8 +1,11 @@
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::{Mutex, OnceLock};
 
-use microcosmcore::{Config, MoleculeSeedingConfig, RenderBuffers, World, WorldStats, VERSION};
+use microcosmcore::{
+    CellId, Config, MoleculeSeedingConfig, RenderBuffers, World, WorldStats, VERSION,
+};
 use serde::Deserialize;
+use serde_json::json;
 
 pub const ABI_VERSION: &str = VERSION;
 pub const STATUS_OK: u32 = 0;
@@ -249,6 +252,7 @@ impl WasmInstance {
 struct WasmRuntime {
     instances: Vec<Option<Box<WasmInstance>>>,
     last_error: Vec<u8>,
+    query_result: Vec<u8>,
 }
 
 impl WasmRuntime {
@@ -318,6 +322,23 @@ fn set_last_error(status: u32, message: impl Into<String>) -> u32 {
     }
 }
 
+fn set_runtime_error(runtime: &mut WasmRuntime, status: u32, message: impl Into<String>) -> u32 {
+    runtime.last_error = message.into().into_bytes();
+    runtime.query_result.clear();
+    status
+}
+
+fn set_query_result(runtime: &mut WasmRuntime, value: serde_json::Value) -> u32 {
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => {
+            runtime.query_result = bytes;
+            runtime.last_error.clear();
+            STATUS_OK
+        }
+        Err(err) => set_runtime_error(runtime, STATUS_WORLD_ERROR, err.to_string()),
+    }
+}
+
 fn clamp_usize_to_u32(value: usize) -> u32 {
     value.min(u32::MAX as usize) as u32
 }
@@ -359,6 +380,22 @@ pub extern "C" fn microcosm_last_error_ptr() -> *const u8 {
 pub extern "C" fn microcosm_last_error_len() -> usize {
     match lock_runtime() {
         Ok(runtime) => runtime.last_error.len(),
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_query_result_ptr() -> *const u8 {
+    match lock_runtime() {
+        Ok(runtime) => runtime.query_result.as_ptr(),
+        Err(_) => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_query_result_len() -> usize {
+    match lock_runtime() {
+        Ok(runtime) => runtime.query_result.len(),
         Err(_) => 0,
     }
 }
@@ -532,6 +569,198 @@ pub extern "C" fn microcosm_render_epoch(handle: u32) -> u32 {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let Some(info) = instance.world.inspect_tile_xy(x as usize, y as usize) else {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_WORLD_ERROR,
+                    format!("no tile at ({x}, {y})"),
+                );
+            };
+            set_query_result(
+                &mut runtime,
+                json!({
+                    "kind": "tile",
+                    "tile_id": info.tile_id.index(),
+                    "x": info.x,
+                    "y": info.y,
+                    "enval": info.enval,
+                    "cell_id": info.cell.map(|cell_id| cell_id.index()),
+                    "occupied": info.cell.is_some(),
+                    "molecule_count": info.molecule_count,
+                    "mass_count": info.mass_count,
+                    "element_counts": {
+                        "A": info.element_counts[0],
+                        "B": info.element_counts[1],
+                        "C": info.element_counts[2],
+                        "D": info.element_counts[3],
+                        "E": info.element_counts[4],
+                        "F": info.element_counts[5]
+                    },
+                    "element_mask": info.element_mask
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let Some(info) = instance.world.inspect_cell(CellId(cell_id as usize)) else {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_WORLD_ERROR,
+                    format!("no active cell with id {cell_id}"),
+                );
+            };
+            set_query_result(
+                &mut runtime,
+                json!({
+                    "kind": "cell",
+                    "cell_id": info.cell_id.index(),
+                    "tile_id": info.tile_id.index(),
+                    "x": info.x,
+                    "y": info.y,
+                    "energy": info.energy,
+                    "lineage_id": info.lineage_id.raw(),
+                    "enzyme_count": info.enzyme_count,
+                    "internal_atom_count": info.internal_atom_count,
+                    "combat_attack_total": info.combat_attack_total,
+                    "combat_defense_total": info.combat_defense_total,
+                    "age_seconds": info.age_seconds,
+                    "optimal_enval": info.optimal_enval,
+                    "local_enval_average": info.local_enval_average,
+                    "repro_threshold": info.repro_threshold,
+                    "decay_time": info.decay_time
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_set_tile_enval(handle: u32, x: u32, y: u32, value: f32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance_mut(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let result: Result<(), String> = (|| {
+                let tile_id = instance
+                    .world
+                    .tile_id(x as usize, y as usize)
+                    .ok_or_else(|| format!("no tile at ({x}, {y})"))?;
+                instance
+                    .world
+                    .set_tile_enval(tile_id, value)
+                    .map_err(|err| err.to_string())?;
+                instance.refresh_stats();
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    runtime.last_error.clear();
+                    STATUS_OK
+                }
+                Err(err) => set_runtime_error(&mut runtime, STATUS_WORLD_ERROR, err),
+            }
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_adjust_tile_enval(handle: u32, x: u32, y: u32, delta: f32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance_mut(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let result: Result<(), String> = (|| {
+                let tile_id = instance
+                    .world
+                    .tile_id(x as usize, y as usize)
+                    .ok_or_else(|| format!("no tile at ({x}, {y})"))?;
+                instance
+                    .world
+                    .adjust_tile_enval(tile_id, delta)
+                    .map_err(|err| err.to_string())?;
+                instance.refresh_stats();
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    runtime.last_error.clear();
+                    STATUS_OK
+                }
+                Err(err) => set_runtime_error(&mut runtime, STATUS_WORLD_ERROR, err),
+            }
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_brush_enval_rect(
+    handle: u32,
+    center_x: u32,
+    center_y: u32,
+    brush_width: u32,
+    brush_height: u32,
+    delta: f32,
+) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance_mut(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let result: Result<(), String> = (|| {
+                if !delta.is_finite() {
+                    return Err(format!("non-finite enval brush delta {delta}"));
+                }
+                let width = (brush_width as usize).min(instance.world.width()).max(1);
+                let height = (brush_height as usize).min(instance.world.height()).max(1);
+                let start_x = center_x as isize - (width as isize / 2);
+                let start_y = center_y as isize - (height as isize / 2);
+                for dx in 0..width {
+                    for dy in 0..height {
+                        let tile_id = instance
+                            .world
+                            .wrapped_tile_id(start_x + dx as isize, start_y + dy as isize);
+                        instance
+                            .world
+                            .adjust_tile_enval(tile_id, delta)
+                            .map_err(|err| err.to_string())?;
+                    }
+                }
+                instance.refresh_stats();
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    runtime.last_error.clear();
+                    STATUS_OK
+                }
+                Err(err) => set_runtime_error(&mut runtime, STATUS_WORLD_ERROR, err),
+            }
+        }
+        Err(err) => err,
+    }
+}
+
 macro_rules! ptr_fn {
     ($name:ident, $field:ident, $ty:ty) => {
         #[no_mangle]
@@ -643,6 +872,25 @@ mod tests {
             "0.17.2"
         );
         assert_eq!(microcosm_stats_size(), std::mem::size_of::<WasmStats>());
+    }
+
+    #[test]
+    fn inspection_and_enval_edit_exports_work() {
+        let json = br#"{"seed":"wasm-inspect","width":8,"height":6,"initial_cells":4}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+        assert_eq!(microcosm_inspect_tile(handle, 0, 0), STATUS_OK);
+        assert!(microcosm_query_result_len() > 0);
+        assert!(!microcosm_query_result_ptr().is_null());
+        let before = unsafe { *microcosm_stats_ptr(handle) }.average_enval;
+        assert_eq!(microcosm_adjust_tile_enval(handle, 0, 0, 1.0), STATUS_OK);
+        assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
+        let after = unsafe { *microcosm_stats_ptr(handle) }.average_enval;
+        assert!(after > before);
+        assert_eq!(microcosm_brush_enval_rect(handle, 0, 0, 2, 2, -0.25), STATUS_OK);
+        assert_eq!(microcosm_inspect_cell(handle, 0), STATUS_OK);
+        assert!(microcosm_query_result_len() > 0);
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 
     #[test]
