@@ -30,8 +30,10 @@ pub use stats::{
     WorldStats, ENZYME_COUNT_HISTOGRAM_LEN,
 };
 pub use world::{
-    CellInspection, InvariantError, LineageCounters, MoleculeId, MoleculeOwner, NeighborIndices,
-    TileId, TileInspection, World, WorldError,
+    CellDetailInspection, CellInspection, EnzymeDetailInspection, GenomeDetailInspection,
+    InvariantError, LineageCounters, LineageListInspection, LineageSummaryInspection,
+    MoleculeDetailInspection, MoleculeId, MoleculeListInspection, MoleculeOwner, NeighborIndices,
+    ReactionLogInspection, TileId, TileInspection, World, WorldError,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

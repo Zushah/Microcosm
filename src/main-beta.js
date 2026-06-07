@@ -78,6 +78,7 @@ const stepRuntime = (steps) => {
 const resetRuntime = () => {
     if (!runtime || !renderer) return;
     gui.clearError();
+    gui.forceRefreshDetails();
     const config = buildConfig();
     runtime.reset(config);
     window.history.replaceState(null, "", seedUrl(config.seed).toString());
@@ -206,7 +207,9 @@ gui.bindControls({
     brush: (options) => { try { if (interaction) interaction.setBrushOptions(options); } catch (error) { gui.setError(error); } },
     brushPreview: (options) => { try { if (interaction) interaction.setBrushOptions(options); } catch (error) { gui.setError(error); } },
     clearSelection: () => { try { if (interaction) interaction.clearSelection(); } catch (error) { gui.setError(error); } },
-    clearLineage: () => { try { if (interaction) interaction.clearLineageSelection(); } catch (error) { gui.setError(error); } }
+    clearLineage: () => { try { if (interaction) interaction.clearLineageSelection(); } catch (error) { gui.setError(error); } },
+    refreshDetails: () => { try { updateGui(); } catch (error) { gui.setError(error); } },
+    selectLineage: (lineageId) => { try { if (interaction) interaction.selectLineage(lineageId); } catch (error) { gui.setError(error); } }
 });
 
 window.addEventListener("beforeunload", () => {

@@ -43,6 +43,13 @@ const CELL_VIEW_DEFINITIONS = Object.freeze([
 
 const VIEW_DEFINITIONS = Object.freeze([...TILE_VIEW_DEFINITIONS, ...CELL_VIEW_DEFINITIONS]);
 
+const DEFAULT_CELL_MOLECULE_LIMIT = 64;
+const DEFAULT_CELL_REACTION_LIMIT = 32;
+const DEFAULT_LINEAGE_LIMIT = 64;
+const MAX_CELL_MOLECULE_LIMIT = 256;
+const MAX_CELL_REACTION_LIMIT = 128;
+const MAX_LINEAGE_LIMIT = 512;
+
 const STATS_FIELD_TYPES = Object.freeze([
     ["tick_count", "u64"],
     ["sim_time_seconds", "f64"],
@@ -152,6 +159,13 @@ const camelStatName = (name) => name.replace(/_([a-z])/g, (_, letter) => letter.
 const readUintStatus = (value) => Number(value) >>> 0;
 
 const assertPositiveInteger = (value, label) => { const number = Number(value); if (!Number.isInteger(number) || number <= 0) throw new Error(`${label} must be a positive integer.`); return number; };
+
+const normalizeLimit = (value, fallback, max, label) => {
+    if (value === undefined || value === null || value === 0) return fallback;
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0) throw new Error(`${label} must be a non-negative integer.`);
+    return Math.min(max, number);
+};
 
 const isPlainObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -310,6 +324,50 @@ export class MicrocosmRuntime {
         return this.readQueryResult("microcosm.inspect_cell");
     }
 
+    inspectCellDetail(cellId, options = {}) {
+        this.assertReady();
+        const id = Math.max(0, Number(cellId) | 0);
+        const moleculeLimit = normalizeLimit(options.moleculeLimit, DEFAULT_CELL_MOLECULE_LIMIT, MAX_CELL_MOLECULE_LIMIT, "moleculeLimit");
+        const reactionLimit = normalizeLimit(options.reactionLimit, DEFAULT_CELL_REACTION_LIMIT, MAX_CELL_REACTION_LIMIT, "reactionLimit");
+        const status = readUintStatus(this._functions.inspectCellDetail(this._handle, id, moleculeLimit, reactionLimit));
+        this.assertStatus(status, "microcosm_inspect_cell_detail");
+        return this.readQueryResult("microcosm.inspect_cell_detail");
+    }
+
+    inspectCellMolecules(cellId, options = {}) {
+        this.assertReady();
+        const id = Math.max(0, Number(cellId) | 0);
+        const moleculeLimit = normalizeLimit(options.limit ?? options.moleculeLimit, DEFAULT_CELL_MOLECULE_LIMIT, MAX_CELL_MOLECULE_LIMIT, "moleculeLimit");
+        const status = readUintStatus(this._functions.inspectCellMolecules(this._handle, id, moleculeLimit));
+        this.assertStatus(status, "microcosm_inspect_cell_molecules");
+        return this.readQueryResult("microcosm.inspect_cell_molecules");
+    }
+
+    inspectCellReactions(cellId, options = {}) {
+        this.assertReady();
+        const id = Math.max(0, Number(cellId) | 0);
+        const reactionLimit = normalizeLimit(options.limit ?? options.reactionLimit, DEFAULT_CELL_REACTION_LIMIT, MAX_CELL_REACTION_LIMIT, "reactionLimit");
+        const status = readUintStatus(this._functions.inspectCellReactions(this._handle, id, reactionLimit));
+        this.assertStatus(status, "microcosm_inspect_cell_reactions");
+        return this.readQueryResult("microcosm.inspect_cell_reactions");
+    }
+
+    inspectLineage(lineageId) {
+        this.assertReady();
+        const id = Math.max(0, Number(lineageId) >>> 0);
+        const status = readUintStatus(this._functions.inspectLineage(this._handle, id));
+        this.assertStatus(status, "microcosm_inspect_lineage");
+        return this.readQueryResult("microcosm.inspect_lineage");
+    }
+
+    listLineages(options = {}) {
+        this.assertReady();
+        const limit = normalizeLimit(options.limit, DEFAULT_LINEAGE_LIMIT, MAX_LINEAGE_LIMIT, "lineage limit");
+        const status = readUintStatus(this._functions.listLineages(this._handle, limit));
+        this.assertStatus(status, "microcosm_list_lineages");
+        return this.readQueryResult("microcosm.list_lineages");
+    }
+
     setTileEnval(x, y, value, options = {}) {
         this.assertReady();
         const status = readUintStatus(this._functions.setTileEnval(this._handle, Number(x) >>> 0, Number(y) >>> 0, Number(value)));
@@ -381,6 +439,11 @@ export class MicrocosmRuntime {
             queryResultLen: get("microcosm_query_result_len"),
             inspectTile: get("microcosm_inspect_tile"),
             inspectCell: get("microcosm_inspect_cell"),
+            inspectCellDetail: get("microcosm_inspect_cell_detail"),
+            inspectCellMolecules: get("microcosm_inspect_cell_molecules"),
+            inspectCellReactions: get("microcosm_inspect_cell_reactions"),
+            inspectLineage: get("microcosm_inspect_lineage"),
+            listLineages: get("microcosm_list_lineages"),
             setTileEnval: get("microcosm_set_tile_enval"),
             adjustTileEnval: get("microcosm_adjust_tile_enval"),
             brushEnvalRect: get("microcosm_brush_enval_rect")

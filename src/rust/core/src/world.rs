@@ -9,7 +9,7 @@ use crate::bio::{self, GenomeReactionContext, ReactionEnv};
 use crate::cell::{Cell, CellCountError, CellId, CellState};
 use crate::chem::{Composition, Element, ELEMENT_COUNT, ELEMENT_ORDER};
 use crate::config::{Config, ConfigError};
-use crate::genome::{EnzymeType, Genome, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES};
+use crate::genome::{Enzyme, EnzymeType, Genome, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES};
 use crate::molecule::{Molecule, MoleculeError};
 use crate::render_buffers::{RenderBuffers, EMPTY_CELL_ID};
 use crate::rng::Rng;
@@ -84,7 +84,7 @@ pub struct LineageCounters {
     pub population: u64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TileInspection {
     pub tile_id: TileId,
     pub x: usize,
@@ -97,7 +97,7 @@ pub struct TileInspection {
     pub element_mask: u8,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CellInspection {
     pub cell_id: CellId,
     pub tile_id: TileId,
@@ -114,6 +114,121 @@ pub struct CellInspection {
     pub local_enval_average: f32,
     pub repro_threshold: f64,
     pub decay_time: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MoleculeDetailInspection {
+    pub list_index: usize,
+    pub molecule_id: usize,
+    pub composition_counts: [u16; ELEMENT_COUNT],
+    pub formula: String,
+    pub size: u16,
+    pub element_mask: u8,
+    pub bond_multiplier: f32,
+    pub elemental_energy_sum: f32,
+    pub energy: f32,
+    pub polarity: f32,
+    pub diffusion_rate: f32,
+    pub diffusion_period: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MoleculeListInspection {
+    pub molecule_count: usize,
+    pub atom_count: u32,
+    pub element_counts: [u32; ELEMENT_COUNT],
+    pub limit: usize,
+    pub truncated: bool,
+    pub molecules: Vec<MoleculeDetailInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EnzymeDetailInspection {
+    pub index: usize,
+    pub enzyme_type: &'static str,
+    pub is_metabolic: bool,
+    pub is_combat: bool,
+    pub specificity_mask: u8,
+    pub specificity_elements: Vec<&'static str>,
+    pub bond_multiplier: f32,
+    pub bond_cost_fraction: f32,
+    pub bond_harvest_fraction: f32,
+    pub downhill_harvest_fraction: f32,
+    pub secretion_prob: f32,
+    pub enval_sigma: f32,
+    pub enval_throughput: f32,
+    pub enval_energy_fraction: f32,
+    pub enval_release_fraction: f32,
+    pub enval_pump: f32,
+    pub combat_level: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GenomeDetailInspection {
+    pub optimal_enval: f32,
+    pub repro_threshold: f64,
+    pub initial_energy: f64,
+    pub decay_time: f64,
+    pub default_secretion_prob: f32,
+    pub mutation_rate: f32,
+    pub post_divide_mortality: f32,
+    pub desired_element_reserve: u32,
+    pub enval_stress_factor: f64,
+    pub enval_mutation_floor: f32,
+    pub maintenance_cost_per_sec: f64,
+    pub lineage_id: LineageId,
+    pub enzyme_count: usize,
+    pub min_cell_enzymes: usize,
+    pub max_cell_enzymes: usize,
+    pub enzymes: Vec<EnzymeDetailInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ReactionLogInspection {
+    pub available: bool,
+    pub reason: &'static str,
+    pub limit: usize,
+    pub truncated: bool,
+    pub reactions: Vec<()>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CellDetailInspection {
+    pub cell: CellInspection,
+    pub state: &'static str,
+    pub time_without_food: f64,
+    pub maintenance_cost_per_sec: f64,
+    pub death_sim_time: Option<f64>,
+    pub genome: GenomeDetailInspection,
+    pub internal: MoleculeListInspection,
+    pub recent_reactions: ReactionLogInspection,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LineageSummaryInspection {
+    pub lineage_id: LineageId,
+    pub population: u64,
+    pub births: u64,
+    pub deaths: u64,
+    pub extinct: bool,
+    pub share: f64,
+    pub average_energy: f64,
+    pub average_enzyme_count: f64,
+    pub average_attack_total: f64,
+    pub average_defense_total: f64,
+    pub max_attack_total: u32,
+    pub max_defense_total: u32,
+    pub cells_with_attackase: u64,
+    pub cells_with_defensase: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LineageListInspection {
+    pub extant_lineage_count: usize,
+    pub total_lineage_records: usize,
+    pub limit: usize,
+    pub truncated: bool,
+    pub lineages: Vec<LineageSummaryInspection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1083,6 +1198,180 @@ impl World {
             repro_threshold: cell.genome.repro_threshold,
             decay_time: cell.genome.decay_time,
         })
+    }
+
+    pub fn inspect_cell_detail(
+        &self,
+        cell_id: CellId,
+        molecule_limit: usize,
+        reaction_limit: usize,
+    ) -> Option<CellDetailInspection> {
+        let cell = self.cells.get(cell_id.index())?;
+        if cell.state != CellState::Active {
+            return None;
+        }
+        let summary = self.inspect_cell(cell_id)?;
+        Some(CellDetailInspection {
+            cell: summary,
+            state: cell_state_label(cell.state),
+            time_without_food: cell.time_without_food,
+            maintenance_cost_per_sec: cell.maintenance_cost_per_sec,
+            death_sim_time: cell.death_sim_time,
+            genome: inspect_genome(&cell.genome),
+            internal: self.inspect_cell_molecules(cell_id, molecule_limit)?,
+            recent_reactions: self.inspect_cell_reactions(cell_id, reaction_limit)?,
+        })
+    }
+
+    pub fn inspect_cell_molecules(
+        &self,
+        cell_id: CellId,
+        limit: usize,
+    ) -> Option<MoleculeListInspection> {
+        let cell = self.cells.get(cell_id.index())?;
+        if cell.state != CellState::Active {
+            return None;
+        }
+        let molecules = cell
+            .molecules
+            .iter()
+            .copied()
+            .take(limit)
+            .enumerate()
+            .filter_map(|(list_index, molecule_id)| {
+                self.molecules
+                    .get(molecule_id.index())
+                    .map(|record| inspect_molecule(list_index, molecule_id, record))
+            })
+            .collect::<Vec<_>>();
+        Some(MoleculeListInspection {
+            molecule_count: cell.molecules.len(),
+            atom_count: cell.internal_atom_count,
+            element_counts: cell.internal_element_counts,
+            limit,
+            truncated: cell.molecules.len() > limit,
+            molecules,
+        })
+    }
+
+    pub fn inspect_cell_reactions(
+        &self,
+        cell_id: CellId,
+        limit: usize,
+    ) -> Option<ReactionLogInspection> {
+        let cell = self.cells.get(cell_id.index())?;
+        if cell.state != CellState::Active {
+            return None;
+        }
+        Some(ReactionLogInspection {
+            available: false,
+            reason: "not_recorded",
+            limit,
+            truncated: false,
+            reactions: Vec::new(),
+        })
+    }
+
+    pub fn inspect_lineage(&self, lineage_id: LineageId) -> Option<LineageSummaryInspection> {
+        let counters = *self.lineage_counters.get(&lineage_id)?;
+        Some(self.lineage_summary(lineage_id, counters))
+    }
+
+    pub fn list_lineages(&self, limit: usize) -> LineageListInspection {
+        let extant_lineage_count = self.extant_lineage_count();
+        let entries = self.top_lineages(limit);
+        let lineages = entries
+            .into_iter()
+            .map(|(lineage_id, counters)| self.lineage_summary(lineage_id, counters))
+            .collect::<Vec<_>>();
+        LineageListInspection {
+            extant_lineage_count,
+            total_lineage_records: self.lineage_counters.len(),
+            limit,
+            truncated: extant_lineage_count > limit,
+            lineages,
+        }
+    }
+
+    fn lineage_summary(
+        &self,
+        lineage_id: LineageId,
+        counters: LineageCounters,
+    ) -> LineageSummaryInspection {
+        let mut live_count = 0_u64;
+        let mut energy_sum = 0.0_f64;
+        let mut enzyme_sum = 0_u64;
+        let mut attack_sum = 0_u64;
+        let mut defense_sum = 0_u64;
+        let mut max_attack_total = 0_u32;
+        let mut max_defense_total = 0_u32;
+        let mut cells_with_attackase = 0_u64;
+        let mut cells_with_defensase = 0_u64;
+        for cell_id in self.active_cells.iter().copied() {
+            let Some(cell) = self.cells.get(cell_id.index()) else {
+                continue;
+            };
+            if cell.state != CellState::Active || cell.lineage_id != lineage_id {
+                continue;
+            }
+            live_count = live_count.saturating_add(1);
+            energy_sum += cell.energy;
+            enzyme_sum = enzyme_sum.saturating_add(cell.genome.enzymes.len() as u64);
+            attack_sum = attack_sum.saturating_add(u64::from(cell.combat_attack_total));
+            defense_sum = defense_sum.saturating_add(u64::from(cell.combat_defense_total));
+            max_attack_total = max_attack_total.max(cell.combat_attack_total);
+            max_defense_total = max_defense_total.max(cell.combat_defense_total);
+            if cell
+                .genome
+                .enzymes
+                .iter()
+                .any(|enzyme| enzyme.enzyme_type == EnzymeType::Attackase)
+            {
+                cells_with_attackase = cells_with_attackase.saturating_add(1);
+            }
+            if cell
+                .genome
+                .enzymes
+                .iter()
+                .any(|enzyme| enzyme.enzyme_type == EnzymeType::Defensase)
+            {
+                cells_with_defensase = cells_with_defensase.saturating_add(1);
+            }
+        }
+        let denominator = live_count.max(1) as f64;
+        let total_live_cells = self.active_cells.len().max(1) as f64;
+        LineageSummaryInspection {
+            lineage_id,
+            population: counters.population,
+            births: counters.births,
+            deaths: counters.deaths,
+            extinct: counters.population == 0,
+            share: counters.population as f64 / total_live_cells,
+            average_energy: if live_count > 0 {
+                energy_sum / denominator
+            } else {
+                0.0
+            },
+            average_enzyme_count: if live_count > 0 {
+                enzyme_sum as f64 / denominator
+            } else {
+                0.0
+            },
+            average_attack_total: if live_count > 0 {
+                attack_sum as f64 / denominator
+            } else {
+                0.0
+            },
+            average_defense_total: if live_count > 0 {
+                defense_sum as f64 / denominator
+            } else {
+                0.0
+            },
+            max_attack_total,
+            max_defense_total,
+            cells_with_attackase,
+            cells_with_defensase,
+        }
     }
 
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
@@ -2742,6 +3031,111 @@ impl World {
             return Err(InvariantError::NonFiniteMoleculeState(molecule_id));
         }
         Ok(())
+    }
+}
+
+fn cell_state_label(state: CellState) -> &'static str {
+    match state {
+        CellState::Active => "active",
+        CellState::Dead => "dead",
+    }
+}
+
+fn inspect_genome(genome: &Genome) -> GenomeDetailInspection {
+    GenomeDetailInspection {
+        optimal_enval: genome.optimal_enval,
+        repro_threshold: genome.repro_threshold,
+        initial_energy: genome.initial_energy,
+        decay_time: genome.decay_time,
+        default_secretion_prob: genome.default_secretion_prob,
+        mutation_rate: genome.mutation_rate,
+        post_divide_mortality: genome.post_divide_mortality,
+        desired_element_reserve: genome.desired_element_reserve,
+        enval_stress_factor: genome.enval_stress_factor,
+        enval_mutation_floor: genome.enval_mutation_floor,
+        maintenance_cost_per_sec: genome.maintenance_cost_per_sec,
+        lineage_id: genome.lineage_id,
+        enzyme_count: genome.enzymes.len(),
+        min_cell_enzymes: MIN_CELL_ENZYMES,
+        max_cell_enzymes: MAX_CELL_ENZYMES,
+        enzymes: genome
+            .enzymes
+            .iter()
+            .enumerate()
+            .map(|(index, enzyme)| inspect_enzyme(index, enzyme))
+            .collect(),
+    }
+}
+
+fn inspect_enzyme(index: usize, enzyme: &Enzyme) -> EnzymeDetailInspection {
+    EnzymeDetailInspection {
+        index,
+        enzyme_type: enzyme.enzyme_type.as_str(),
+        is_metabolic: enzyme.enzyme_type.is_metabolic(),
+        is_combat: enzyme.enzyme_type.is_combat(),
+        specificity_mask: enzyme.specificity_mask,
+        specificity_elements: specificity_elements(enzyme.specificity_mask),
+        bond_multiplier: enzyme.bond_multiplier,
+        bond_cost_fraction: enzyme.bond_cost_fraction,
+        bond_harvest_fraction: enzyme.bond_harvest_fraction,
+        downhill_harvest_fraction: enzyme.downhill_harvest_fraction,
+        secretion_prob: enzyme.secretion_prob,
+        enval_sigma: enzyme.enval_sigma,
+        enval_throughput: enzyme.enval_throughput,
+        enval_energy_fraction: enzyme.enval_energy_fraction,
+        enval_release_fraction: enzyme.enval_release_fraction,
+        enval_pump: enzyme.enval_pump,
+        combat_level: enzyme.combat_level,
+    }
+}
+
+fn specificity_elements(mask: u8) -> Vec<&'static str> {
+    ELEMENT_ORDER
+        .iter()
+        .copied()
+        .filter(|element| mask & element.mask() != 0)
+        .map(|element| element.symbol())
+        .collect()
+}
+
+fn inspect_molecule(
+    list_index: usize,
+    molecule_id: MoleculeId,
+    record: &MoleculeRecord,
+) -> MoleculeDetailInspection {
+    let molecule = record.molecule;
+    MoleculeDetailInspection {
+        list_index,
+        molecule_id: molecule_id.index(),
+        composition_counts: *molecule.composition.counts(),
+        formula: composition_formula(molecule.composition),
+        size: molecule.size,
+        element_mask: molecule.element_mask,
+        bond_multiplier: molecule.bond_multiplier,
+        elemental_energy_sum: molecule.elemental_energy_sum,
+        energy: molecule.energy,
+        polarity: molecule.polarity,
+        diffusion_rate: molecule.diffusion_rate,
+        diffusion_period: molecule.diffusion_period,
+    }
+}
+
+fn composition_formula(composition: Composition) -> String {
+    let mut formula = String::new();
+    for element in ELEMENT_ORDER {
+        let count = composition.count(element);
+        if count == 0 {
+            continue;
+        }
+        formula.push_str(element.symbol());
+        if count > 1 {
+            formula.push_str(&count.to_string());
+        }
+    }
+    if formula.is_empty() {
+        "empty".to_owned()
+    } else {
+        formula
     }
 }
 

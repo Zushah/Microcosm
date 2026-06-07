@@ -117,6 +117,13 @@ export class MicrocosmInteraction {
         this.notifyChange();
     }
 
+    selectLineage(lineageId) {
+        const parsed = Number(lineageId);
+        this.selectedLineageId = Number.isFinite(parsed) ? (parsed >>> 0) : null;
+        this.syncRendererState();
+        this.notifyChange();
+    }
+
     refreshSelection() {
         if (!this.runtime || !this.runtime.ready) return;
         try {

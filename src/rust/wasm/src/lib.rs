@@ -2,9 +2,9 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, MoleculeSeedingConfig, RenderBuffers, World, WorldStats, VERSION,
+    CellId, Config, LineageId, MoleculeSeedingConfig, RenderBuffers, World, WorldStats, VERSION,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub const ABI_VERSION: &str = VERSION;
@@ -15,6 +15,13 @@ pub const STATUS_CONFIG_ERROR: u32 = 3;
 pub const STATUS_WORLD_ERROR: u32 = 4;
 pub const STATUS_LOCK_ERROR: u32 = 5;
 pub const STATUS_ALLOC_ERROR: u32 = 6;
+
+const DEFAULT_CELL_MOLECULE_LIMIT: usize = 64;
+const DEFAULT_CELL_REACTION_LIMIT: usize = 32;
+const DEFAULT_LINEAGE_LIMIT: usize = 64;
+const MAX_CELL_MOLECULE_LIMIT: usize = 256;
+const MAX_CELL_REACTION_LIMIT: usize = 128;
+const MAX_LINEAGE_LIMIT: usize = 512;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -339,6 +346,25 @@ fn set_query_result(runtime: &mut WasmRuntime, value: serde_json::Value) -> u32 
     }
 }
 
+fn set_serialized_query_result<T: Serialize>(runtime: &mut WasmRuntime, value: T) -> u32 {
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => {
+            runtime.query_result = bytes;
+            runtime.last_error.clear();
+            STATUS_OK
+        }
+        Err(err) => set_runtime_error(runtime, STATUS_WORLD_ERROR, err.to_string()),
+    }
+}
+
+fn clamp_query_limit(value: u32, default_value: usize, max_value: usize) -> usize {
+    if value == 0 {
+        default_value
+    } else {
+        (value as usize).min(max_value)
+    }
+}
+
 fn clamp_usize_to_u32(value: usize) -> u32 {
     value.min(u32::MAX as usize) as u32
 }
@@ -652,6 +678,184 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn microcosm_inspect_cell_detail(
+    handle: u32,
+    cell_id: u32,
+    molecule_limit: u32,
+    reaction_limit: u32,
+) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let molecule_limit = clamp_query_limit(
+                molecule_limit,
+                DEFAULT_CELL_MOLECULE_LIMIT,
+                MAX_CELL_MOLECULE_LIMIT,
+            );
+            let reaction_limit = clamp_query_limit(
+                reaction_limit,
+                DEFAULT_CELL_REACTION_LIMIT,
+                MAX_CELL_REACTION_LIMIT,
+            );
+            let Some(info) = instance.world.inspect_cell_detail(
+                CellId(cell_id as usize),
+                molecule_limit,
+                reaction_limit,
+            ) else {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_WORLD_ERROR,
+                    format!("no active cell with id {cell_id}"),
+                );
+            };
+            set_serialized_query_result(
+                &mut runtime,
+                json!({
+                    "schema": "microcosm.cell_detail.v1",
+                    "kind": "cell_detail",
+                    "cell_detail": info
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_inspect_cell_molecules(
+    handle: u32,
+    cell_id: u32,
+    molecule_limit: u32,
+) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let molecule_limit = clamp_query_limit(
+                molecule_limit,
+                DEFAULT_CELL_MOLECULE_LIMIT,
+                MAX_CELL_MOLECULE_LIMIT,
+            );
+            let Some(info) = instance
+                .world
+                .inspect_cell_molecules(CellId(cell_id as usize), molecule_limit)
+            else {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_WORLD_ERROR,
+                    format!("no active cell with id {cell_id}"),
+                );
+            };
+            set_serialized_query_result(
+                &mut runtime,
+                json!({
+                    "schema": "microcosm.cell_molecules.v1",
+                    "kind": "cell_molecules",
+                    "cell_id": cell_id,
+                    "internal": info
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_inspect_cell_reactions(
+    handle: u32,
+    cell_id: u32,
+    reaction_limit: u32,
+) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let reaction_limit = clamp_query_limit(
+                reaction_limit,
+                DEFAULT_CELL_REACTION_LIMIT,
+                MAX_CELL_REACTION_LIMIT,
+            );
+            let Some(info) = instance
+                .world
+                .inspect_cell_reactions(CellId(cell_id as usize), reaction_limit)
+            else {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_WORLD_ERROR,
+                    format!("no active cell with id {cell_id}"),
+                );
+            };
+            set_serialized_query_result(
+                &mut runtime,
+                json!({
+                    "schema": "microcosm.cell_reactions.v1",
+                    "kind": "cell_reactions",
+                    "cell_id": cell_id,
+                    "recent_reactions": info
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_inspect_lineage(handle: u32, lineage_id: u32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let Some(info) = instance
+                .world
+                .inspect_lineage(LineageId(u64::from(lineage_id)))
+            else {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_WORLD_ERROR,
+                    format!("no lineage with id {lineage_id}"),
+                );
+            };
+            set_serialized_query_result(
+                &mut runtime,
+                json!({
+                    "schema": "microcosm.lineage.v1",
+                    "kind": "lineage",
+                    "lineage": info
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_list_lineages(handle: u32, limit: u32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let limit = clamp_query_limit(limit, DEFAULT_LINEAGE_LIMIT, MAX_LINEAGE_LIMIT);
+            let info = instance.world.list_lineages(limit);
+            set_serialized_query_result(
+                &mut runtime,
+                json!({
+                    "schema": "microcosm.lineage_list.v1",
+                    "kind": "lineage_list",
+                    "lineage_list": info
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn microcosm_set_tile_enval(handle: u32, x: u32, y: u32, value: f32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -802,6 +1006,14 @@ mod tests {
         std::str::from_utf8(bytes).unwrap().to_owned()
     }
 
+    fn query_json() -> serde_json::Value {
+        serde_json::from_str(&exported_string(
+            microcosm_query_result_ptr(),
+            microcosm_query_result_len(),
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn empty_config_uses_default_world() {
         let config = parse_config_from_bytes(std::ptr::null(), 0).unwrap();
@@ -887,9 +1099,82 @@ mod tests {
         assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
         let after = unsafe { *microcosm_stats_ptr(handle) }.average_enval;
         assert!(after > before);
-        assert_eq!(microcosm_brush_enval_rect(handle, 0, 0, 2, 2, -0.25), STATUS_OK);
+        assert_eq!(
+            microcosm_brush_enval_rect(handle, 0, 0, 2, 2, -0.25),
+            STATUS_OK
+        );
         assert_eq!(microcosm_inspect_cell(handle, 0), STATUS_OK);
         assert!(microcosm_query_result_len() > 0);
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
+    }
+
+    #[test]
+    fn detail_query_exports_return_bounded_authoritative_payloads() {
+        let json = br#"{"seed":"wasm-detail","width":8,"height":6,"initial_cells":4}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2, 3), STATUS_OK);
+        let detail = query_json();
+        assert_eq!(detail["schema"], "microcosm.cell_detail.v1");
+        assert_eq!(detail["cell_detail"]["cell"]["cell_id"], 0);
+        assert!(
+            detail["cell_detail"]["genome"]["enzymes"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 1
+        );
+        assert_eq!(detail["cell_detail"]["internal"]["limit"], 2);
+        assert!(
+            detail["cell_detail"]["internal"]["molecules"]
+                .as_array()
+                .unwrap()
+                .len()
+                <= 2
+        );
+        assert_eq!(
+            detail["cell_detail"]["recent_reactions"]["available"],
+            false
+        );
+        assert_eq!(
+            detail["cell_detail"]["recent_reactions"]["reason"],
+            "not_recorded"
+        );
+
+        assert_eq!(microcosm_inspect_cell_molecules(handle, 0, 1), STATUS_OK);
+        let molecules = query_json();
+        assert_eq!(molecules["schema"], "microcosm.cell_molecules.v1");
+        assert_eq!(molecules["internal"]["limit"], 1);
+
+        assert_eq!(microcosm_inspect_cell_reactions(handle, 0, 4), STATUS_OK);
+        let reactions = query_json();
+        assert_eq!(reactions["schema"], "microcosm.cell_reactions.v1");
+        assert_eq!(reactions["recent_reactions"]["available"], false);
+
+        let lineage = detail["cell_detail"]["cell"]["lineage_id"]
+            .as_u64()
+            .unwrap() as u32;
+        assert_eq!(microcosm_inspect_lineage(handle, lineage), STATUS_OK);
+        let lineage_detail = query_json();
+        assert_eq!(lineage_detail["schema"], "microcosm.lineage.v1");
+        assert_eq!(lineage_detail["lineage"]["lineage_id"], u64::from(lineage));
+
+        assert_eq!(microcosm_list_lineages(handle, 2), STATUS_OK);
+        let lineages = query_json();
+        assert_eq!(lineages["schema"], "microcosm.lineage_list.v1");
+        assert!(
+            lineages["lineage_list"]["lineages"]
+                .as_array()
+                .unwrap()
+                .len()
+                <= 2
+        );
+
+        assert_eq!(
+            microcosm_inspect_cell_detail(handle, u32::MAX, 2, 2),
+            STATUS_WORLD_ERROR
+        );
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 

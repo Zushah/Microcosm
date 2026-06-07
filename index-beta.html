@@ -67,6 +67,7 @@ https://www.github.com/Zushah/Microcosm
                         <div class="buttonRow compactButtons">
                             <button id="clearSelectionButton" type="button">Clear selection</button>
                             <button id="clearLineageButton" type="button">Clear lineage</button>
+                            <button id="refreshDetailsButton" type="button">Refresh detail</button>
                             <button id="copyInspectionButton" type="button">Copy JSON</button>
                         </div>
                     </div>
@@ -101,6 +102,51 @@ https://www.github.com/Zushah/Microcosm
                             <h3>Lineage and edit</h3>
                             <div id="lineageInspector" class="inspectorPane"></div>
                         </section>
+                    </div>
+                    <div class="richInspectionGrid">
+                        <section class="wideInspectorSection">
+                            <div class="subsectionHeader">
+                                <h3>Selected cell detail</h3>
+                                <button id="copyCellDetailButton" class="inlineButton" type="button">Copy cell JSON</button>
+                            </div>
+                            <div id="cellDetailInspector" class="inspectorPane richPane"></div>
+                        </section>
+                        <section>
+                            <h3>Genome</h3>
+                            <div id="genomeInspector" class="inspectorPane richPane"></div>
+                        </section>
+                        <section>
+                            <h3>Enzymes</h3>
+                            <div id="enzymeInspector" class="inspectorPane richPane scrollPane"></div>
+                        </section>
+                        <section class="wideInspectorSection">
+                            <div class="subsectionHeader">
+                                <h3>Internal molecules</h3>
+                                <button id="copyMoleculesButton" class="inlineButton" type="button">Copy molecule JSON</button>
+                            </div>
+                            <div id="moleculeInspector" class="inspectorPane richPane scrollPane"></div>
+                        </section>
+                        <section class="wideInspectorSection">
+                            <div class="subsectionHeader">
+                                <h3>Recent reactions</h3>
+                                <button id="copyReactionsButton" class="inlineButton" type="button">Copy reaction JSON</button>
+                            </div>
+                            <div id="reactionInspector" class="inspectorPane richPane"></div>
+                        </section>
+                        <section>
+                            <div class="subsectionHeader">
+                                <h3>Selected lineage</h3>
+                                <button id="copyLineageButton" class="inlineButton" type="button">Copy lineage JSON</button>
+                            </div>
+                            <div id="lineageDetailInspector" class="inspectorPane richPane"></div>
+                        </section>
+                        <section>
+                            <h3>Lineage browser</h3>
+                            <div id="lineageList" class="inspectorPane richPane scrollPane"></div>
+                        </section>
+                    </div>
+                    <div class="copyButtonRow">
+                        <button id="copyTileButton" class="inlineButton" type="button">Copy selected tile JSON</button>
                     </div>
                 </section>
                 <section class="infoBlock memoryBlock">
