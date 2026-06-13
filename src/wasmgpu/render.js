@@ -162,6 +162,7 @@ export class MicrocosmRenderer {
         this._canvas = canvas;
         this._scene = null;
         this._camera = null;
+        this._controls = null;
         this._tileCloud = null;
         this._cellCloud = null;
         this._tileLayer = null;
@@ -180,6 +181,7 @@ export class MicrocosmRenderer {
         this._tileCoordinatesDirty = true;
         this._lastCanvasWidth = 0;
         this._lastCanvasHeight = 0;
+        this._viewInitialized = false;
         this._frameCount = 0;
         this._lineageRgbCache = new Map();
         this._destroyed = false;
@@ -233,6 +235,9 @@ export class MicrocosmRenderer {
             cellCountRendered: this._cellCount,
             frameCount: this._frameCount,
             world: this._width > 0 && this._height > 0 ? `${this._width} × ${this._height}` : "—",
+            navigation: this._controls ? "WasmGPU OrbitControls pan/zoom" : "—",
+            zoom: this._controls ? this._controls.zoom : 1,
+            cameraCenter: this.cameraCenterLabel(),
             selectedLineage: this._selectedLineage,
             selectedCellId: this._selectedCellId,
             selectedTile: this._selectedTile
@@ -245,6 +250,16 @@ export class MicrocosmRenderer {
         this._camera = this._wgpu.createCamera.orthographic({ near: 0.01, far: 5000 });
         this._camera.transform.setPosition(0, 0, 1000);
         this._camera.lookAt(0, 0, 0);
+        this._controls = this._wgpu.createControls.orbit(this._camera, this._canvas, {
+            enableRotate: false,
+            enablePan: true,
+            enableZoom: true,
+            zoomOnCursor: true,
+            enableDamping: false,
+            minZoom: 1,
+            maxZoom: 75,
+            mouseButtons: { pan: 0, zoom: 1, rotate: -1 }
+        });
         this._tileLayer = this.createPointLayer(device, "microcosm.tiles", 1);
         this._cellLayer = this.createPointLayer(device, "microcosm.cells", 1);
         this._tileCloud = this._wgpu.createPointCloud({
@@ -351,9 +366,12 @@ export class MicrocosmRenderer {
         if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
         const u = x / rect.width;
         const v = y / rect.height;
+        const cameraPosition = this._camera.position || [0, 0, 0];
+        const projectionX = this._camera.left + u * (this._camera.right - this._camera.left);
+        const projectionY = this._camera.top - v * (this._camera.top - this._camera.bottom);
         return {
-            x: this._camera.left + u * (this._camera.right - this._camera.left),
-            y: this._camera.top - v * (this._camera.top - this._camera.bottom),
+            x: cameraPosition[0] + projectionX,
+            y: cameraPosition[1] + projectionY,
             canvasX: x,
             canvasY: y
         };
@@ -397,6 +415,7 @@ export class MicrocosmRenderer {
         const tileCount = Math.max(0, Number(runtime.tileCount || stats.tile_count || 0) | 0);
         const cellCount = Math.max(0, Number(runtime.cellCount || stats.live_cell_count || 0) | 0);
         if (width !== this._width || height !== this._height || tileCount !== this._tileCount) {
+            const dimensionsChanged = width !== this._width || height !== this._height;
             this._width = width;
             this._height = height;
             this._tileCoordinatesDirty = true;
@@ -404,7 +423,8 @@ export class MicrocosmRenderer {
             this._tileCount = tileCount;
             updateLayerBounds(this._tileCloud, width, height, 0);
             updateLayerBounds(this._cellCloud, width, height, 1);
-            this.resize(true);
+            if (dimensionsChanged || !this._viewInitialized) this.fitView({ saveState: true });
+            else this.resize(true);
         }
         this.ensureLayerCapacity(this._cellLayer, this._cellCloud, Math.max(1, cellCount));
         this._cellCount = cellCount;
@@ -584,38 +604,90 @@ export class MicrocosmRenderer {
         this._cellCloud.maxPointSize = Math.max(cellSize, cellSize * 1.45);
     }
 
-    resize(force = false) {
-        if (!this._camera || this._width <= 0 || this._height <= 0) return;
-        const canvasWidth = Math.max(1, this._canvas.clientWidth || this._canvas.width || 1);
-        const canvasHeight = Math.max(1, this._canvas.clientHeight || this._canvas.height || 1);
-        if (!force && canvasWidth === this._lastCanvasWidth && canvasHeight === this._lastCanvasHeight) return;
-        this._lastCanvasWidth = canvasWidth;
-        this._lastCanvasHeight = canvasHeight;
-        const aspect = canvasWidth / canvasHeight;
+    measureCanvas() {
+        return {
+            width: Math.max(1, this._canvas.clientWidth || this._canvas.width || 1),
+            height: Math.max(1, this._canvas.clientHeight || this._canvas.height || 1)
+        };
+    }
+
+    fittedFrustum() {
+        const canvas = this.measureCanvas();
+        const aspect = canvas.width / canvas.height;
         const worldAspect = this._width / this._height;
         const margin = 3;
         let halfWidth = this._width * 0.5 + margin;
         let halfHeight = this._height * 0.5 + margin;
         if (aspect > worldAspect) halfWidth = halfHeight * aspect;
         else halfHeight = halfWidth / aspect;
-        this._camera.left = -halfWidth;
-        this._camera.right = halfWidth;
-        this._camera.top = halfHeight;
-        this._camera.bottom = -halfHeight;
-        this._camera.transform.setPosition(0, 0, Math.max(this._width, this._height, 10) * 2);
-        this._camera.lookAt(0, 0, 0);
+        return { canvas, halfWidth, halfHeight };
+    }
+
+    applyCameraView(center, zoom = 1, options = {}) {
+        if (!this._camera || this._width <= 0 || this._height <= 0) return;
+        const fitted = this.fittedFrustum();
+        this._lastCanvasWidth = fitted.canvas.width;
+        this._lastCanvasHeight = fitted.canvas.height;
+        this._camera.left = -fitted.halfWidth;
+        this._camera.right = fitted.halfWidth;
+        this._camera.top = fitted.halfHeight;
+        this._camera.bottom = -fitted.halfHeight;
+        const z = Math.max(this._width, this._height, 10) * 2;
+        const target = [Number(center[0]) || 0, Number(center[1]) || 0, 0];
+        this._camera.transform.setPosition(target[0], target[1], z);
+        this._camera.lookAt(target[0], target[1], target[2]);
+        if (this._controls) {
+            if (typeof this._controls.setTarget === "function") this._controls.setTarget(target);
+            else this._controls.target = target;
+            this._controls.syncFromCamera();
+            this._controls.zoom = Math.max(1, Math.min(75, Number(zoom) || 1));
+            this._controls.update(0);
+            if (options.saveState) this._controls.saveState();
+        }
+        this._viewInitialized = true;
         this.syncPointSizes();
     }
 
-    render() {
+    fitView(options = {}) {
+        this.applyCameraView([0, 0, 0], 1, { saveState: options.saveState !== false });
+    }
+
+    cameraCenter() {
+        if (this._controls && Array.isArray(this._controls.target)) return this._controls.target;
+        if (this._camera && this._camera.position) return [this._camera.position[0] || 0, this._camera.position[1] || 0, 0];
+        return [0, 0, 0];
+    }
+
+    cameraCenterLabel() {
+        const center = this.cameraCenter();
+        return `${center[0].toFixed(2)}, ${center[1].toFixed(2)}`;
+    }
+
+    resize(force = false) {
+        if (!this._camera || this._width <= 0 || this._height <= 0) return;
+        const canvas = this.measureCanvas();
+        if (!force && canvas.width === this._lastCanvasWidth && canvas.height === this._lastCanvasHeight) return;
+        const center = this.cameraCenter();
+        const zoom = this._controls ? this._controls.zoom : 1;
+        this.applyCameraView(center, zoom, { saveState: false });
+    }
+
+    updateControls(dtSeconds = 0) {
+        if (this._controls) this._controls.update(dtSeconds);
+    }
+
+    render(dtSeconds = 0) {
         this.assertLive();
         this.resize();
+        this.updateControls(dtSeconds);
         this._wgpu.render(this._scene, this._camera);
         this._frameCount++;
     }
 
     destroy() {
         if (this._destroyed) return;
+        this._controls?.dispose?.();
+        this._controls = null;
         this._tileCloud?.destroy?.();
         this._cellCloud?.destroy?.();
         this._tileLayer = null;

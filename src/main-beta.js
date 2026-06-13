@@ -24,35 +24,58 @@ let fpsValue = 0;
 let tpsTicks = 0;
 let tpsLastSampleMs = performance.now();
 let tpsValue = 0;
+let fallbackCanvasExpanded = false;
 
-const resolveWasmGPU = () => {
-    const candidate = window.WasmGPU && (window.WasmGPU.default || window.WasmGPU);
-    if (!candidate || !candidate.webassembly || typeof candidate.create !== "function") throw new Error("WasmGPU was not loaded or does not expose the expected API.");
-    return candidate;
-};
+const resolveWasmGPU = () => { const candidate = window.WasmGPU && (window.WasmGPU.default || window.WasmGPU); if (!candidate || !candidate.webassembly || typeof candidate.create !== "function") throw new Error("WasmGPU was not loaded or does not expose the expected API."); return candidate; };
 
-const normalizeSeedValue = (value) => {
-    const text = `${value ?? ""}`.trim();
-    return text !== "" ? text : "42";
-};
+const normalizeSeedValue = (value) => { const text = `${value ?? ""}`.trim(); return text !== "" ? text : "42"; };
 
 const initialSeed = () => normalizeSeedValue(new URL(window.location.href).searchParams.get(SEED_QUERY_PARAM));
 
-const seedUrl = (seed) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set(SEED_QUERY_PARAM, seed);
-    return url;
-};
+const seedUrl = (seed) => { const url = new URL(window.location.href); url.searchParams.set(SEED_QUERY_PARAM, seed); return url; };
 
-const buildConfig = () => ({
-    seed: normalizeSeedValue(gui.seed || initialSeed()),
-    width: 320,
-    height: 240,
-    initial_cells: 32,
-    predation_enabled: true
-});
+const buildConfig = () => ({ seed: normalizeSeedValue(gui.seed || initialSeed()), width: 320, height: 240, initial_cells: 32, predation_enabled: true });
 
 const updateGui = () => gui.update({ runtime, renderer, interaction, paused, fps: fpsValue, tps: tpsValue });
+
+const canvasFullscreenActive = () => Boolean(gui.visualPanel && document.fullscreenElement === gui.visualPanel);
+
+const canvasExpandedActive = () => canvasFullscreenActive() || fallbackCanvasExpanded;
+
+const refreshCanvasViewport = (options = {}) => {
+    if (!renderer) return;
+    requestAnimationFrame(() => {
+        try {
+            if (options.fit !== false) renderer.fitView({ saveState: true });
+            else renderer.resize(true);
+            renderer.render();
+            updateGui();
+        } catch (error) { gui.setError(error); }
+    });
+};
+
+const setFallbackCanvasExpanded = (active) => {
+    fallbackCanvasExpanded = !!active;
+    if (gui.visualPanel) gui.visualPanel.classList.toggle("isExpanded", fallbackCanvasExpanded);
+    document.body.classList.toggle("isCanvasExpanded", fallbackCanvasExpanded);
+    gui.setFullscreen(canvasExpandedActive());
+    refreshCanvasViewport({ fit: true });
+};
+
+const handleFullscreenChange = () => {
+    if (fallbackCanvasExpanded && canvasFullscreenActive()) setFallbackCanvasExpanded(false);
+    gui.setFullscreen(canvasExpandedActive());
+    refreshCanvasViewport({ fit: true });
+};
+
+const toggleCanvasFullscreen = async () => {
+    if (!gui.visualPanel) return;
+    gui.clearError();
+    if (canvasFullscreenActive()) { if (document.exitFullscreen) await document.exitFullscreen(); return; }
+    if (fallbackCanvasExpanded) { setFallbackCanvasExpanded(false); return; }
+    if (gui.visualPanel.requestFullscreen) { try { await gui.visualPanel.requestFullscreen(); return; } catch (error) { setFallbackCanvasExpanded(true); return; } }
+    setFallbackCanvasExpanded(true);
+};
 
 const updateInteractionVisuals = () => {
     if (!runtime || !runtime.ready || !renderer) return;
@@ -84,6 +107,7 @@ const resetRuntime = () => {
     window.history.replaceState(null, "", seedUrl(config.seed).toString());
     if (interaction) interaction.clearSelection();
     renderer.updateFromRuntime(runtime);
+    renderer.fitView({ saveState: true });
     renderer.render();
     updateGui();
 };
@@ -133,7 +157,7 @@ const frame = () => {
                 renderer.updateFromRuntime(runtime);
             }
         } else accumulatorMs = 0;
-        renderer.render();
+        renderer.render(frameElapsedMs / 1000);
     } catch (error) {
         setPaused(true);
         gui.setError(error);
@@ -184,6 +208,7 @@ const init = async () => {
         });
         gui.setBrushOptions(interaction.brush);
         renderer.updateFromRuntime(runtime);
+        renderer.fitView({ saveState: true });
         renderer.render();
         gui.setStatus("Running Rust/WasmGPU Microcosm beta implementation");
         gui.setPaused(paused);
@@ -209,10 +234,15 @@ gui.bindControls({
     clearSelection: () => { try { if (interaction) interaction.clearSelection(); } catch (error) { gui.setError(error); } },
     clearLineage: () => { try { if (interaction) interaction.clearLineageSelection(); } catch (error) { gui.setError(error); } },
     refreshDetails: () => { try { updateGui(); } catch (error) { gui.setError(error); } },
+    fitView: () => { try { if (renderer) { renderer.fitView({ saveState: true }); renderer.render(); updateGui(); } } catch (error) { gui.setError(error); } },
+    fullscreen: () => { toggleCanvasFullscreen().catch((error) => gui.setError(error)); },
     selectLineage: (lineageId) => { try { if (interaction) interaction.selectLineage(lineageId); } catch (error) { gui.setError(error); } }
 });
 
+document.addEventListener("fullscreenchange", handleFullscreenChange);
+
 window.addEventListener("beforeunload", () => {
+    document.removeEventListener("fullscreenchange", handleFullscreenChange);
     if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
     if (interaction) interaction.destroy();
     if (renderer) renderer.destroy();

@@ -6,7 +6,9 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::bio::{self, GenomeReactionContext, ReactionEnv};
-use crate::cell::{Cell, CellCountError, CellId, CellState};
+use crate::cell::{
+    Cell, CellCountError, CellId, CellState, ReactionMoleculeSummary, ReactionRecord,
+};
 use crate::chem::{Composition, Element, ELEMENT_COUNT, ELEMENT_ORDER};
 use crate::config::{Config, ConfigError};
 use crate::genome::{Enzyme, EnzymeType, Genome, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES};
@@ -189,7 +191,10 @@ pub struct ReactionLogInspection {
     pub reason: &'static str,
     pub limit: usize,
     pub truncated: bool,
-    pub reactions: Vec<()>,
+    pub reaction_count: usize,
+    pub returned_count: usize,
+    pub order: &'static str,
+    pub reactions: Vec<ReactionRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1263,12 +1268,23 @@ impl World {
         if cell.state != CellState::Active {
             return None;
         }
+        let reaction_count = cell.recent_reactions.len();
+        let reactions = cell
+            .recent_reactions
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>();
         Some(ReactionLogInspection {
-            available: false,
-            reason: "not_recorded",
+            available: true,
+            reason: "recorded",
             limit,
-            truncated: false,
-            reactions: Vec::new(),
+            truncated: reaction_count > reactions.len(),
+            reaction_count,
+            returned_count: reactions.len(),
+            order: "newest_first",
+            reactions,
         })
     }
 
@@ -2377,6 +2393,19 @@ impl World {
             ) else {
                 continue;
             };
+            let substrate_summaries = substrates
+                .iter()
+                .copied()
+                .map(reaction_molecule_summary)
+                .collect::<Vec<_>>();
+            let produced_summary = result.produced.map(reaction_molecule_summary);
+            let byproduct_summaries = result
+                .byproducts
+                .iter()
+                .copied()
+                .map(reaction_molecule_summary)
+                .collect::<Vec<_>>();
+            let energy_before = cell_energy;
 
             self.operation_counters.reactions_succeeded = self
                 .operation_counters
@@ -2401,6 +2430,7 @@ impl World {
                     positive_energy_gain += result.energy_delta;
                 }
             }
+            let energy_after = self.cells[cell_id.index()].energy;
             for molecule_id in substrate_ids {
                 let _ = self.consume_molecule(molecule_id);
             }
@@ -2418,7 +2448,7 @@ impl World {
                         self.operation_counters.products_created.saturating_add(1);
                 }
             }
-            for byproduct in result.byproducts {
+            for byproduct in result.byproducts.iter().copied() {
                 if self.add_product_around(tile_id, byproduct).is_ok() {
                     self.operation_counters.byproducts_created =
                         self.operation_counters.byproducts_created.saturating_add(1);
@@ -2443,6 +2473,32 @@ impl World {
                     .saturating_add(1);
                 local_enval = self.default_local_enval_average(tile_id).unwrap_or(0.0);
             }
+            let (x, y) = self.tile_xy(tile_id).unwrap_or((0, 0));
+            self.cells[cell_id.index()].push_reaction_record(ReactionRecord {
+                tick_count: self.tick_count,
+                sim_time_seconds: self.sim_time_seconds,
+                cell_id: cell_id.index(),
+                tile_id: tile_id.index(),
+                x,
+                y,
+                enzyme_index,
+                enzyme_type: enzyme.enzyme_type.as_str().to_owned(),
+                status: "success".to_owned(),
+                substrate_count: substrate_summaries.len(),
+                substrates: substrate_summaries,
+                produced: produced_summary,
+                byproducts: byproduct_summaries,
+                energy_before,
+                energy_after,
+                delta_cell_energy: result.energy_delta,
+                chemical_delta: result.chemical_delta,
+                enval_energy: result.enval_energy,
+                enval_input: result.enval_input,
+                enval_output: result.enval_output,
+                delta_enval: result.delta_enval,
+                local_enval: env.local_enval,
+                optimal_enval: genome_context.optimal_enval,
+            });
         }
 
         if self.cells[cell_id.index()].state != CellState::Active {
@@ -3120,6 +3176,19 @@ fn inspect_molecule(
     }
 }
 
+fn reaction_molecule_summary(molecule: Molecule) -> ReactionMoleculeSummary {
+    ReactionMoleculeSummary {
+        composition_counts: *molecule.composition.counts(),
+        formula: composition_formula(molecule.composition),
+        size: molecule.size,
+        element_mask: molecule.element_mask,
+        bond_multiplier: molecule.bond_multiplier,
+        elemental_energy_sum: molecule.elemental_energy_sum,
+        energy: molecule.energy,
+        polarity: molecule.polarity,
+    }
+}
+
 fn composition_formula(composition: Composition) -> String {
     let mut formula = String::new();
     for element in ELEMENT_ORDER {
@@ -3685,7 +3754,7 @@ impl Error for InvariantError {}
 #[cfg(test)]
 mod tests {
     use super::{InvariantError, MoleculeOwner, TileId, World};
-    use crate::cell::CellState;
+    use crate::cell::{CellState, CELL_REACTION_LOG_CAPACITY};
     use crate::chem::{Composition, Element, ELEMENT_ORDER};
     use crate::config::{Config, MoleculeSeedingConfig};
     use crate::genome::{Enzyme, EnzymeType, Genome, LineageId};
@@ -4131,6 +4200,83 @@ mod tests {
         world.step_cell(cell_id);
         assert!(world.cells[cell_id.index()].energy.is_finite());
         world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn active_cell_reaction_logs_are_available_even_when_empty() {
+        let mut world = World::new(only_a_config("reaction-log-empty", 4, 4)).unwrap();
+        let tile = world.tile_id(1, 1).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        let logs = world.inspect_cell_reactions(cell_id, 8).unwrap();
+        assert!(logs.available);
+        assert_eq!(logs.reason, "recorded");
+        assert_eq!(logs.limit, 8);
+        assert!(!logs.truncated);
+        assert_eq!(logs.reaction_count, 0);
+        assert_eq!(logs.returned_count, 0);
+        assert_eq!(logs.order, "newest_first");
+        assert!(logs.reactions.is_empty());
+    }
+
+    #[test]
+    fn successful_reactions_are_logged_and_bounded() {
+        let mut world = World::new(only_a_config("reaction-log-bounded", 4, 4)).unwrap();
+        let tile = world.tile_id(1, 1).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        genome.optimal_enval = world.tile_enval(tile).unwrap();
+        let mut catabolase = Enzyme::catabolase_abc(&mut world.rng);
+        catabolase.enval_sigma = 1000.0;
+        genome.enzymes = vec![catabolase];
+        genome.initial_energy = 10.0;
+        genome.repro_threshold = 1_000_000.0;
+        genome.decay_time = 1_000_000.0;
+        genome.maintenance_cost_per_sec = 0.0;
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+
+        let target_reactions = CELL_REACTION_LOG_CAPACITY + 5;
+        for _ in 0..target_reactions {
+            let molecule = Molecule::new(Composition::bc_dimer(), 1.5).unwrap();
+            world.add_cell_molecule_record(cell_id, molecule).unwrap();
+        }
+        for _ in 0..target_reactions {
+            world.step_cell(cell_id);
+        }
+
+        assert_eq!(
+            world.cells[cell_id.index()].recent_reactions.len(),
+            CELL_REACTION_LOG_CAPACITY
+        );
+        let logs = world.inspect_cell_reactions(cell_id, 2).unwrap();
+        assert!(logs.available);
+        assert_eq!(logs.reason, "recorded");
+        assert_eq!(logs.limit, 2);
+        assert_eq!(logs.reaction_count, CELL_REACTION_LOG_CAPACITY);
+        assert_eq!(logs.returned_count, 2);
+        assert!(logs.truncated);
+        assert_eq!(logs.order, "newest_first");
+        assert_eq!(logs.reactions.len(), 2);
+        let record = &logs.reactions[0];
+        assert_eq!(record.cell_id, cell_id.index());
+        assert_eq!(record.tile_id, tile.index());
+        assert_eq!(record.x, 1);
+        assert_eq!(record.y, 1);
+        assert_eq!(record.enzyme_index, 0);
+        assert_eq!(record.enzyme_type, "catabolase");
+        assert_eq!(record.status, "success");
+        assert_eq!(record.substrate_count, 1);
+        assert_eq!(record.substrates.len(), 1);
+        assert_eq!(record.substrates[0].formula, "BC");
+        assert!(!record.byproducts.is_empty());
+        assert!(record.energy_after > record.energy_before);
+        assert!(
+            (record.delta_cell_energy - (record.energy_after - record.energy_before)).abs()
+                <= 1.0e-12
+        );
+
+        let detail = world.inspect_cell_detail(cell_id, 4, 3).unwrap();
+        assert!(detail.recent_reactions.available);
+        assert_eq!(detail.recent_reactions.returned_count, 3);
     }
 
     #[test]

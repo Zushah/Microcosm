@@ -47,6 +47,21 @@ const elementCountsText = (counts) => { if (!counts) return "—"; return ELEMEN
 
 const compositionText = (counts) => { if (!counts) return "—"; return ELEMENT_KEYS.map((key, index) => [key, elementCountValue(counts, index, key)]).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `${key}${Number(value) > 1 ? displayValue(value) : ""}`).join(" ") || "empty"; };
 
+const moleculeSummaryText = (molecule) => {
+    if (!molecule) return "—";
+    const formula = molecule.formula || compositionText(molecule.composition_counts);
+    const size = molecule.size == null ? "" : ` size ${displayValue(molecule.size)}`;
+    const energy = molecule.energy == null ? "" : ` E ${displayValue(molecule.energy)}`;
+    return `${formula}${size}${energy}`;
+};
+
+const moleculeListSummaryText = (molecules, limit = 3) => {
+    if (!Array.isArray(molecules) || molecules.length === 0) return "—";
+    const shown = molecules.slice(0, limit).map((molecule) => moleculeSummaryText(molecule));
+    if (molecules.length > limit) shown.push(`+${displayValue(molecules.length - limit)} more`);
+    return shown.join(", ");
+};
+
 const statusClass = (status) => status === "edit" ? "modeEdit" : "modeExplore";
 
 const errorText = (error) => error && error.message ? error.message : String(error || "Unknown error");
@@ -71,6 +86,8 @@ export class MicrocosmGUI {
             pauseButton: root.getElementById("pauseButton"),
             stepButton: root.getElementById("stepButton"),
             resetButton: root.getElementById("resetButton"),
+            fitViewButton: root.getElementById("fitViewButton"),
+            fullscreenButton: root.getElementById("fullscreenButton"),
             seedInput: root.getElementById("seedInput"),
             displayMode: root.getElementById("displayMode"),
             interactionMode: root.getElementById("interactionMode"),
@@ -97,7 +114,9 @@ export class MicrocosmGUI {
             reactionInspector: root.getElementById("reactionInspector"),
             lineageDetailInspector: root.getElementById("lineageDetailInspector"),
             lineageList: root.getElementById("lineageList"),
-            canvas: root.getElementById("wasmgpuCanvas")
+            canvas: root.getElementById("wasmgpuCanvas"),
+            visualPanel: root.querySelector ? root.querySelector(".visualPanel") : null,
+            layout: root.querySelector ? root.querySelector(".microcosmLayout") : null
         });
     }
 
@@ -127,6 +146,14 @@ export class MicrocosmGUI {
 
     get canvas() {
         return this.elements.canvas;
+    }
+
+    get visualPanel() {
+        return this.elements.visualPanel;
+    }
+
+    get layout() {
+        return this.elements.layout;
     }
 
     get seed() {
@@ -164,6 +191,8 @@ export class MicrocosmGUI {
         if (this.elements.pauseButton) this.elements.pauseButton.addEventListener("click", () => handlers.pause && handlers.pause());
         if (this.elements.stepButton) this.elements.stepButton.addEventListener("click", () => handlers.step && handlers.step());
         if (this.elements.resetButton) this.elements.resetButton.addEventListener("click", () => handlers.reset && handlers.reset());
+        if (this.elements.fitViewButton) this.elements.fitViewButton.addEventListener("click", () => handlers.fitView && handlers.fitView());
+        if (this.elements.fullscreenButton) this.elements.fullscreenButton.addEventListener("click", () => handlers.fullscreen && handlers.fullscreen());
         if (this.elements.displayMode) this.elements.displayMode.addEventListener("change", () => handlers.displayMode && handlers.displayMode(this.displayMode));
         if (this.elements.interactionMode) this.elements.interactionMode.addEventListener("change", () => handlers.mode && handlers.mode(this.mode));
         for (const input of [this.elements.brushWidth, this.elements.brushHeight, this.elements.brushDelta]) {
@@ -213,6 +242,12 @@ export class MicrocosmGUI {
         if (this.elements.brushWidth && options.width !== undefined) this.elements.brushWidth.value = String(options.width);
         if (this.elements.brushHeight && options.height !== undefined) this.elements.brushHeight.value = String(options.height);
         if (this.elements.brushDelta && options.delta !== undefined) this.elements.brushDelta.value = String(options.delta);
+    }
+
+    setFullscreen(active) {
+        if (!this.elements.fullscreenButton) return;
+        this.elements.fullscreenButton.textContent = active ? "Exit fullscreen" : "Fullscreen";
+        this.elements.fullscreenButton.setAttribute("aria-pressed", active ? "true" : "false");
     }
 
     setStatus(text) {
@@ -271,6 +306,9 @@ export class MicrocosmGUI {
                 ["Cells rendered", renderStats.cellCountRendered],
                 ["Selected lineage", renderStats.selectedLineage],
                 ["Selected cell", renderStats.selectedCellId],
+                ["Navigation", renderStats.navigation || "—"],
+                ["Zoom", renderStats.zoom],
+                ["Camera center", renderStats.cameraCenter || "—"],
                 ["Renderer frames", renderStats.frameCount],
                 ["Paused", state.paused ? "yes" : "no"]
             ];
@@ -543,13 +581,30 @@ export class MicrocosmGUI {
             `;
             return;
         }
-        this.elements.reactionInspector.innerHTML = makeTable([
+        const records = reactions.reactions || reactions.records || [];
+        const summary = `
+            <div class="detailSubsection">
+                ${detailRows([
+                    ["Reason", reactions.reason || "recorded"],
+                    ["Returned", `${displayValue(reactions.returned_count ?? records.length)} / ${displayValue(reactions.reaction_count ?? records.length)}`],
+                    ["Limit", reactions.limit],
+                    ["Order", reactions.order || "newest_first"],
+                    ["Truncated", reactions.truncated ? "yes" : "no"]
+                ])}
+            </div>
+        `;
+        const table = makeTable([
             { label: "Tick", value: (record) => record.tick_count ?? record.tick ?? "—" },
-            { label: "Enzyme", value: (record) => record.enzyme_type ?? record.enzyme_index ?? "—" },
+            { label: "Time", value: (record) => record.sim_time_seconds == null ? "—" : `${displayValue(record.sim_time_seconds)}s` },
+            { label: "Enzyme", value: (record) => record.enzyme_type ? `${record.enzyme_index ?? "—"}: ${record.enzyme_type}` : (record.enzyme_index ?? "—") },
             { label: "Status", value: (record) => record.status ?? record.reason ?? "—" },
             { label: "ΔE", value: (record) => record.delta_cell_energy ?? record.delta_energy ?? "—" },
-            { label: "Note", value: (record) => record.note ?? "—" }
-        ], reactions.reactions || reactions.records || [], "No recent reactions returned.");
+            { label: "ΔV", value: (record) => record.delta_enval ?? "—" },
+            { label: "Substrates", value: (record) => moleculeListSummaryText(record.substrates) },
+            { label: "Product", value: (record) => moleculeSummaryText(record.produced) },
+            { label: "Byproducts", value: (record) => moleculeListSummaryText(record.byproducts) }
+        ], records, "No successful reactions recorded yet for this cell.");
+        this.elements.reactionInspector.innerHTML = summary + table;
     }
 
     renderLineageDetail(interaction) {

@@ -19,6 +19,47 @@ pub enum CellState {
     Dead,
 }
 
+pub const CELL_REACTION_LOG_CAPACITY: usize = 64;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReactionMoleculeSummary {
+    pub composition_counts: [u16; ELEMENT_COUNT],
+    pub formula: String,
+    pub size: u16,
+    pub element_mask: u8,
+    pub bond_multiplier: f32,
+    pub elemental_energy_sum: f32,
+    pub energy: f32,
+    pub polarity: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReactionRecord {
+    pub tick_count: u64,
+    pub sim_time_seconds: f64,
+    pub cell_id: usize,
+    pub tile_id: usize,
+    pub x: usize,
+    pub y: usize,
+    pub enzyme_index: usize,
+    pub enzyme_type: String,
+    pub status: String,
+    pub substrate_count: usize,
+    pub substrates: Vec<ReactionMoleculeSummary>,
+    pub produced: Option<ReactionMoleculeSummary>,
+    pub byproducts: Vec<ReactionMoleculeSummary>,
+    pub energy_before: f64,
+    pub energy_after: f64,
+    pub delta_cell_energy: f64,
+    pub chemical_delta: f64,
+    pub enval_energy: f64,
+    pub enval_input: f32,
+    pub enval_output: f32,
+    pub delta_enval: f32,
+    pub local_enval: f32,
+    pub optimal_enval: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
     pub state: CellState,
@@ -36,6 +77,8 @@ pub struct Cell {
     pub combat_attack_total: u32,
     pub combat_defense_total: u32,
     pub active_slot: Option<usize>,
+    #[serde(default)]
+    pub recent_reactions: Vec<ReactionRecord>,
 }
 
 impl Cell {
@@ -61,6 +104,15 @@ impl Cell {
             combat_attack_total,
             combat_defense_total,
             active_slot: None,
+            recent_reactions: Vec::new(),
+        }
+    }
+
+    pub fn push_reaction_record(&mut self, record: ReactionRecord) {
+        self.recent_reactions.push(record);
+        if self.recent_reactions.len() > CELL_REACTION_LOG_CAPACITY {
+            let overflow = self.recent_reactions.len() - CELL_REACTION_LOG_CAPACITY;
+            self.recent_reactions.drain(0..overflow);
         }
     }
 

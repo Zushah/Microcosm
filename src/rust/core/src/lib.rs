@@ -10,7 +10,9 @@ pub mod snapshot;
 pub mod stats;
 pub mod world;
 
-pub use cell::{Cell, CellId, CellState};
+pub use cell::{
+    Cell, CellId, CellState, ReactionMoleculeSummary, ReactionRecord, CELL_REACTION_LOG_CAPACITY,
+};
 pub use chem::{
     Composition, CompositionError, Element, ElementProperties, ELEMENT_COUNT, ELEMENT_ORDER,
 };

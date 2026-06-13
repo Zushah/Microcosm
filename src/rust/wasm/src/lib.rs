@@ -1133,14 +1133,14 @@ mod tests {
                 .len()
                 <= 2
         );
-        assert_eq!(
-            detail["cell_detail"]["recent_reactions"]["available"],
-            false
-        );
+        assert_eq!(detail["cell_detail"]["recent_reactions"]["available"], true);
         assert_eq!(
             detail["cell_detail"]["recent_reactions"]["reason"],
-            "not_recorded"
+            "recorded"
         );
+        assert!(detail["cell_detail"]["recent_reactions"]["reactions"]
+            .as_array()
+            .is_some());
 
         assert_eq!(microcosm_inspect_cell_molecules(handle, 0, 1), STATUS_OK);
         let molecules = query_json();
@@ -1150,7 +1150,12 @@ mod tests {
         assert_eq!(microcosm_inspect_cell_reactions(handle, 0, 4), STATUS_OK);
         let reactions = query_json();
         assert_eq!(reactions["schema"], "microcosm.cell_reactions.v1");
-        assert_eq!(reactions["recent_reactions"]["available"], false);
+        assert_eq!(reactions["recent_reactions"]["available"], true);
+        assert_eq!(reactions["recent_reactions"]["reason"], "recorded");
+        assert_eq!(reactions["recent_reactions"]["limit"], 4);
+        assert!(reactions["recent_reactions"]["reactions"]
+            .as_array()
+            .is_some());
 
         let lineage = detail["cell_detail"]["cell"]["lineage_id"]
             .as_u64()

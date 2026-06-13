@@ -1,4 +1,5 @@
 const DEFAULT_BRUSH = Object.freeze({ width: 10, height: 10, delta: 0.05 });
+const CLICK_DRAG_THRESHOLD_PX = 4;
 
 const normalizeMode = (mode) => mode === "edit" ? "edit" : "explore";
 
@@ -7,6 +8,12 @@ const normalizeBrushSpan = (value, fallback) => { const parsed = Math.round(Numb
 const normalizeBrushDelta = (value, fallback) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
 
 const sameTile = (a, b) => Boolean(a && b && a.x === b.x && a.y === b.y);
+
+const isEditableShortcutTarget = (target) => {
+    if (!(target instanceof Element)) return false;
+    const tag = target.tagName.toLowerCase();
+    return tag === "input" || tag === "select" || tag === "textarea" || target.isContentEditable;
+};
 
 export class MicrocosmInteraction {
     static create(options = {}) {
@@ -34,6 +41,7 @@ export class MicrocosmInteraction {
         this.selectedLineageId = null;
         this.isPainting = false;
         this.lastPaintKey = null;
+        this.pendingLeftClick = null;
         this.attached = false;
         this._listeners = [];
         this.syncRendererState();
@@ -71,6 +79,7 @@ export class MicrocosmInteraction {
         this.attached = false;
         this.isPainting = false;
         this.lastPaintKey = null;
+        this.pendingLeftClick = null;
     }
 
     destroy() {
@@ -87,6 +96,7 @@ export class MicrocosmInteraction {
         this.mode = normalizeMode(mode);
         this.isPainting = false;
         this.lastPaintKey = null;
+        this.pendingLeftClick = null;
         this.syncRendererState();
         this.notifyChange();
     }
@@ -107,6 +117,7 @@ export class MicrocosmInteraction {
         this.selectedCellId = null;
         this.selectedCellInfo = null;
         this.selectedLineageId = null;
+        this.pendingLeftClick = null;
         this.syncRendererState();
         this.notifyChange();
     }
@@ -154,31 +165,48 @@ export class MicrocosmInteraction {
     }
 
     handlePointerMove(event) {
+        this.updatePendingLeftClick(event);
         const tile = this.tileFromEvent(event);
+        const refreshHoverInfo = !this.pendingLeftClick || !this.pendingLeftClick.moved;
         if (!sameTile(tile, this.hoverTile)) {
             this.hoverTile = tile ? { x: tile.x, y: tile.y } : null;
-            this.hoverTileInfo = this.hoverTile ? this.safeInspectTile(this.hoverTile) : null;
+            this.hoverTileInfo = this.hoverTile && refreshHoverInfo ? this.safeInspectTile(this.hoverTile) : null;
             this.syncRendererState();
             this.notifyChange();
-        }
+        } else if (this.hoverTile && refreshHoverInfo && !this.hoverTileInfo) { this.hoverTileInfo = this.safeInspectTile(this.hoverTile); this.notifyChange(); }
         if (this.mode === "edit" && this.isPainting) this.applyBrush(tile, event);
     }
 
     handlePointerDown(event) {
         const tile = this.tileFromEvent(event);
+        if (event.button === 0) {
+            this.pendingLeftClick = this.mode === "explore" ? {
+                pointerId: event.pointerId,
+                startClientX: event.clientX,
+                startClientY: event.clientY,
+                startTile: tile ? { x: tile.x, y: tile.y } : null,
+                moved: false
+            } : null;
+            return;
+        }
         if (this.mode === "edit" && event.button === 2) {
             event.preventDefault();
+            this.pendingLeftClick = null;
             this.isPainting = true;
             this.lastPaintKey = null;
             try { this.canvas.setPointerCapture(event.pointerId); } catch { /* ignore */ }
             this.applyBrush(tile, event);
             return;
         }
-        if (event.button === 0) { this.selectTile(tile); return; }
-        if (event.button === 2) { event.preventDefault(); this.selectLineageFromTile(tile); }
+        if (event.button === 2) {
+            event.preventDefault();
+            this.pendingLeftClick = null;
+            this.selectLineageFromTile(tile);
+        }
     }
 
     handlePointerUp(event) {
+        if (event.button === 0) { this.finishPendingLeftClick(event); return; }
         if (event.button === 2) {
             this.isPainting = false;
             this.lastPaintKey = null;
@@ -200,8 +228,27 @@ export class MicrocosmInteraction {
     }
 
     handleKeyDown(event) {
-        if (event.key === "Escape") { this.clearSelection(); return; }
-        if (event.key.toLowerCase() === "e") this.setMode(this.mode === "edit" ? "explore" : "edit");
+        if (isEditableShortcutTarget(event.target)) return;
+        if (event.key === "Escape") { event.preventDefault(); this.clearSelection(); return; }
+        if (event.key.toLowerCase() === "e") { event.preventDefault(); this.setMode(this.mode === "edit" ? "explore" : "edit"); }
+    }
+
+    updatePendingLeftClick(event) {
+        const pending = this.pendingLeftClick;
+        if (!pending || event.pointerId !== pending.pointerId) return;
+        const dx = event.clientX - pending.startClientX;
+        const dy = event.clientY - pending.startClientY;
+        if ((dx * dx + dy * dy) > CLICK_DRAG_THRESHOLD_PX * CLICK_DRAG_THRESHOLD_PX) pending.moved = true;
+    }
+
+    finishPendingLeftClick(event) {
+        const pending = this.pendingLeftClick;
+        if (!pending || event.pointerId !== pending.pointerId) return;
+        this.updatePendingLeftClick(event);
+        this.pendingLeftClick = null;
+        if (pending.moved || this.mode !== "explore") return;
+        const tile = this.tileFromEvent(event) || pending.startTile;
+        this.selectTile(tile);
     }
 
     selectTile(tile) {
