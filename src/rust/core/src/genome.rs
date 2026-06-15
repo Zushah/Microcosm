@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,23 @@ impl EnzymeType {
 
     pub const fn is_combat(self) -> bool {
         matches!(self, Self::Defensase | Self::Attackase)
+    }
+}
+
+impl std::str::FromStr for EnzymeType {
+    type Err = GenomePatchError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "anabolase" => Ok(Self::Anabolase),
+            "catabolase" => Ok(Self::Catabolase),
+            "transmutase" => Ok(Self::Transmutase),
+            "defensase" => Ok(Self::Defensase),
+            "attackase" => Ok(Self::Attackase),
+            other => Err(GenomePatchError::new(format!(
+                "unsupported enzyme_type '{other}'"
+            ))),
+        }
     }
 }
 
@@ -250,6 +268,151 @@ impl Enzyme {
             enval_release_fraction: 0.0,
             enval_pump: 0.0,
             combat_level: level.max(1),
+        }
+    }
+
+    pub fn edit_default(enzyme_type: EnzymeType) -> Self {
+        let mut enzyme = Self {
+            enzyme_type,
+            specificity_mask: default_specificity_mask_for_type(enzyme_type),
+            bond_multiplier: if enzyme_type == EnzymeType::Anabolase {
+                1.18
+            } else {
+                1.0
+            },
+            bond_cost_fraction: if enzyme_type == EnzymeType::Anabolase {
+                0.70
+            } else {
+                0.0
+            },
+            bond_harvest_fraction: if enzyme_type == EnzymeType::Catabolase {
+                1.0
+            } else {
+                0.0
+            },
+            downhill_harvest_fraction: if enzyme_type == EnzymeType::Transmutase {
+                0.18
+            } else {
+                0.0
+            },
+            secretion_prob: if enzyme_type.is_metabolic() {
+                0.15
+            } else {
+                0.0
+            },
+            enval_sigma: if enzyme_type.is_metabolic() {
+                0.18
+            } else {
+                0.0
+            },
+            enval_throughput: match enzyme_type {
+                EnzymeType::Anabolase => 0.18,
+                EnzymeType::Catabolase => 0.14,
+                EnzymeType::Transmutase => 0.04,
+                EnzymeType::Defensase | EnzymeType::Attackase => 0.0,
+            },
+            enval_energy_fraction: if enzyme_type.is_metabolic() {
+                2.0 / 3.0
+            } else {
+                0.0
+            },
+            enval_release_fraction: if enzyme_type.is_metabolic() {
+                1.0 / 3.0
+            } else {
+                0.0
+            },
+            enval_pump: if enzyme_type.is_metabolic() { 0.3 } else { 0.0 },
+            combat_level: if enzyme_type.is_combat() {
+                DEFAULT_COMBAT_LEVEL_MEAN
+            } else {
+                0
+            },
+        };
+        enzyme.normalize_for_edit();
+        enzyme
+    }
+
+    pub fn normalize_for_edit(&mut self) {
+        if self.enzyme_type.is_combat() {
+            self.specificity_mask = 0;
+            self.bond_multiplier = 1.0;
+            self.bond_cost_fraction = 0.0;
+            self.bond_harvest_fraction = 0.0;
+            self.downhill_harvest_fraction = 0.0;
+            self.secretion_prob = 0.0;
+            self.enval_sigma = 0.0;
+            self.enval_throughput = 0.0;
+            self.enval_energy_fraction = 0.0;
+            self.enval_release_fraction = 0.0;
+            self.enval_pump = 0.0;
+            self.combat_level = self.combat_level.max(1);
+            return;
+        }
+
+        self.specificity_mask = normalize_specificity_mask(
+            self.specificity_mask,
+            default_specificity_mask_for_type(self.enzyme_type),
+        );
+        if self.enval_sigma <= 0.0 || !self.enval_sigma.is_finite() {
+            self.enval_sigma = 0.18;
+        }
+        if self.secretion_prob < 0.0 || !self.secretion_prob.is_finite() {
+            self.secretion_prob = 0.15;
+        }
+        self.secretion_prob = self.secretion_prob.clamp(0.0, 1.0);
+        if self.enval_energy_fraction <= 0.0 || !self.enval_energy_fraction.is_finite() {
+            self.enval_energy_fraction = 2.0 / 3.0;
+        }
+        self.enval_energy_fraction = self.enval_energy_fraction.clamp(0.0, 1.0);
+        if self.enval_release_fraction <= 0.0 || !self.enval_release_fraction.is_finite() {
+            self.enval_release_fraction = 1.0 / 3.0;
+        }
+        self.enval_release_fraction = self
+            .enval_release_fraction
+            .clamp(0.0, 1.0 - self.enval_energy_fraction);
+        if self.enval_pump < 0.0 || !self.enval_pump.is_finite() {
+            self.enval_pump = 0.3;
+        }
+        self.combat_level = 0;
+        match self.enzyme_type {
+            EnzymeType::Anabolase => {
+                if self.enval_throughput <= 0.0 || !self.enval_throughput.is_finite() {
+                    self.enval_throughput = 0.18;
+                }
+                if self.bond_multiplier <= 0.0 || !self.bond_multiplier.is_finite() {
+                    self.bond_multiplier = 1.18;
+                }
+                if self.bond_cost_fraction < 0.0 || !self.bond_cost_fraction.is_finite() {
+                    self.bond_cost_fraction = 0.70;
+                }
+                self.bond_cost_fraction = self.bond_cost_fraction.clamp(0.0, 1.0);
+                self.bond_harvest_fraction = 0.0;
+                self.downhill_harvest_fraction = 0.0;
+            }
+            EnzymeType::Catabolase => {
+                if self.enval_throughput <= 0.0 || !self.enval_throughput.is_finite() {
+                    self.enval_throughput = 0.14;
+                }
+                self.bond_multiplier = 1.0;
+                self.bond_cost_fraction = 0.0;
+                self.bond_harvest_fraction = 1.0;
+                self.downhill_harvest_fraction = 0.0;
+            }
+            EnzymeType::Transmutase => {
+                if self.enval_throughput <= 0.0 || !self.enval_throughput.is_finite() {
+                    self.enval_throughput = 0.04;
+                }
+                if self.downhill_harvest_fraction < 0.0
+                    || !self.downhill_harvest_fraction.is_finite()
+                {
+                    self.downhill_harvest_fraction = 0.18;
+                }
+                self.downhill_harvest_fraction = self.downhill_harvest_fraction.clamp(0.0, 1.0);
+                self.bond_multiplier = 1.0;
+                self.bond_cost_fraction = 0.0;
+                self.bond_harvest_fraction = 0.0;
+            }
+            EnzymeType::Defensase | EnzymeType::Attackase => unreachable!(),
         }
     }
 }
@@ -498,6 +661,421 @@ impl Genome {
         let _ = self.attack_total();
         let _ = self.defense_total();
     }
+}
+
+pub const GENOME_PATCH_SCHEMA: &str = "microcosm.genome_patch.v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenomePatchError {
+    message: String,
+}
+
+impl GenomePatchError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for GenomePatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for GenomePatchError {}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenomePatch {
+    pub schema: Option<String>,
+    pub genome: Option<GenomeFieldPatch>,
+    #[serde(default)]
+    pub enzymes: Vec<EnzymePatchOperation>,
+}
+
+impl GenomePatch {
+    pub fn apply_to_genome(&self, genome: &mut Genome) -> Result<Vec<String>, GenomePatchError> {
+        if let Some(schema) = &self.schema {
+            if schema != GENOME_PATCH_SCHEMA {
+                return Err(GenomePatchError::new(format!(
+                    "unsupported genome patch schema '{schema}'"
+                )));
+            }
+        }
+        let mut changed_fields = Vec::new();
+        if let Some(fields) = &self.genome {
+            fields.apply_to_genome(genome, &mut changed_fields)?;
+        }
+        for operation in &self.enzymes {
+            operation.apply_to_enzymes(&mut genome.enzymes, &mut changed_fields)?;
+        }
+        if genome.enzymes.len() < MIN_CELL_ENZYMES || genome.enzymes.len() > MAX_CELL_ENZYMES {
+            return Err(GenomePatchError::new(format!(
+                "genome enzyme count must be in [{MIN_CELL_ENZYMES}, {MAX_CELL_ENZYMES}], got {}",
+                genome.enzymes.len()
+            )));
+        }
+        Ok(changed_fields)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenomeFieldPatch {
+    pub optimal_enval: Option<f32>,
+    pub repro_threshold: Option<f64>,
+    pub decay_time: Option<f64>,
+    pub default_secretion_prob: Option<f32>,
+    pub mutation_rate: Option<f32>,
+    pub post_divide_mortality: Option<f32>,
+    pub desired_element_reserve: Option<u32>,
+    pub enval_stress_factor: Option<f64>,
+    pub enval_mutation_floor: Option<f32>,
+    pub maintenance_cost_per_sec: Option<f64>,
+}
+
+impl GenomeFieldPatch {
+    fn apply_to_genome(
+        &self,
+        genome: &mut Genome,
+        changed_fields: &mut Vec<String>,
+    ) -> Result<(), GenomePatchError> {
+        if let Some(value) = self.optimal_enval {
+            genome.optimal_enval = finite_f32("optimal_enval", value)?;
+            changed_fields.push("optimal_enval".to_owned());
+        }
+        if let Some(value) = self.repro_threshold {
+            genome.repro_threshold = positive_f64("repro_threshold", value)?;
+            changed_fields.push("repro_threshold".to_owned());
+        }
+        if let Some(value) = self.decay_time {
+            genome.decay_time = positive_f64("decay_time", value)?;
+            changed_fields.push("decay_time".to_owned());
+        }
+        if let Some(value) = self.default_secretion_prob {
+            genome.default_secretion_prob = probability_f32("default_secretion_prob", value)?;
+            changed_fields.push("default_secretion_prob".to_owned());
+        }
+        if let Some(value) = self.mutation_rate {
+            genome.mutation_rate = probability_f32("mutation_rate", value)?;
+            changed_fields.push("mutation_rate".to_owned());
+        }
+        if let Some(value) = self.post_divide_mortality {
+            genome.post_divide_mortality = probability_f32("post_divide_mortality", value)?;
+            changed_fields.push("post_divide_mortality".to_owned());
+        }
+        if let Some(value) = self.desired_element_reserve {
+            genome.desired_element_reserve = value;
+            changed_fields.push("desired_element_reserve".to_owned());
+        }
+        if let Some(value) = self.enval_stress_factor {
+            genome.enval_stress_factor = nonnegative_f64("enval_stress_factor", value)?;
+            changed_fields.push("enval_stress_factor".to_owned());
+        }
+        if let Some(value) = self.enval_mutation_floor {
+            genome.enval_mutation_floor = nonnegative_f32("enval_mutation_floor", value)?;
+            changed_fields.push("enval_mutation_floor".to_owned());
+        }
+        if let Some(value) = self.maintenance_cost_per_sec {
+            genome.maintenance_cost_per_sec = nonnegative_f64("maintenance_cost_per_sec", value)?;
+            changed_fields.push("maintenance_cost_per_sec".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnzymePatchOperation {
+    pub op: String,
+    pub index: Option<usize>,
+    pub fields: Option<EnzymeFieldPatch>,
+    pub enzyme: Option<EnzymeFieldPatch>,
+}
+
+impl EnzymePatchOperation {
+    fn apply_to_enzymes(
+        &self,
+        enzymes: &mut Vec<Enzyme>,
+        changed_fields: &mut Vec<String>,
+    ) -> Result<(), GenomePatchError> {
+        match self.op.as_str() {
+            "update" => {
+                let index = self.required_index()?;
+                let fields = self.fields.as_ref().ok_or_else(|| {
+                    GenomePatchError::new("enzyme update operation requires fields")
+                })?;
+                let enzyme = enzymes
+                    .get_mut(index)
+                    .ok_or_else(|| GenomePatchError::new(format!("no enzyme at index {index}")))?;
+                fields.apply_to_enzyme(enzyme, &format!("enzyme[{index}]"), changed_fields)
+            }
+            "append" => {
+                if enzymes.len() >= MAX_CELL_ENZYMES {
+                    return Err(GenomePatchError::new(format!(
+                        "cannot append enzyme: max enzyme count is {MAX_CELL_ENZYMES}"
+                    )));
+                }
+                let fields = self
+                    .enzyme
+                    .as_ref()
+                    .or(self.fields.as_ref())
+                    .ok_or_else(|| {
+                        GenomePatchError::new("enzyme append operation requires enzyme fields")
+                    })?;
+                let mut enzyme = fields.build_new_enzyme()?;
+                let index = enzymes.len();
+                fields.apply_to_enzyme(&mut enzyme, &format!("enzyme[{index}]"), changed_fields)?;
+                enzymes.push(enzyme);
+                changed_fields.push(format!("enzyme[{index}].append"));
+                Ok(())
+            }
+            "replace" => {
+                let index = self.required_index()?;
+                let fields = self
+                    .enzyme
+                    .as_ref()
+                    .or(self.fields.as_ref())
+                    .ok_or_else(|| {
+                        GenomePatchError::new("enzyme replace operation requires enzyme fields")
+                    })?;
+                if index >= enzymes.len() {
+                    return Err(GenomePatchError::new(format!("no enzyme at index {index}")));
+                }
+                let mut enzyme = fields.build_new_enzyme()?;
+                fields.apply_to_enzyme(&mut enzyme, &format!("enzyme[{index}]"), changed_fields)?;
+                enzymes[index] = enzyme;
+                changed_fields.push(format!("enzyme[{index}].replace"));
+                Ok(())
+            }
+            "remove" => {
+                let index = self.required_index()?;
+                if enzymes.len() <= MIN_CELL_ENZYMES {
+                    return Err(GenomePatchError::new(format!(
+                        "cannot remove enzyme: min enzyme count is {MIN_CELL_ENZYMES}"
+                    )));
+                }
+                if index >= enzymes.len() {
+                    return Err(GenomePatchError::new(format!("no enzyme at index {index}")));
+                }
+                enzymes.remove(index);
+                changed_fields.push(format!("enzyme[{index}].remove"));
+                Ok(())
+            }
+            other => Err(GenomePatchError::new(format!(
+                "unsupported enzyme patch op '{other}'"
+            ))),
+        }
+    }
+
+    fn required_index(&self) -> Result<usize, GenomePatchError> {
+        self.index.ok_or_else(|| {
+            GenomePatchError::new(format!("enzyme {} operation requires index", self.op))
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnzymeFieldPatch {
+    pub enzyme_type: Option<String>,
+    pub specificity_mask: Option<u8>,
+    pub specificity_elements: Option<Vec<String>>,
+    pub bond_multiplier: Option<f32>,
+    pub bond_cost_fraction: Option<f32>,
+    pub bond_harvest_fraction: Option<f32>,
+    pub downhill_harvest_fraction: Option<f32>,
+    pub secretion_prob: Option<f32>,
+    pub enval_sigma: Option<f32>,
+    pub enval_throughput: Option<f32>,
+    pub enval_energy_fraction: Option<f32>,
+    pub enval_release_fraction: Option<f32>,
+    pub enval_pump: Option<f32>,
+    pub combat_level: Option<u32>,
+}
+
+impl EnzymeFieldPatch {
+    fn build_new_enzyme(&self) -> Result<Enzyme, GenomePatchError> {
+        let enzyme_type = self
+            .enzyme_type
+            .as_deref()
+            .ok_or_else(|| GenomePatchError::new("new enzyme operations require enzyme_type"))?
+            .parse::<EnzymeType>()?;
+        Ok(Enzyme::edit_default(enzyme_type))
+    }
+
+    fn apply_to_enzyme(
+        &self,
+        enzyme: &mut Enzyme,
+        label: &str,
+        changed_fields: &mut Vec<String>,
+    ) -> Result<(), GenomePatchError> {
+        if let Some(value) = &self.enzyme_type {
+            enzyme.enzyme_type = value.parse::<EnzymeType>()?;
+            changed_fields.push(format!("{label}.enzyme_type"));
+        }
+        if self.specificity_mask.is_some() && self.specificity_elements.is_some() {
+            return Err(GenomePatchError::new(format!(
+                "{label} cannot specify both specificity_mask and specificity_elements"
+            )));
+        }
+        if let Some(mask) = self.specificity_mask {
+            enzyme.specificity_mask = normalize_specificity_mask(
+                mask,
+                default_specificity_mask_for_type(enzyme.enzyme_type),
+            );
+            changed_fields.push(format!("{label}.specificity_mask"));
+        }
+        if let Some(elements) = &self.specificity_elements {
+            enzyme.specificity_mask = specificity_mask_from_strings(elements)?;
+            changed_fields.push(format!("{label}.specificity_mask"));
+        }
+        if let Some(value) = self.bond_multiplier {
+            enzyme.bond_multiplier = positive_f32(&format!("{label}.bond_multiplier"), value)?;
+            changed_fields.push(format!("{label}.bond_multiplier"));
+        }
+        if let Some(value) = self.bond_cost_fraction {
+            enzyme.bond_cost_fraction =
+                probability_f32(&format!("{label}.bond_cost_fraction"), value)?;
+            changed_fields.push(format!("{label}.bond_cost_fraction"));
+        }
+        if let Some(value) = self.bond_harvest_fraction {
+            enzyme.bond_harvest_fraction =
+                probability_f32(&format!("{label}.bond_harvest_fraction"), value)?;
+            changed_fields.push(format!("{label}.bond_harvest_fraction"));
+        }
+        if let Some(value) = self.downhill_harvest_fraction {
+            enzyme.downhill_harvest_fraction =
+                probability_f32(&format!("{label}.downhill_harvest_fraction"), value)?;
+            changed_fields.push(format!("{label}.downhill_harvest_fraction"));
+        }
+        if let Some(value) = self.secretion_prob {
+            enzyme.secretion_prob = probability_f32(&format!("{label}.secretion_prob"), value)?;
+            changed_fields.push(format!("{label}.secretion_prob"));
+        }
+        if let Some(value) = self.enval_sigma {
+            enzyme.enval_sigma = positive_f32(&format!("{label}.enval_sigma"), value)?;
+            changed_fields.push(format!("{label}.enval_sigma"));
+        }
+        if let Some(value) = self.enval_throughput {
+            enzyme.enval_throughput = nonnegative_f32(&format!("{label}.enval_throughput"), value)?;
+            changed_fields.push(format!("{label}.enval_throughput"));
+        }
+        if let Some(value) = self.enval_energy_fraction {
+            enzyme.enval_energy_fraction =
+                probability_f32(&format!("{label}.enval_energy_fraction"), value)?;
+            changed_fields.push(format!("{label}.enval_energy_fraction"));
+        }
+        if let Some(value) = self.enval_release_fraction {
+            enzyme.enval_release_fraction =
+                probability_f32(&format!("{label}.enval_release_fraction"), value)?;
+            changed_fields.push(format!("{label}.enval_release_fraction"));
+        }
+        if let Some(value) = self.enval_pump {
+            enzyme.enval_pump = nonnegative_f32(&format!("{label}.enval_pump"), value)?;
+            changed_fields.push(format!("{label}.enval_pump"));
+        }
+        if let Some(value) = self.combat_level {
+            if value == 0 {
+                return Err(GenomePatchError::new(format!(
+                    "{label}.combat_level must be >= 1"
+                )));
+            }
+            enzyme.combat_level = value;
+            changed_fields.push(format!("{label}.combat_level"));
+        }
+        enzyme.normalize_for_edit();
+        Ok(())
+    }
+}
+
+fn finite_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be finite")))
+    }
+}
+
+fn finite_f64(name: &str, value: f64) -> Result<f64, GenomePatchError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be finite")))
+    }
+}
+
+fn positive_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
+    let value = finite_f32(name, value)?;
+    if value > 0.0 {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be > 0")))
+    }
+}
+
+fn positive_f64(name: &str, value: f64) -> Result<f64, GenomePatchError> {
+    let value = finite_f64(name, value)?;
+    if value > 0.0 {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be > 0")))
+    }
+}
+
+fn nonnegative_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
+    let value = finite_f32(name, value)?;
+    if value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be >= 0")))
+    }
+}
+
+fn nonnegative_f64(name: &str, value: f64) -> Result<f64, GenomePatchError> {
+    let value = finite_f64(name, value)?;
+    if value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be >= 0")))
+    }
+}
+
+fn probability_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
+    let value = finite_f32(name, value)?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(GenomePatchError::new(format!("{name} must be in [0, 1]")))
+    }
+}
+
+fn specificity_mask_from_strings(elements: &[String]) -> Result<u8, GenomePatchError> {
+    if elements.is_empty() {
+        return Err(GenomePatchError::new(
+            "specificity_elements must not be empty",
+        ));
+    }
+    let mut mask = 0_u8;
+    for element in elements {
+        let bit = match element.as_str() {
+            "A" | "a" => Element::A.mask(),
+            "B" | "b" => Element::B.mask(),
+            "C" | "c" => Element::C.mask(),
+            "D" | "d" => Element::D.mask(),
+            "E" | "e" => Element::E.mask(),
+            "F" | "f" => Element::F.mask(),
+            other => {
+                return Err(GenomePatchError::new(format!(
+                    "invalid specificity element '{other}'"
+                )))
+            }
+        };
+        mask |= bit;
+    }
+    Ok(normalize_specificity_mask(mask, ALL_ELEMENT_MASK))
 }
 
 fn select_random_indices(count: usize, limit: usize, rng: &mut Rng) -> Vec<usize> {

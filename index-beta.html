@@ -41,6 +41,7 @@ https://www.github.com/Zushah/Microcosm
                         <select id="interactionMode">
                             <option value="explore">Explore</option>
                             <option value="edit">Edit enval</option>
+                            <option value="edit-genome">Edit genome</option>
                         </select>
                     </label>
                     <div class="buttonRow">
@@ -122,6 +123,88 @@ https://www.github.com/Zushah/Microcosm
                         <section>
                             <h3>Enzymes</h3>
                             <div id="enzymeInspector" class="inspectorPane richPane scrollPane"></div>
+                        </section>
+                        <section class="wideInspectorSection">
+                            <div class="subsectionHeader">
+                                <h3>Genome editing</h3>
+                                <button id="useSelectedGenomeButton" class="inlineButton" type="button">Use selected genome</button>
+                            </div>
+                            <div class="genomeEditControls">
+                                <label class="field">
+                                    <span>Genome field</span>
+                                    <select id="genomeEditField">
+                                        <option value="">No genome field</option>
+                                        <option value="optimal_enval">Optimal enval</option>
+                                        <option value="repro_threshold">Reproduction threshold</option>
+                                        <option value="decay_time">Decay time</option>
+                                        <option value="mutation_rate">Mutation rate</option>
+                                        <option value="default_secretion_prob">Default secretion probability</option>
+                                        <option value="desired_element_reserve">Desired reserve</option>
+                                        <option value="maintenance_cost_per_sec">Maintenance cost / sec</option>
+                                        <option value="enval_stress_factor">Enval stress factor</option>
+                                        <option value="enval_mutation_floor">Enval mutation floor</option>
+                                        <option value="post_divide_mortality">Post-divide mortality</option>
+                                    </select>
+                                </label>
+                                <label class="field">
+                                    <span>Genome value</span>
+                                    <input id="genomeEditValue" type="number" step="0.01" placeholder="value">
+                                </label>
+                                <label class="field">
+                                    <span>Enzyme op</span>
+                                    <select id="enzymeEditOp">
+                                        <option value="none">No enzyme edit</option>
+                                        <option value="update">Update enzyme</option>
+                                        <option value="append">Append enzyme</option>
+                                        <option value="replace">Replace enzyme</option>
+                                        <option value="remove">Remove enzyme</option>
+                                    </select>
+                                </label>
+                                <label class="field">
+                                    <span>Enzyme index</span>
+                                    <input id="enzymeEditIndex" type="number" min="0" step="1" value="0">
+                                </label>
+                                <label class="field">
+                                    <span>Enzyme type</span>
+                                    <select id="enzymeEditType">
+                                        <option value="anabolase">Anabolase</option>
+                                        <option value="catabolase">Catabolase</option>
+                                        <option value="transmutase">Transmutase</option>
+                                        <option value="defensase">Defensase</option>
+                                        <option value="attackase">Attackase</option>
+                                    </select>
+                                </label>
+                                <label class="field">
+                                    <span>Specificity</span>
+                                    <input id="enzymeEditSpecificity" type="text" value="ABC" placeholder="ABC or ALL">
+                                </label>
+                                <label class="field">
+                                    <span>Enzyme field</span>
+                                    <select id="enzymeEditField">
+                                        <option value="">No scalar field</option>
+                                        <option value="enval_sigma">Enval σ</option>
+                                        <option value="enval_throughput">Enval throughput</option>
+                                        <option value="secretion_prob">Secretion probability</option>
+                                        <option value="combat_level">Combat level</option>
+                                        <option value="bond_multiplier">Bond multiplier</option>
+                                        <option value="bond_cost_fraction">Bond cost fraction</option>
+                                        <option value="bond_harvest_fraction">Bond harvest fraction</option>
+                                        <option value="downhill_harvest_fraction">Downhill harvest fraction</option>
+                                        <option value="enval_energy_fraction">Enval energy fraction</option>
+                                        <option value="enval_release_fraction">Enval release fraction</option>
+                                        <option value="enval_pump">Enval pump</option>
+                                    </select>
+                                </label>
+                                <label class="field">
+                                    <span>Enzyme value</span>
+                                    <input id="enzymeEditValue" type="number" step="0.01" placeholder="value">
+                                </label>
+                            </div>
+                            <div class="buttonRow genomeEditActions">
+                                <button id="applyGenomePatchButton" class="inlineButton" type="button">Apply to selected cell</button>
+                                <button id="applyGenomeBrushButton" class="inlineButton" type="button">Apply brush at selection</button>
+                            </div>
+                            <div id="genomeEditResult" class="inspectorPane richPane"></div>
                         </section>
                         <section class="wideInspectorSection">
                             <div class="subsectionHeader">

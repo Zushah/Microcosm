@@ -77,6 +77,35 @@ const toggleCanvasFullscreen = async () => {
     setFallbackCanvasExpanded(true);
 };
 
+const refreshAfterGenomeEdit = (result) => {
+    gui.setGenomeEditResult(result);
+    gui.forceRefreshDetails();
+    if (interaction) interaction.refreshSelection();
+    if (renderer && runtime && runtime.ready) {
+        renderer.updateFromRuntime(runtime);
+        renderer.render();
+    }
+    updateGui();
+};
+
+const applySelectedGenomePatch = (patch) => {
+    if (!runtime || !runtime.ready || !interaction) throw new Error("Genome patch requires a ready runtime and selected cell.");
+    if (interaction.selectedCellId == null) throw new Error("Select a live cell before applying a genome patch.");
+    gui.clearError();
+    const result = runtime.applyCellGenomePatch(interaction.selectedCellId, patch);
+    refreshAfterGenomeEdit(result);
+};
+
+const applyGenomeBrushAtSelection = (patch) => {
+    if (!runtime || !runtime.ready || !interaction) throw new Error("Genome brush requires a ready runtime and selected tile.");
+    const tile = interaction.selectedTile || interaction.hoverTile;
+    if (!tile) throw new Error("Select or hover a tile before applying a genome brush from the GUI.");
+    gui.clearError();
+    const brush = interaction.brush || gui.brushOptions;
+    const result = runtime.applyGenomeBrush(tile.x, tile.y, brush.width, brush.height, patch);
+    refreshAfterGenomeEdit(result);
+};
+
 const updateInteractionVisuals = () => {
     if (!runtime || !runtime.ready || !renderer) return;
     renderer.updateFromRuntime(runtime);
@@ -203,8 +232,14 @@ const init = async () => {
             canvas: gui.canvas,
             mode: gui.mode,
             brush: gui.brushOptions,
+            genomePatch: () => gui.genomePatchDraft,
+            onError: (error) => gui.setError(error),
             onChange: () => updateInteractionVisuals(),
-            onMutation: () => updateInteractionVisuals()
+            onMutation: (event) => {
+                if (event && event.type === "genome-brush") gui.setGenomeEditResult(event.result);
+                if (event && event.type === "genome-brush") gui.forceRefreshDetails();
+                updateInteractionVisuals();
+            }
         });
         gui.setBrushOptions(interaction.brush);
         renderer.updateFromRuntime(runtime);
@@ -236,6 +271,8 @@ gui.bindControls({
     refreshDetails: () => { try { updateGui(); } catch (error) { gui.setError(error); } },
     fitView: () => { try { if (renderer) { renderer.fitView({ saveState: true }); renderer.render(); updateGui(); } } catch (error) { gui.setError(error); } },
     fullscreen: () => { toggleCanvasFullscreen().catch((error) => gui.setError(error)); },
+    applyGenomePatch: (patch) => { try { applySelectedGenomePatch(patch); } catch (error) { gui.setError(error); } },
+    applyGenomeBrush: (patch) => { try { applyGenomeBrushAtSelection(patch); } catch (error) { gui.setError(error); } },
     selectLineage: (lineageId) => { try { if (interaction) interaction.selectLineage(lineageId); } catch (error) { gui.setError(error); } }
 });
 

@@ -1,7 +1,7 @@
 const DEFAULT_BRUSH = Object.freeze({ width: 10, height: 10, delta: 0.05 });
 const CLICK_DRAG_THRESHOLD_PX = 4;
 
-const normalizeMode = (mode) => mode === "edit" ? "edit" : "explore";
+const normalizeMode = (mode) => mode === "edit" || mode === "edit-genome" ? mode : "explore";
 
 const normalizeBrushSpan = (value, fallback) => { const parsed = Math.round(Number(value)); if (!Number.isFinite(parsed)) return fallback; return Math.max(1, parsed); };
 
@@ -30,6 +30,8 @@ export class MicrocosmInteraction {
         this.canvas = options.canvas || options.renderer.canvas;
         this.onChange = options.onChange || null;
         this.onMutation = options.onMutation || null;
+        this.onError = options.onError || null;
+        this.genomePatch = options.genomePatch || null;
         this.mode = normalizeMode(options.mode || "explore");
         this.brush = { ...DEFAULT_BRUSH, ...(options.brush || {}) };
         this.hoverTile = null;
@@ -174,7 +176,7 @@ export class MicrocosmInteraction {
             this.syncRendererState();
             this.notifyChange();
         } else if (this.hoverTile && refreshHoverInfo && !this.hoverTileInfo) { this.hoverTileInfo = this.safeInspectTile(this.hoverTile); this.notifyChange(); }
-        if (this.mode === "edit" && this.isPainting) this.applyBrush(tile, event);
+        if ((this.mode === "edit" || this.mode === "edit-genome") && this.isPainting) this.applyBrush(tile, event);
     }
 
     handlePointerDown(event) {
@@ -189,7 +191,7 @@ export class MicrocosmInteraction {
             } : null;
             return;
         }
-        if (this.mode === "edit" && event.button === 2) {
+        if ((this.mode === "edit" || this.mode === "edit-genome") && event.button === 2) {
             event.preventDefault();
             this.pendingLeftClick = null;
             this.isPainting = true;
@@ -230,7 +232,7 @@ export class MicrocosmInteraction {
     handleKeyDown(event) {
         if (isEditableShortcutTarget(event.target)) return;
         if (event.key === "Escape") { event.preventDefault(); this.clearSelection(); return; }
-        if (event.key.toLowerCase() === "e") { event.preventDefault(); this.setMode(this.mode === "edit" ? "explore" : "edit"); }
+        if (event.key.toLowerCase() === "e") { event.preventDefault(); this.setMode(this.mode === "explore" ? "edit" : "explore"); }
     }
 
     updatePendingLeftClick(event) {
@@ -273,15 +275,31 @@ export class MicrocosmInteraction {
 
     applyBrush(tile, event) {
         if (!tile) return;
-        const key = `${tile.x},${tile.y}`;
+        const key = `${this.mode}:${tile.x},${tile.y}`;
         if (key === this.lastPaintKey) return;
         this.lastPaintKey = key;
         event.preventDefault();
-        this.runtime.applyEnvalBrush(tile.x, tile.y, this.brush.width, this.brush.height, this.brush.delta);
+        let mutation = null;
+        try {
+            if (this.mode === "edit-genome") {
+                const patch = typeof this.genomePatch === "function" ? this.genomePatch() : null;
+                if (!patch) throw new Error("Genome brush requires a genome patch draft.");
+                const result = this.runtime.applyGenomeBrush(tile.x, tile.y, this.brush.width, this.brush.height, patch);
+                mutation = { type: "genome-brush", tile: { x: tile.x, y: tile.y }, brush: { ...this.brush }, result };
+            } else {
+                this.runtime.applyEnvalBrush(tile.x, tile.y, this.brush.width, this.brush.height, this.brush.delta);
+                mutation = { type: "enval-brush", tile: { x: tile.x, y: tile.y }, brush: { ...this.brush } };
+            }
+        } catch (error) {
+            this.lastPaintKey = null;
+            if (this.onError) this.onError(error);
+            else throw error;
+            return;
+        }
         this.hoverTile = { x: tile.x, y: tile.y };
         this.hoverTileInfo = this.safeInspectTile(this.hoverTile);
         this.syncRendererState();
-        if (this.onMutation) this.onMutation({ type: "enval-brush", tile: this.hoverTile, brush: { ...this.brush } });
+        if (this.onMutation) this.onMutation(mutation);
         this.notifyChange();
     }
 
@@ -296,7 +314,7 @@ export class MicrocosmInteraction {
     }
 
     syncRendererState() {
-        const brushPreview = this.mode === "edit" && this.hoverTile ? {
+        const brushPreview = (this.mode === "edit" || this.mode === "edit-genome") && this.hoverTile ? {
             x: this.hoverTile.x, y: this.hoverTile.y,
             width: this.brush.width, height: this.brush.height
         } : null;

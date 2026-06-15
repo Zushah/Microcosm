@@ -2,7 +2,8 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, LineageId, MoleculeSeedingConfig, RenderBuffers, World, WorldStats, VERSION,
+    CellId, Config, GenomePatch, LineageId, MoleculeSeedingConfig, RenderBuffers, World,
+    WorldStats, VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -305,6 +306,17 @@ fn parse_config_from_bytes(ptr: *const u8, len: usize) -> Result<Config, String>
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let init: WasmInitConfig = serde_json::from_slice(bytes).map_err(|err| err.to_string())?;
     Ok(init.into_core_config())
+}
+
+fn parse_genome_patch_from_bytes(ptr: *const u8, len: usize) -> Result<GenomePatch, String> {
+    if len == 0 {
+        return Err("genome patch payload is empty".to_owned());
+    }
+    if ptr.is_null() {
+        return Err("nonzero genome patch length with null pointer".to_owned());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    serde_json::from_slice(bytes).map_err(|err| err.to_string())
 }
 
 fn create_instance(config: Config) -> Result<WasmInstance, String> {
@@ -856,6 +868,99 @@ pub extern "C" fn microcosm_list_lineages(handle: u32, limit: u32) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn microcosm_apply_cell_genome_patch(
+    handle: u32,
+    cell_id: u32,
+    patch_ptr: *const u8,
+    patch_len: usize,
+) -> u32 {
+    let patch = match parse_genome_patch_from_bytes(patch_ptr, patch_len) {
+        Ok(patch) => patch,
+        Err(err) => return set_last_error(STATUS_CONFIG_ERROR, err),
+    };
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let result = {
+                let Some(instance) = runtime.instance_mut(handle) else {
+                    return STATUS_INVALID_HANDLE;
+                };
+                let result = instance
+                    .world
+                    .apply_cell_genome_patch(CellId(cell_id as usize), &patch)
+                    .map_err(|err| err.to_string());
+                if result.is_ok() {
+                    instance.refresh_render_buffers();
+                }
+                result
+            };
+            match result {
+                Ok(info) => set_serialized_query_result(
+                    &mut runtime,
+                    json!({
+                        "schema": "microcosm.genome_edit_result.v1",
+                        "kind": "genome_edit_result",
+                        "result": info
+                    }),
+                ),
+                Err(err) => set_runtime_error(&mut runtime, STATUS_WORLD_ERROR, err),
+            }
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_apply_genome_brush(
+    handle: u32,
+    center_x: u32,
+    center_y: u32,
+    brush_width: u32,
+    brush_height: u32,
+    patch_ptr: *const u8,
+    patch_len: usize,
+) -> u32 {
+    let patch = match parse_genome_patch_from_bytes(patch_ptr, patch_len) {
+        Ok(patch) => patch,
+        Err(err) => return set_last_error(STATUS_CONFIG_ERROR, err),
+    };
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let result = {
+                let Some(instance) = runtime.instance_mut(handle) else {
+                    return STATUS_INVALID_HANDLE;
+                };
+                let result = instance
+                    .world
+                    .apply_genome_brush(
+                        center_x as usize,
+                        center_y as usize,
+                        brush_width as usize,
+                        brush_height as usize,
+                        &patch,
+                    )
+                    .map_err(|err| err.to_string());
+                if result.is_ok() {
+                    instance.refresh_render_buffers();
+                }
+                result
+            };
+            match result {
+                Ok(info) => set_serialized_query_result(
+                    &mut runtime,
+                    json!({
+                        "schema": "microcosm.genome_edit_result.v1",
+                        "kind": "genome_edit_result",
+                        "result": info
+                    }),
+                ),
+                Err(err) => set_runtime_error(&mut runtime, STATUS_WORLD_ERROR, err),
+            }
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn microcosm_set_tile_enval(handle: u32, x: u32, y: u32, value: f32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -1180,6 +1285,64 @@ mod tests {
             microcosm_inspect_cell_detail(handle, u32::MAX, 2, 2),
             STATUS_WORLD_ERROR
         );
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
+    }
+
+    #[test]
+    fn genome_patch_exports_return_authoritative_results() {
+        let json = br#"{"seed":"wasm-genome-patch","width":8,"height":6,"initial_cells":4}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+
+        let patch = br#"{"schema":"microcosm.genome_patch.v1","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
+            STATUS_OK
+        );
+        let result = query_json();
+        assert_eq!(result["schema"], "microcosm.genome_edit_result.v1");
+        assert_eq!(result["result"]["target"], "cell");
+        assert_eq!(result["result"]["cell_id"], 0);
+        assert_eq!(result["result"]["patched_cell_count"], 1);
+        assert!(result["result"]["changed_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field.as_str() == Some("optimal_enval")));
+
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2, 2), STATUS_OK);
+        let detail = query_json();
+        assert_eq!(detail["cell_detail"]["genome"]["optimal_enval"], 0.125);
+        assert!(detail["cell_detail"]["genome"]["enzymes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase")));
+
+        let invalid = br#"{"schema":"microcosm.genome_patch.v1","genome":{"mutation_rate":2.0}}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, invalid.as_ptr(), invalid.len()),
+            STATUS_WORLD_ERROR
+        );
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
+    }
+
+    #[test]
+    fn genome_brush_export_reports_patch_counts() {
+        let json = br#"{"seed":"wasm-genome-brush","width":8,"height":6,"initial_cells":4}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+
+        let patch = br#"{"schema":"microcosm.genome_patch.v1","genome":{"decay_time":2222.0}}"#;
+        assert_eq!(
+            microcosm_apply_genome_brush(handle, 0, 0, 8, 6, patch.as_ptr(), patch.len()),
+            STATUS_OK
+        );
+        let result = query_json();
+        assert_eq!(result["schema"], "microcosm.genome_edit_result.v1");
+        assert_eq!(result["result"]["target"], "brush");
+        assert_eq!(result["result"]["visited_tile_count"], 48);
+        assert!(result["result"]["patched_cell_count"].as_u64().unwrap() >= 1);
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 

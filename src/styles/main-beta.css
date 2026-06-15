@@ -428,3 +428,19 @@ tr.isBad td {
         grid-template-columns: minmax(0, 1fr);
     }
 }
+.genomeEditControls {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.genomeEditActions {
+    justify-content: flex-end;
+    margin: 10px 0;
+}
+
+@media (max-width: 1050px) {
+    .genomeEditControls {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

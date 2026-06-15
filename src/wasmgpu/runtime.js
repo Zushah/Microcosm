@@ -399,6 +399,36 @@ export class MicrocosmRuntime {
         return this._stats;
     }
 
+    applyCellGenomePatch(cellId, patch, options = {}) {
+        this.assertReady();
+        const id = Math.max(0, Number(cellId) | 0);
+        const result = this.withJsonBytes(patch, "genome patch", (ptr, len) => {
+            const status = readUintStatus(this._functions.applyCellGenomePatch(this._handle, id, ptr, len));
+            this.assertStatus(status, "microcosm_apply_cell_genome_patch");
+            return this.readQueryResult("microcosm.apply_cell_genome_patch");
+        });
+        if (options.refresh !== false) this.refreshRenderBuffers();
+        return result;
+    }
+
+    applyGenomeBrush(centerX, centerY, brushWidth, brushHeight, patch, options = {}) {
+        this.assertReady();
+        const width = Math.max(1, Number(brushWidth) | 0);
+        const height = Math.max(1, Number(brushHeight) | 0);
+        const result = this.withJsonBytes(patch, "genome patch", (ptr, len) => {
+            const status = readUintStatus(this._functions.applyGenomeBrush(
+                this._handle,
+                Number(centerX) >>> 0, Number(centerY) >>> 0,
+                width >>> 0, height >>> 0,
+                ptr, len
+            ));
+            this.assertStatus(status, "microcosm_apply_genome_brush");
+            return this.readQueryResult("microcosm.apply_genome_brush");
+        });
+        if (options.refresh !== false) this.refreshRenderBuffers();
+        return result;
+    }
+
     viewDiagnostics() {
         const expectedTileCount = this.tileCount, expectedCellCount = this.cellCount;
         return VIEW_DEFINITIONS.map((definition) => ({
@@ -444,6 +474,8 @@ export class MicrocosmRuntime {
             inspectCellReactions: get("microcosm_inspect_cell_reactions"),
             inspectLineage: get("microcosm_inspect_lineage"),
             listLineages: get("microcosm_list_lineages"),
+            applyCellGenomePatch: get("microcosm_apply_cell_genome_patch"),
+            applyGenomeBrush: get("microcosm_apply_genome_brush"),
             setTileEnval: get("microcosm_set_tile_enval"),
             adjustTileEnval: get("microcosm_adjust_tile_enval"),
             brushEnvalRect: get("microcosm_brush_enval_rect")
@@ -490,6 +522,16 @@ export class MicrocosmRuntime {
         if (bytes.length === 0) return callback(0, 0);
         const ptr = Number(this._functions.alloc(bytes.length, 1));
         if (ptr === 0) throw new Error(`microcosm_alloc failed for ${bytes.length} config byte(s).`);
+        try { new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes); return callback(ptr, bytes.length); }
+        finally { this._functions.free(ptr, bytes.length, 1); }
+    }
+
+    withJsonBytes(value, label, callback) {
+        if (!isPlainObject(value)) throw new Error(`${label} must be a plain object.`);
+        const bytes = this._textEncoder.encode(JSON.stringify(value));
+        if (bytes.length === 0) throw new Error(`${label} encoded to an empty payload.`);
+        const ptr = Number(this._functions.alloc(bytes.length, 1));
+        if (ptr === 0) throw new Error(`microcosm_alloc failed for ${bytes.length} ${label} byte(s).`);
         try { new Uint8Array(this.memory.buffer, ptr, bytes.length).set(bytes); return callback(ptr, bytes.length); }
         finally { this._functions.free(ptr, bytes.length, 1); }
     }

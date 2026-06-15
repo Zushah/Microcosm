@@ -20,6 +20,11 @@ const LINEAGE_LIST_REFRESH_INTERVAL_MS = 5000;
 const CELL_MOLECULE_LIMIT = 64;
 const CELL_REACTION_LIMIT = 24;
 const LINEAGE_LIST_LIMIT = 32;
+const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v1";
+const ELEMENT_MASKS = Object.freeze({ A: 1, B: 2, C: 4, D: 8, E: 16, F: 32 });
+const COMBAT_ENZYME_TYPES = new Set(["attackase", "defensase"]);
+const INTEGER_GENOME_FIELDS = new Set(["desired_element_reserve"]);
+const INTEGER_ENZYME_FIELDS = new Set(["combat_level"]);
 
 const displayValue = (value) => {
     if (typeof value === "bigint") return value.toString();
@@ -47,6 +52,28 @@ const elementCountsText = (counts) => { if (!counts) return "—"; return ELEMEN
 
 const compositionText = (counts) => { if (!counts) return "—"; return ELEMENT_KEYS.map((key, index) => [key, elementCountValue(counts, index, key)]).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `${key}${Number(value) > 1 ? displayValue(value) : ""}`).join(" ") || "empty"; };
 
+const specificityMaskFromText = (value) => {
+    const text = `${value ?? ""}`.trim().toUpperCase().replace(/[\s,]+/g, "");
+    if (text === "" || text === "ALL") return 63;
+    if (!/^[A-F]+$/.test(text)) throw new Error("Specificity must contain A-F letters or ALL.");
+    let mask = 0;
+    for (let i = 0; i < text.length; i++) mask |= ELEMENT_MASKS[text[i]] || 0;
+    return mask || 63;
+};
+
+const specificityTextFromMask = (mask) => {
+    const normalized = Number(mask) >>> 0;
+    const text = ELEMENT_KEYS.filter((key) => (normalized & ELEMENT_MASKS[key]) !== 0).join("");
+    return text === "ABCDEF" ? "ALL" : (text || "ALL");
+};
+
+const parseEditNumber = (value, label, integer = false) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new Error(`${label} must be a finite number.`);
+    if (integer && !Number.isInteger(number)) throw new Error(`${label} must be an integer.`);
+    return integer ? number | 0 : number;
+};
+
 const moleculeSummaryText = (molecule) => {
     if (!molecule) return "—";
     const formula = molecule.formula || compositionText(molecule.composition_counts);
@@ -62,7 +89,7 @@ const moleculeListSummaryText = (molecules, limit = 3) => {
     return shown.join(", ");
 };
 
-const statusClass = (status) => status === "edit" ? "modeEdit" : "modeExplore";
+const statusClass = (status) => status && status.startsWith("edit") ? "modeEdit" : "modeExplore";
 
 const errorText = (error) => error && error.message ? error.message : String(error || "Unknown error");
 
@@ -103,6 +130,18 @@ export class MicrocosmGUI {
             copyLineageButton: root.getElementById("copyLineageButton"),
             copyMoleculesButton: root.getElementById("copyMoleculesButton"),
             copyReactionsButton: root.getElementById("copyReactionsButton"),
+            useSelectedGenomeButton: root.getElementById("useSelectedGenomeButton"),
+            applyGenomePatchButton: root.getElementById("applyGenomePatchButton"),
+            applyGenomeBrushButton: root.getElementById("applyGenomeBrushButton"),
+            genomeEditField: root.getElementById("genomeEditField"),
+            genomeEditValue: root.getElementById("genomeEditValue"),
+            enzymeEditOp: root.getElementById("enzymeEditOp"),
+            enzymeEditIndex: root.getElementById("enzymeEditIndex"),
+            enzymeEditType: root.getElementById("enzymeEditType"),
+            enzymeEditSpecificity: root.getElementById("enzymeEditSpecificity"),
+            enzymeEditField: root.getElementById("enzymeEditField"),
+            enzymeEditValue: root.getElementById("enzymeEditValue"),
+            genomeEditResult: root.getElementById("genomeEditResult"),
             hoverInspector: root.getElementById("hoverInspector"),
             tileInspector: root.getElementById("tileInspector"),
             cellInspector: root.getElementById("cellInspector"),
@@ -123,6 +162,7 @@ export class MicrocosmGUI {
     constructor(elements) {
         this.elements = elements;
         this._lastInspectionPayload = null;
+        this._lastGenomeEditResult = null;
         this._forceDetailRefresh = true;
         this._detail = {
             selectedCellId: null,
@@ -180,6 +220,22 @@ export class MicrocosmGUI {
         };
     }
 
+
+    get genomePatchDraft() {
+        const patch = { schema: GENOME_PATCH_SCHEMA };
+        const genomeField = this.elements.genomeEditField ? this.elements.genomeEditField.value : "";
+        if (genomeField) {
+            const value = this.elements.genomeEditValue ? this.elements.genomeEditValue.value : "";
+            patch.genome = {
+                [genomeField]: parseEditNumber(value, genomeField, INTEGER_GENOME_FIELDS.has(genomeField))
+            };
+        }
+        const enzymeOp = this.elements.enzymeEditOp ? this.elements.enzymeEditOp.value : "none";
+        if (enzymeOp !== "none") patch.enzymes = [this.buildEnzymePatchOperation(enzymeOp)];
+        if (!patch.genome && !patch.enzymes) throw new Error("Choose at least one genome or enzyme edit before applying a patch.");
+        return patch;
+    }
+
     populateDisplayModes() {
         const select = this.elements.displayMode;
         if (!select) return;
@@ -209,6 +265,9 @@ export class MicrocosmGUI {
         if (this.elements.copyLineageButton) this.elements.copyLineageButton.addEventListener("click", () => this.copyPayload("lineage", this.elements.copyLineageButton));
         if (this.elements.copyMoleculesButton) this.elements.copyMoleculesButton.addEventListener("click", () => this.copyPayload("molecules", this.elements.copyMoleculesButton));
         if (this.elements.copyReactionsButton) this.elements.copyReactionsButton.addEventListener("click", () => this.copyPayload("reactions", this.elements.copyReactionsButton));
+        if (this.elements.useSelectedGenomeButton) this.elements.useSelectedGenomeButton.addEventListener("click", () => this.useSelectedGenomeAsDraft());
+        if (this.elements.applyGenomePatchButton) this.elements.applyGenomePatchButton.addEventListener("click", () => { try { if (handlers.applyGenomePatch) handlers.applyGenomePatch(this.genomePatchDraft); } catch (error) { this.setError(error); } });
+        if (this.elements.applyGenomeBrushButton) this.elements.applyGenomeBrushButton.addEventListener("click", () => { try { if (handlers.applyGenomeBrush) handlers.applyGenomeBrush(this.genomePatchDraft); } catch (error) { this.setError(error); } });
         if (this.elements.lineageList) {
             this.elements.lineageList.addEventListener("click", (event) => {
                 const button = event.target instanceof Element ? event.target.closest("[data-lineage-id]") : null;
@@ -235,7 +294,9 @@ export class MicrocosmGUI {
     }
 
     setMode(mode) {
-        if (this.elements.interactionMode) this.elements.interactionMode.value = mode === "edit" ? "edit" : "explore";
+        if (!this.elements.interactionMode) return;
+        const normalized = mode === "edit" || mode === "edit-genome" ? mode : "explore";
+        this.elements.interactionMode.value = normalized;
     }
 
     setBrushOptions(options = {}) {
@@ -248,6 +309,57 @@ export class MicrocosmGUI {
         if (!this.elements.fullscreenButton) return;
         this.elements.fullscreenButton.textContent = active ? "Exit fullscreen" : "Fullscreen";
         this.elements.fullscreenButton.setAttribute("aria-pressed", active ? "true" : "false");
+    }
+
+    setGenomeEditResult(result) {
+        this._lastGenomeEditResult = result;
+        this.renderGenomeEditResult();
+    }
+
+    buildEnzymePatchOperation(op) {
+        const index = this.elements.enzymeEditIndex ? parseEditNumber(this.elements.enzymeEditIndex.value, "enzyme index", true) : 0;
+        if (index < 0) throw new Error("enzyme index must be >= 0.");
+        if (op === "remove") return { op, index };
+        const enzymeType = this.elements.enzymeEditType ? this.elements.enzymeEditType.value : "anabolase";
+        const fields = { enzyme_type: enzymeType };
+        if (!COMBAT_ENZYME_TYPES.has(enzymeType)) fields.specificity_mask = specificityMaskFromText(this.elements.enzymeEditSpecificity ? this.elements.enzymeEditSpecificity.value : "ALL");
+        const scalarField = this.elements.enzymeEditField ? this.elements.enzymeEditField.value : "";
+        if (scalarField) fields[scalarField] = parseEditNumber(this.elements.enzymeEditValue ? this.elements.enzymeEditValue.value : "", scalarField, INTEGER_ENZYME_FIELDS.has(scalarField));
+        if (op === "append") return { op, enzyme: fields };
+        if (op === "replace") return { op, index, enzyme: fields };
+        return { op, index, fields };
+    }
+
+    useSelectedGenomeAsDraft() {
+        const detail = this.cellDetailPayload();
+        const genome = detail && detail.genome;
+        if (!genome) { this.setError(new Error("Select a live cell before loading a genome draft.")); return; }
+        if (this.elements.genomeEditField) this.elements.genomeEditField.value = "optimal_enval";
+        if (this.elements.genomeEditValue) this.elements.genomeEditValue.value = displayValue(genome.optimal_enval);
+        const enzymes = Array.isArray(genome.enzymes) ? genome.enzymes : [];
+        const enzyme = enzymes[0] || null;
+        if (this.elements.enzymeEditOp) this.elements.enzymeEditOp.value = enzyme ? "update" : "none";
+        if (this.elements.enzymeEditIndex) this.elements.enzymeEditIndex.value = enzyme ? String(enzyme.index || 0) : "0";
+        if (this.elements.enzymeEditType && enzyme) this.elements.enzymeEditType.value = enzyme.enzyme_type || "anabolase";
+        if (this.elements.enzymeEditSpecificity && enzyme) this.elements.enzymeEditSpecificity.value = specificityTextFromMask(enzyme.specificity_mask);
+        if (this.elements.enzymeEditField) this.elements.enzymeEditField.value = enzyme && enzyme.is_combat ? "combat_level" : "enval_sigma";
+        if (this.elements.enzymeEditValue && enzyme) this.elements.enzymeEditValue.value = displayValue(enzyme.is_combat ? enzyme.combat_level : enzyme.enval_sigma);
+        this.setGenomeEditResult({ message: "Loaded selected genome into the edit draft controls." });
+    }
+
+    renderGenomeEditResult() {
+        if (!this.elements.genomeEditResult) return;
+        const payload = this._lastGenomeEditResult;
+        if (!payload) { this.elements.genomeEditResult.innerHTML = payloadMessage("Create a draft patch, then apply it to the selected cell or use Edit genome mode to brush cells."); return; }
+        if (payload.message) { this.elements.genomeEditResult.innerHTML = payloadMessage(payload.message); return; }
+        const result = payload.result || payload;
+        this.elements.genomeEditResult.innerHTML = detailRows([
+            ["Target", result.target || "—"],
+            ["Patched cells", result.patched_cell_count ?? "—"],
+            ["Visited tiles", result.visited_tile_count ?? "—"],
+            ["Brush", result.brush_width && result.brush_height ? `${result.brush_width} × ${result.brush_height}` : "—"],
+            ["Changed fields", Array.isArray(result.changed_fields) && result.changed_fields.length > 0 ? result.changed_fields.join(", ") : "none"]
+        ]);
     }
 
     setStatus(text) {
@@ -441,7 +553,7 @@ export class MicrocosmGUI {
                 ["Selected lineage", interaction.selectedLineageId ?? "—"],
                 ["Mode", htmlValue(`<span class="${statusClass(interaction.mode)}">${escapeHtml(interaction.mode)}</span>`)],
                 ["Brush", `${interaction.brush.width} × ${interaction.brush.height}`],
-                ["Δ enval", interaction.brush.delta]
+                ["Brush payload", interaction.mode === "edit-genome" ? "genome patch" : `Δ enval ${displayValue(interaction.brush.delta)}`]
             ]);
         }
     }
@@ -455,6 +567,7 @@ export class MicrocosmGUI {
         this.renderReactions(detail);
         this.renderLineageDetail(interaction);
         this.renderLineageList();
+        this.renderGenomeEditResult();
     }
 
     cellDetailPayload() {
@@ -700,6 +813,7 @@ export class MicrocosmGUI {
             case "lineage": return this._detail.lineage;
             case "molecules": return this._detail.molecules;
             case "reactions": return this._detail.reactions;
+            case "genome-edit": return this._lastGenomeEditResult;
             default: return this._lastInspectionPayload;
         }
     }

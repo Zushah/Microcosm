@@ -18,8 +18,9 @@ pub use chem::{
 };
 pub use config::{Config, ConfigError, MoleculeSeedingConfig};
 pub use genome::{
-    Enzyme, EnzymeType, Genome, LineageId, PredationEnzymeTransferStats, MAX_CELL_ENZYMES,
-    MIN_CELL_ENZYMES,
+    Enzyme, EnzymeFieldPatch, EnzymePatchOperation, EnzymeType, Genome, GenomeFieldPatch,
+    GenomePatch, GenomePatchError, LineageId, PredationEnzymeTransferStats, GENOME_PATCH_SCHEMA,
+    MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 pub use molecule::{Molecule, MoleculeError};
 pub use render_buffers::{RenderBuffers, EMPTY_CELL_ID};
@@ -33,9 +34,10 @@ pub use stats::{
 };
 pub use world::{
     CellDetailInspection, CellInspection, EnzymeDetailInspection, GenomeDetailInspection,
-    InvariantError, LineageCounters, LineageListInspection, LineageSummaryInspection,
-    MoleculeDetailInspection, MoleculeId, MoleculeListInspection, MoleculeOwner, NeighborIndices,
-    ReactionLogInspection, TileId, TileInspection, World, WorldError,
+    GenomeEditResult, InvariantError, LineageCounters, LineageListInspection,
+    LineageSummaryInspection, MoleculeDetailInspection, MoleculeId, MoleculeListInspection,
+    MoleculeOwner, NeighborIndices, ReactionLogInspection, TileId, TileInspection, World,
+    WorldError,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

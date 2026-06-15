@@ -30,6 +30,8 @@ export const REQUIRED_MICROCOSM_EXPORTS = Object.freeze([
     "microcosm_inspect_cell_reactions",
     "microcosm_inspect_lineage",
     "microcosm_list_lineages",
+    "microcosm_apply_cell_genome_patch",
+    "microcosm_apply_genome_brush",
     "microcosm_set_tile_enval",
     "microcosm_adjust_tile_enval",
     "microcosm_brush_enval_rect",

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::time::Instant;
@@ -11,7 +11,9 @@ use crate::cell::{
 };
 use crate::chem::{Composition, Element, ELEMENT_COUNT, ELEMENT_ORDER};
 use crate::config::{Config, ConfigError};
-use crate::genome::{Enzyme, EnzymeType, Genome, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES};
+use crate::genome::{
+    Enzyme, EnzymeType, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+};
 use crate::molecule::{Molecule, MoleculeError};
 use crate::render_buffers::{RenderBuffers, EMPTY_CELL_ID};
 use crate::rng::Rng;
@@ -195,6 +197,24 @@ pub struct ReactionLogInspection {
     pub returned_count: usize,
     pub order: &'static str,
     pub reactions: Vec<ReactionRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GenomeEditResult {
+    pub target: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_x: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_y: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brush_width: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brush_height: Option<usize>,
+    pub visited_tile_count: usize,
+    pub patched_cell_count: usize,
+    pub changed_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1307,6 +1327,120 @@ impl World {
             truncated: extant_lineage_count > limit,
             lineages,
         }
+    }
+
+    pub fn apply_cell_genome_patch(
+        &mut self,
+        cell_id: CellId,
+        patch: &GenomePatch,
+    ) -> Result<GenomeEditResult, WorldError> {
+        let changed_fields = self.apply_genome_patch_to_cell(cell_id, patch)?;
+        Ok(GenomeEditResult {
+            target: "cell",
+            cell_id: Some(cell_id.index()),
+            center_x: None,
+            center_y: None,
+            brush_width: None,
+            brush_height: None,
+            visited_tile_count: 1,
+            patched_cell_count: 1,
+            changed_fields,
+        })
+    }
+
+    pub fn apply_genome_brush(
+        &mut self,
+        center_x: usize,
+        center_y: usize,
+        brush_width: usize,
+        brush_height: usize,
+        patch: &GenomePatch,
+    ) -> Result<GenomeEditResult, WorldError> {
+        let width = brush_width.min(self.width).max(1);
+        let height = brush_height.min(self.height).max(1);
+        let start_x = center_x as isize - (width as isize / 2);
+        let start_y = center_y as isize - (height as isize / 2);
+        let mut cells = Vec::new();
+        for dx in 0..width {
+            for dy in 0..height {
+                let tile_id = self.wrapped_tile_id(start_x + dx as isize, start_y + dy as isize);
+                let Some(cell_id) = self.tiles[tile_id.index()].cell else {
+                    continue;
+                };
+                if self
+                    .cells
+                    .get(cell_id.index())
+                    .map(|cell| cell.state == CellState::Active)
+                    .unwrap_or(false)
+                {
+                    cells.push(cell_id);
+                }
+            }
+        }
+
+        let mut changed = BTreeSet::new();
+        for cell_id in cells.iter().copied() {
+            let Some(cell) = self.cells.get(cell_id.index()) else {
+                return Err(WorldError::InvalidCell(cell_id));
+            };
+            if cell.state != CellState::Active {
+                return Err(WorldError::InvalidCell(cell_id));
+            }
+            let mut genome = cell.genome.clone();
+            let changed_fields = patch
+                .apply_to_genome(&mut genome)
+                .map_err(|err| WorldError::GenomePatch(err.to_string()))?;
+            for field in changed_fields {
+                changed.insert(field);
+            }
+        }
+
+        let mut patched_cell_count = 0_usize;
+        for cell_id in cells.iter().copied() {
+            self.apply_genome_patch_to_cell(cell_id, patch)?;
+            patched_cell_count += 1;
+        }
+
+        Ok(GenomeEditResult {
+            target: "brush",
+            cell_id: None,
+            center_x: Some(center_x % self.width),
+            center_y: Some(center_y % self.height),
+            brush_width: Some(width),
+            brush_height: Some(height),
+            visited_tile_count: width.saturating_mul(height),
+            patched_cell_count,
+            changed_fields: changed.into_iter().collect(),
+        })
+    }
+
+    fn apply_genome_patch_to_cell(
+        &mut self,
+        cell_id: CellId,
+        patch: &GenomePatch,
+    ) -> Result<Vec<String>, WorldError> {
+        let Some(cell) = self.cells.get(cell_id.index()) else {
+            return Err(WorldError::InvalidCell(cell_id));
+        };
+        if cell.state != CellState::Active {
+            return Err(WorldError::InvalidCell(cell_id));
+        }
+        let original_lineage = cell.lineage_id;
+        let mut genome = cell.genome.clone();
+        let changed_fields = patch
+            .apply_to_genome(&mut genome)
+            .map_err(|err| WorldError::GenomePatch(err.to_string()))?;
+        genome.lineage_id = original_lineage;
+
+        let cell = self
+            .cells
+            .get_mut(cell_id.index())
+            .ok_or(WorldError::InvalidCell(cell_id))?;
+        cell.genome = genome;
+        cell.lineage_id = original_lineage;
+        cell.maintenance_cost_per_sec = cell.genome.maintenance_cost_per_sec;
+        cell.refresh_combat_totals();
+        Ok(changed_fields)
     }
 
     fn lineage_summary(
@@ -3316,6 +3450,7 @@ pub enum WorldError {
     OccupiedTile(TileId),
     NonFiniteEnvalInput(f32),
     InvalidEnergyInput(f64),
+    GenomePatch(String),
     TileCountOverflow(TileId),
     TileCountUnderflow(TileId),
     CellCountOverflow(CellId),
@@ -3341,6 +3476,7 @@ impl fmt::Display for WorldError {
                     "invalid cell energy override: expected finite nonnegative value, got {value}"
                 )
             }
+            Self::GenomePatch(message) => write!(f, "invalid genome patch: {message}"),
             Self::TileCountOverflow(tile) => {
                 write!(f, "tile count overflow at tile {}", tile.index())
             }
@@ -3757,7 +3893,10 @@ mod tests {
     use crate::cell::{CellState, CELL_REACTION_LOG_CAPACITY};
     use crate::chem::{Composition, Element, ELEMENT_ORDER};
     use crate::config::{Config, MoleculeSeedingConfig};
-    use crate::genome::{Enzyme, EnzymeType, Genome, LineageId};
+    use crate::genome::{
+        Enzyme, EnzymeFieldPatch, EnzymePatchOperation, EnzymeType, Genome, GenomeFieldPatch,
+        GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+    };
     use crate::molecule::Molecule;
 
     fn small_config(seed: &str, width: usize, height: usize) -> Config {
@@ -4277,6 +4416,172 @@ mod tests {
         let detail = world.inspect_cell_detail(cell_id, 4, 3).unwrap();
         assert!(detail.recent_reactions.available);
         assert_eq!(detail.recent_reactions.returned_count, 3);
+    }
+
+    #[test]
+    fn genome_patch_updates_selected_cell_fields_and_enzymes() {
+        let mut world = World::new(only_a_config("genome-patch-cell", 4, 4)).unwrap();
+        let tile = world.tile_id(1, 1).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        let energy_before = world.cells[cell_id.index()].energy;
+        let lineage_before = world.cells[cell_id.index()].lineage_id;
+        let patch = GenomePatch {
+            schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
+            genome: Some(GenomeFieldPatch {
+                optimal_enval: Some(0.25),
+                repro_threshold: Some(8.5),
+                mutation_rate: Some(0.02),
+                maintenance_cost_per_sec: Some(0.11),
+                ..GenomeFieldPatch::default()
+            }),
+            enzymes: vec![
+                EnzymePatchOperation {
+                    op: "update".to_owned(),
+                    index: Some(0),
+                    fields: Some(EnzymeFieldPatch {
+                        enval_sigma: Some(0.44),
+                        enval_throughput: Some(0.22),
+                        specificity_mask: Some(0b0000_0111),
+                        ..EnzymeFieldPatch::default()
+                    }),
+                    enzyme: None,
+                },
+                EnzymePatchOperation {
+                    op: "append".to_owned(),
+                    index: None,
+                    fields: None,
+                    enzyme: Some(EnzymeFieldPatch {
+                        enzyme_type: Some("attackase".to_owned()),
+                        combat_level: Some(123),
+                        ..EnzymeFieldPatch::default()
+                    }),
+                },
+            ],
+        };
+
+        let result = world.apply_cell_genome_patch(cell_id, &patch).unwrap();
+        let cell = &world.cells[cell_id.index()];
+        assert_eq!(result.patched_cell_count, 1);
+        assert!(result
+            .changed_fields
+            .iter()
+            .any(|field| field == "optimal_enval"));
+        assert!((cell.genome.optimal_enval - 0.25).abs() <= 1.0e-6);
+        assert_eq!(cell.genome.repro_threshold, 8.5);
+        assert_eq!(cell.maintenance_cost_per_sec, 0.11);
+        assert_eq!(cell.genome.maintenance_cost_per_sec, 0.11);
+        assert_eq!(cell.energy, energy_before);
+        assert_eq!(cell.lineage_id, lineage_before);
+        assert_eq!(cell.genome.lineage_id, lineage_before);
+        assert_eq!(cell.combat_attack_total, 123);
+        assert!(cell.genome.enzymes.len() >= 2);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn invalid_genome_patch_is_rejected_atomically() {
+        let mut world = World::new(only_a_config("genome-patch-invalid", 4, 4)).unwrap();
+        let tile = world.tile_id(1, 1).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        let before = world.cells[cell_id.index()].genome.clone();
+        let patch = GenomePatch {
+            schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
+            genome: Some(GenomeFieldPatch {
+                mutation_rate: Some(1.5),
+                ..GenomeFieldPatch::default()
+            }),
+            enzymes: Vec::new(),
+        };
+
+        assert!(world.apply_cell_genome_patch(cell_id, &patch).is_err());
+        assert_eq!(world.cells[cell_id.index()].genome, before);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn enzyme_patch_respects_min_and_max_bounds() {
+        let mut world = World::new(only_a_config("genome-patch-bounds", 4, 4)).unwrap();
+        let tile = world.tile_id(1, 1).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        genome.enzymes = vec![Enzyme::anabolase_abc(&mut world.rng)];
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        let remove_patch = GenomePatch {
+            schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
+            genome: None,
+            enzymes: vec![EnzymePatchOperation {
+                op: "remove".to_owned(),
+                index: Some(0),
+                fields: None,
+                enzyme: None,
+            }],
+        };
+        assert_eq!(
+            world.cells[cell_id.index()].genome.enzymes.len(),
+            MIN_CELL_ENZYMES
+        );
+        assert!(world
+            .apply_cell_genome_patch(cell_id, &remove_patch)
+            .is_err());
+
+        while world.cells[cell_id.index()].genome.enzymes.len() < MAX_CELL_ENZYMES {
+            world.cells[cell_id.index()]
+                .genome
+                .enzymes
+                .push(Enzyme::defensase(1));
+        }
+        let append_patch = GenomePatch {
+            schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
+            genome: None,
+            enzymes: vec![EnzymePatchOperation {
+                op: "append".to_owned(),
+                index: None,
+                fields: None,
+                enzyme: Some(EnzymeFieldPatch {
+                    enzyme_type: Some("defensase".to_owned()),
+                    combat_level: Some(1),
+                    ..EnzymeFieldPatch::default()
+                }),
+            }],
+        };
+        assert!(world
+            .apply_cell_genome_patch(cell_id, &append_patch)
+            .is_err());
+        assert_eq!(
+            world.cells[cell_id.index()].genome.enzymes.len(),
+            MAX_CELL_ENZYMES
+        );
+    }
+
+    #[test]
+    fn genome_brush_applies_patch_to_active_cells_in_wrapped_rect() {
+        let mut world = World::new(only_a_config("genome-patch-brush", 4, 4)).unwrap();
+        let first_tile = world.tile_id(3, 3).unwrap();
+        let second_tile = world.tile_id(0, 0).unwrap();
+        let first_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let second_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let first = world
+            .spawn_cell_with_genome_at(first_tile, first_genome)
+            .unwrap();
+        let second = world
+            .spawn_cell_with_genome_at(second_tile, second_genome)
+            .unwrap();
+        let patch = GenomePatch {
+            schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
+            genome: Some(GenomeFieldPatch {
+                decay_time: Some(3333.0),
+                ..GenomeFieldPatch::default()
+            }),
+            enzymes: Vec::new(),
+        };
+
+        let result = world.apply_genome_brush(3, 3, 3, 3, &patch).unwrap();
+        assert_eq!(result.visited_tile_count, 9);
+        assert_eq!(result.patched_cell_count, 2);
+        assert_eq!(world.cells[first.index()].genome.decay_time, 3333.0);
+        assert_eq!(world.cells[second.index()].genome.decay_time, 3333.0);
+        world.check_invariants().unwrap();
     }
 
     #[test]
