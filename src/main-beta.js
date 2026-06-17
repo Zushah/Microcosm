@@ -131,6 +131,7 @@ const resetRuntime = () => {
     if (!runtime || !renderer) return;
     gui.clearError();
     gui.forceRefreshDetails();
+    gui.clearGenomeEditResult();
     const config = buildConfig();
     runtime.reset(config);
     window.history.replaceState(null, "", seedUrl(config.seed).toString());
@@ -232,7 +233,7 @@ const init = async () => {
             canvas: gui.canvas,
             mode: gui.mode,
             brush: gui.brushOptions,
-            genomePatch: () => gui.genomePatchDraft,
+            genomePatch: () => gui.genomeBrushPatchDraft,
             onError: (error) => gui.setError(error),
             onChange: () => updateInteractionVisuals(),
             onMutation: (event) => {

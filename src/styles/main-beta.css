@@ -193,6 +193,11 @@ button:hover {
     background: #f0f0f0;
 }
 
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
 #status {
     margin-top: 4px;
     color: var(--muted);

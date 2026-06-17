@@ -101,6 +101,8 @@ const makeTable = (columns, rows, emptyMessage = "No records.") => { if (!rows |
 
 const buttonForLineage = (lineageId) => `<button class="inlineButton" type="button" data-lineage-id="${escapeHtml(displayValue(lineageId))}">Select</button>`;
 
+const genomePatchHasBrushRisk = (patch) => Boolean(patch && Array.isArray(patch.enzymes) && patch.enzymes.some((operation) => operation && (operation.op === "append" || operation.op === "remove")));
+
 export class MicrocosmGUI {
     static bind(root = document) {
         return new MicrocosmGUI({
@@ -236,6 +238,12 @@ export class MicrocosmGUI {
         return patch;
     }
 
+    get genomeBrushPatchDraft() {
+        const patch = this.genomePatchDraft;
+        if (genomePatchHasBrushRisk(patch)) throw new Error("Genome brush mode does not apply append/remove enzyme operations because repeated strokes can repeatedly change the same cells. Use selected-cell editing for append/remove, or choose update/replace for brush edits.");
+        return patch;
+    }
+
     populateDisplayModes() {
         const select = this.elements.displayMode;
         if (!select) return;
@@ -267,7 +275,7 @@ export class MicrocosmGUI {
         if (this.elements.copyReactionsButton) this.elements.copyReactionsButton.addEventListener("click", () => this.copyPayload("reactions", this.elements.copyReactionsButton));
         if (this.elements.useSelectedGenomeButton) this.elements.useSelectedGenomeButton.addEventListener("click", () => this.useSelectedGenomeAsDraft());
         if (this.elements.applyGenomePatchButton) this.elements.applyGenomePatchButton.addEventListener("click", () => { try { if (handlers.applyGenomePatch) handlers.applyGenomePatch(this.genomePatchDraft); } catch (error) { this.setError(error); } });
-        if (this.elements.applyGenomeBrushButton) this.elements.applyGenomeBrushButton.addEventListener("click", () => { try { if (handlers.applyGenomeBrush) handlers.applyGenomeBrush(this.genomePatchDraft); } catch (error) { this.setError(error); } });
+        if (this.elements.applyGenomeBrushButton) this.elements.applyGenomeBrushButton.addEventListener("click", () => { try { if (handlers.applyGenomeBrush) handlers.applyGenomeBrush(this.genomeBrushPatchDraft); } catch (error) { this.setError(error); } });
         if (this.elements.lineageList) {
             this.elements.lineageList.addEventListener("click", (event) => {
                 const button = event.target instanceof Element ? event.target.closest("[data-lineage-id]") : null;
@@ -316,6 +324,25 @@ export class MicrocosmGUI {
         this.renderGenomeEditResult();
     }
 
+    clearGenomeEditResult() {
+        this._lastGenomeEditResult = null;
+        this.renderGenomeEditResult();
+    }
+
+    updateGenomeEditControls(interaction) {
+        const hasSelectedCell = Boolean(interaction && interaction.selectedCellId != null);
+        const hasBrushTarget = Boolean(interaction && (interaction.selectedTile || interaction.hoverTile));
+        if (this.elements.useSelectedGenomeButton) this.elements.useSelectedGenomeButton.disabled = !hasSelectedCell;
+        if (this.elements.applyGenomePatchButton) {
+            this.elements.applyGenomePatchButton.disabled = !hasSelectedCell;
+            this.elements.applyGenomePatchButton.title = hasSelectedCell ? "Apply the draft patch to the selected live cell." : "Select a live cell before applying a genome patch.";
+        }
+        if (this.elements.applyGenomeBrushButton) {
+            this.elements.applyGenomeBrushButton.disabled = !hasBrushTarget;
+            this.elements.applyGenomeBrushButton.title = hasBrushTarget ? "Apply a non-append/remove genome patch to cells in the current brush footprint." : "Select or hover a tile before applying a genome brush from the GUI.";
+        }
+    }
+
     buildEnzymePatchOperation(op) {
         const index = this.elements.enzymeEditIndex ? parseEditNumber(this.elements.enzymeEditIndex.value, "enzyme index", true) : 0;
         if (index < 0) throw new Error("enzyme index must be >= 0.");
@@ -338,19 +365,19 @@ export class MicrocosmGUI {
         if (this.elements.genomeEditValue) this.elements.genomeEditValue.value = displayValue(genome.optimal_enval);
         const enzymes = Array.isArray(genome.enzymes) ? genome.enzymes : [];
         const enzyme = enzymes[0] || null;
-        if (this.elements.enzymeEditOp) this.elements.enzymeEditOp.value = enzyme ? "update" : "none";
+        if (this.elements.enzymeEditOp) this.elements.enzymeEditOp.value = "none";
         if (this.elements.enzymeEditIndex) this.elements.enzymeEditIndex.value = enzyme ? String(enzyme.index || 0) : "0";
         if (this.elements.enzymeEditType && enzyme) this.elements.enzymeEditType.value = enzyme.enzyme_type || "anabolase";
         if (this.elements.enzymeEditSpecificity && enzyme) this.elements.enzymeEditSpecificity.value = specificityTextFromMask(enzyme.specificity_mask);
         if (this.elements.enzymeEditField) this.elements.enzymeEditField.value = enzyme && enzyme.is_combat ? "combat_level" : "enval_sigma";
         if (this.elements.enzymeEditValue && enzyme) this.elements.enzymeEditValue.value = displayValue(enzyme.is_combat ? enzyme.combat_level : enzyme.enval_sigma);
-        this.setGenomeEditResult({ message: "Loaded selected genome into the edit draft controls." });
+        this.setGenomeEditResult({ message: "Loaded selected genome values into the draft controls. Choose an enzyme operation before applying enzyme edits." });
     }
 
     renderGenomeEditResult() {
         if (!this.elements.genomeEditResult) return;
         const payload = this._lastGenomeEditResult;
-        if (!payload) { this.elements.genomeEditResult.innerHTML = payloadMessage("Create a draft patch, then apply it to the selected cell or use Edit genome mode to brush cells."); return; }
+        if (!payload) { this.elements.genomeEditResult.innerHTML = payloadMessage("Create a draft patch, then apply it to the selected cell or use Edit genome mode for update/replace brush edits. Append/remove enzyme operations are selected-cell only."); return; }
         if (payload.message) { this.elements.genomeEditResult.innerHTML = payloadMessage(payload.message); return; }
         const result = payload.result || payload;
         this.elements.genomeEditResult.innerHTML = detailRows([
@@ -385,6 +412,7 @@ export class MicrocosmGUI {
         const renderStats = renderer ? renderer.diagnostics : {};
         const interaction = state.interaction ? state.interaction.state : null;
         if (interaction) this.setMode(interaction.mode);
+        this.updateGenomeEditControls(interaction);
         this.updateDetailQueries(runtime, interaction);
         const diagnostics = [
             ["Runtime", runtime.ready ? "ready" : "not ready"],
@@ -685,7 +713,7 @@ export class MicrocosmGUI {
         if (!reactions) { this.elements.reactionInspector.innerHTML = payloadMessage("Reaction data is available after selecting a live cell."); return; }
         if (reactions.available === false) {
             this.elements.reactionInspector.innerHTML = `
-                ${payloadMessage("Recent reaction logs are not recorded by the Rust core yet.", "smallNote warningText")}
+                ${payloadMessage("Recent reaction logs are unavailable from this Rust core/WASM build or for this cell state.", "smallNote warningText")}
                 ${detailRows([
                     ["Reason", reactions.reason || "not_recorded"],
                     ["Limit", reactions.limit],
@@ -825,7 +853,7 @@ export class MicrocosmGUI {
     }
 
     async copyInspection() {
-        if (!this._lastInspectionPayload) return;
+        if (!this._lastInspectionPayload) { this.setError(new Error("No inspection JSON is loaded yet.")); return; }
         await this.copyObject(this._lastInspectionPayload, this.elements.copyInspectionButton);
     }
 

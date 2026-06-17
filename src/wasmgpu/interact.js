@@ -292,6 +292,11 @@ export class MicrocosmInteraction {
             }
         } catch (error) {
             this.lastPaintKey = null;
+            if (this.mode === "edit-genome") {
+                this.isPainting = false;
+                try { this.canvas.releasePointerCapture(event.pointerId); } catch { /* ignore */ }
+                this.syncRendererState();
+            }
             if (this.onError) this.onError(error);
             else throw error;
             return;

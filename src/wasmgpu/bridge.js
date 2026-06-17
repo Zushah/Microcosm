@@ -85,7 +85,7 @@ export const loadMicrocosmWasm = async (wasmUrl, imports = {}) => {
 export const assertMicrocosmExports = (exportsObject, requiredExports = REQUIRED_MICROCOSM_EXPORTS) => {
     const missing = [];
     for (const name of requiredExports) if (!Object.prototype.hasOwnProperty.call(exportsObject, name)) missing.push(name);
-    if (missing.length > 0) throw new Error(`Microcosm WebAssembly is missing required export(s): ${missing.join(", ")}.`);
+    if (missing.length > 0) throw new Error(`Microcosm WebAssembly is missing required export(s): ${missing.join(", ")}. The checked-in src/rust/microcosm.wasm is likely stale; rebuild it from src/rust after applying the current Rust sources.`);
 };
 
 export const readExportedUtf8 = (module, ptrExport, lenExport, options = {}) => module.readUtf8(
