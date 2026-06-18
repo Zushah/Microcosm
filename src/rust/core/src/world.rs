@@ -25,6 +25,7 @@ use crate::stats::{
 const LOCAL_ENVAL_RADIUS: usize = 2;
 const MOORE_WITH_CENTER_DX: [isize; 9] = [-1, -1, -1, 0, 0, 1, 1, 1, 0];
 const MOORE_WITH_CENTER_DY: [isize; 9] = [-1, 0, 1, -1, 1, -1, 0, 1, 0];
+const MAX_REACTION_SUBSTRATES: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TileId(pub usize);
@@ -260,6 +261,52 @@ pub struct LineageListInspection {
 struct PredationOutcome {
     winner: CellId,
     loser: CellId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SampledSubstrateIds {
+    ids: [MoleculeId; MAX_REACTION_SUBSTRATES],
+    len: usize,
+}
+
+impl SampledSubstrateIds {
+    fn new() -> Self {
+        Self {
+            ids: [MoleculeId(0); MAX_REACTION_SUBSTRATES],
+            len: 0,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    fn len(self) -> usize {
+        self.len
+    }
+
+    fn push(&mut self, molecule_id: MoleculeId) {
+        debug_assert!(self.len < MAX_REACTION_SUBSTRATES);
+        self.ids[self.len] = molecule_id;
+        self.len += 1;
+    }
+
+    fn replace(&mut self, index: usize, molecule_id: MoleculeId) {
+        debug_assert!(index < self.len);
+        self.ids[index] = molecule_id;
+    }
+
+    fn first(self) -> Option<MoleculeId> {
+        if self.len == 0 {
+            None
+        } else {
+            Some(self.ids[0])
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = MoleculeId> {
+        (0..self.len).map(move |index| self.ids[index])
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2512,14 +2559,19 @@ impl World {
                     .increment(enzyme.enzyme_type);
                 continue;
             }
-            let substrates = substrate_ids
-                .iter()
-                .map(|id| self.molecules[id.index()].molecule)
-                .collect::<Vec<_>>();
+            let Some(first_substrate_id) = substrate_ids.first() else {
+                continue;
+            };
+            let mut substrate_storage =
+                [self.molecules[first_substrate_id.index()].molecule; MAX_REACTION_SUBSTRATES];
+            for (index, molecule_id) in substrate_ids.iter().enumerate().skip(1) {
+                substrate_storage[index] = self.molecules[molecule_id.index()].molecule;
+            }
+            let substrates = &substrate_storage[..substrate_ids.len()];
             let cell_energy = self.cells[cell_id.index()].energy;
             let Some(result) = bio::attempt_reaction_for_context(
                 &enzyme,
-                &substrates,
+                substrates,
                 genome_context,
                 cell_energy,
                 env,
@@ -2565,7 +2617,7 @@ impl World {
                 }
             }
             let energy_after = self.cells[cell_id.index()].energy;
-            for molecule_id in substrate_ids {
+            for molecule_id in substrate_ids.iter() {
                 let _ = self.consume_molecule(molecule_id);
             }
 
@@ -2707,8 +2759,13 @@ impl World {
         tile_id: TileId,
         enzyme: &crate::genome::Enzyme,
         max_count: usize,
-    ) -> Vec<MoleculeId> {
-        let mut out = Vec::new();
+    ) -> SampledSubstrateIds {
+        debug_assert!(max_count <= MAX_REACTION_SUBSTRATES);
+        let max_count = max_count.min(MAX_REACTION_SUBSTRATES);
+        let mut out = SampledSubstrateIds::new();
+        if !self.substrate_pool_may_accept(cell_id, tile_id, enzyme, max_count) {
+            return out;
+        }
         let mut seen = 0_usize;
 
         let tile_len = self.tiles[tile_id.index()].molecules.len();
@@ -2726,13 +2783,46 @@ impl World {
         out
     }
 
+    fn substrate_pool_may_accept(
+        &self,
+        cell_id: CellId,
+        tile_id: TileId,
+        enzyme: &crate::genome::Enzyme,
+        max_count: usize,
+    ) -> bool {
+        if max_count == 0
+            || cell_id.index() >= self.cells.len()
+            || tile_id.index() >= self.tile_count
+        {
+            return false;
+        }
+        let tile_molecule_count = self.tiles[tile_id.index()].molecules.len();
+        let cell_molecule_count = self.cells[cell_id.index()].molecules.len();
+        if tile_molecule_count + cell_molecule_count == 0 {
+            return false;
+        }
+        if enzyme.enzyme_type == EnzymeType::Anabolase
+            && tile_molecule_count + cell_molecule_count < 2
+        {
+            return false;
+        }
+        let pool_mask = element_mask_from_counts(self.tile_element_counts[tile_id.index()])
+            | element_mask_from_counts(self.cells[cell_id.index()].internal_element_counts);
+        match enzyme.enzyme_type {
+            EnzymeType::Anabolase | EnzymeType::Catabolase | EnzymeType::Transmutase => {
+                (pool_mask & enzyme.specificity_mask) != 0
+            }
+            EnzymeType::Defensase | EnzymeType::Attackase => false,
+        }
+    }
+
     fn consider_substrate_candidate(
         &mut self,
         molecule_id: MoleculeId,
         enzyme: &crate::genome::Enzyme,
         max_count: usize,
         seen: &mut usize,
-        out: &mut Vec<MoleculeId>,
+        out: &mut SampledSubstrateIds,
     ) {
         if max_count == 0 || molecule_id.index() >= self.molecules.len() {
             return;
@@ -2751,7 +2841,7 @@ impl World {
         } else {
             let j = (self.rng.next_f64() * *seen as f64) as usize;
             if j < max_count {
-                out[j] = molecule_id;
+                out.replace(j, molecule_id);
             }
         }
     }
@@ -3052,6 +3142,13 @@ impl World {
                 .operation_counters
                 .predation_cross_lineage_pairs
                 .saturating_add(1);
+        } else {
+            return;
+        }
+        if self.cells[cell_a.index()].combat_attack_total == 0
+            && self.cells[cell_b.index()].combat_attack_total == 0
+        {
+            return;
         }
         let Some(outcome) = self.resolve_predation_between_cells(cell_a, cell_b) else {
             return;
@@ -5092,6 +5189,56 @@ mod tests {
         assert!(a.operation_counters.local_enval_average_calls > 0);
         assert_eq!(a.operation_counters.enzyme_list_clones, 0);
         assert_eq!(a.operation_counters.genome_clones, 0);
+    }
+
+    #[test]
+    fn substrate_sampling_stack_capacity_covers_all_metabolic_enzyme_classes() {
+        let mut rng = crate::rng::Rng::from_seed_str("substrate-capacity");
+        for enzyme_type in [
+            EnzymeType::Anabolase,
+            EnzymeType::Catabolase,
+            EnzymeType::Transmutase,
+        ] {
+            let enzyme = Enzyme::random(enzyme_type, &mut rng);
+            assert!(crate::bio::max_inputs(&enzyme) <= super::MAX_REACTION_SUBSTRATES);
+        }
+    }
+
+    #[test]
+    fn substrate_sampling_prefilter_skips_impossible_pools_without_scanning() {
+        let mut world = World::new(only_a_config("substrate-prefilter-skip", 4, 4)).unwrap();
+        let tile_id = world.tile_id(0, 0).unwrap();
+        let avg_enval = world.avg_enval;
+        let genome = Genome::random_founder(&mut world.rng, avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile_id, genome).unwrap();
+        let mut enzyme = Enzyme::anabolase_abc(&mut world.rng);
+        enzyme.specificity_mask = Element::D.mask();
+
+        let before = world.operation_counters.substrate_candidates_scanned;
+        let substrates = world.sample_accepted_substrates(cell_id, tile_id, &enzyme, 3);
+
+        assert!(substrates.is_empty());
+        assert_eq!(
+            world.operation_counters.substrate_candidates_scanned,
+            before
+        );
+    }
+
+    #[test]
+    fn substrate_sampling_still_scans_and_samples_possible_pools() {
+        let mut world = World::new(only_a_config("substrate-prefilter-hit", 4, 4)).unwrap();
+        let tile_id = world.tile_id(0, 0).unwrap();
+        let avg_enval = world.avg_enval;
+        let genome = Genome::random_founder(&mut world.rng, avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile_id, genome).unwrap();
+        let mut enzyme = Enzyme::random(EnzymeType::Transmutase, &mut world.rng);
+        enzyme.specificity_mask = Element::A.mask();
+
+        let before = world.operation_counters.substrate_candidates_scanned;
+        let substrates = world.sample_accepted_substrates(cell_id, tile_id, &enzyme, 1);
+
+        assert_eq!(substrates.len(), 1);
+        assert!(world.operation_counters.substrate_candidates_scanned > before);
     }
 
     #[test]
