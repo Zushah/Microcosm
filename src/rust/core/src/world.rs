@@ -23,6 +23,8 @@ use crate::stats::{
 };
 
 const LOCAL_ENVAL_RADIUS: usize = 2;
+const LOCAL_ENVAL_WINDOW_DIAMETER: usize = LOCAL_ENVAL_RADIUS * 2 + 1;
+const LOCAL_ENVAL_WINDOW_AREA: usize = LOCAL_ENVAL_WINDOW_DIAMETER * LOCAL_ENVAL_WINDOW_DIAMETER;
 const MOORE_WITH_CENTER_DX: [isize; 9] = [-1, -1, -1, 0, 0, 1, 1, 1, 0];
 const MOORE_WITH_CENTER_DY: [isize; 9] = [-1, 0, 1, -1, 1, -1, 0, 1, 0];
 const MAX_REACTION_SUBSTRATES: usize = 3;
@@ -644,6 +646,33 @@ impl World {
     }
 
     pub fn default_local_enval_average(&self, tile_id: TileId) -> Option<f32> {
+        let tile_index = tile_id.index();
+        if tile_index >= self.tile_count {
+            return None;
+        }
+
+        let x = tile_index / self.height;
+        let y = tile_index % self.height;
+        if self.width > LOCAL_ENVAL_RADIUS * 2
+            && self.height > LOCAL_ENVAL_RADIUS * 2
+            && x >= LOCAL_ENVAL_RADIUS
+            && x < self.width - LOCAL_ENVAL_RADIUS
+            && y >= LOCAL_ENVAL_RADIUS
+            && y < self.height - LOCAL_ENVAL_RADIUS
+        {
+            let start_y = y - LOCAL_ENVAL_RADIUS;
+            let mut sum = 0.0_f64;
+            for xx in (x - LOCAL_ENVAL_RADIUS)..=(x + LOCAL_ENVAL_RADIUS) {
+                let base = xx * self.height + start_y;
+                sum += f64::from(self.enval[base]);
+                sum += f64::from(self.enval[base + 1]);
+                sum += f64::from(self.enval[base + 2]);
+                sum += f64::from(self.enval[base + 3]);
+                sum += f64::from(self.enval[base + 4]);
+            }
+            return Some((sum / LOCAL_ENVAL_WINDOW_AREA as f64) as f32);
+        }
+
         self.local_enval_average(tile_id, LOCAL_ENVAL_RADIUS)
     }
 
@@ -1145,28 +1174,36 @@ impl World {
     }
 
     pub fn build_render_buffers(&self) -> RenderBuffers {
-        let mut buffers = RenderBuffers {
-            width: self.width.min(u32::MAX as usize) as u32,
-            height: self.height.min(u32::MAX as usize) as u32,
-            tick_count: self.tick_count,
-            sim_time_seconds: self.sim_time_seconds,
-            render_epoch: (self.tick_count & u64::from(u32::MAX)) as u32,
-            tile_enval: self.enval.clone(),
-            tile_occupancy: Vec::with_capacity(self.tile_count),
-            tile_mass: Vec::with_capacity(self.tile_count),
-            tile_molecule_count: Vec::with_capacity(self.tile_count),
-            tile_element_mask: Vec::with_capacity(self.tile_count),
-            cell_id: Vec::with_capacity(self.active_cells.len()),
-            cell_x: Vec::with_capacity(self.active_cells.len()),
-            cell_y: Vec::with_capacity(self.active_cells.len()),
-            cell_energy: Vec::with_capacity(self.active_cells.len()),
-            cell_lineage: Vec::with_capacity(self.active_cells.len()),
-            cell_flags: Vec::with_capacity(self.active_cells.len()),
-            cell_enzyme_count: Vec::with_capacity(self.active_cells.len()),
-            cell_age_seconds: Vec::with_capacity(self.active_cells.len()),
-            cell_attack: Vec::with_capacity(self.active_cells.len()),
-            cell_defense: Vec::with_capacity(self.active_cells.len()),
-        };
+        let mut buffers = RenderBuffers::default();
+        self.write_render_buffers(&mut buffers);
+        buffers
+    }
+
+    pub fn write_render_buffers(&self, buffers: &mut RenderBuffers) {
+        buffers.clear();
+        buffers.width = self.width.min(u32::MAX as usize) as u32;
+        buffers.height = self.height.min(u32::MAX as usize) as u32;
+        buffers.tick_count = self.tick_count;
+        buffers.sim_time_seconds = self.sim_time_seconds;
+        buffers.render_epoch = (self.tick_count & u64::from(u32::MAX)) as u32;
+
+        buffers.tile_enval.reserve(self.tile_count);
+        buffers.tile_occupancy.reserve(self.tile_count);
+        buffers.tile_mass.reserve(self.tile_count);
+        buffers.tile_molecule_count.reserve(self.tile_count);
+        buffers.tile_element_mask.reserve(self.tile_count);
+        buffers.cell_id.reserve(self.active_cells.len());
+        buffers.cell_x.reserve(self.active_cells.len());
+        buffers.cell_y.reserve(self.active_cells.len());
+        buffers.cell_energy.reserve(self.active_cells.len());
+        buffers.cell_lineage.reserve(self.active_cells.len());
+        buffers.cell_flags.reserve(self.active_cells.len());
+        buffers.cell_enzyme_count.reserve(self.active_cells.len());
+        buffers.cell_age_seconds.reserve(self.active_cells.len());
+        buffers.cell_attack.reserve(self.active_cells.len());
+        buffers.cell_defense.reserve(self.active_cells.len());
+
+        buffers.tile_enval.extend_from_slice(&self.enval);
 
         for tile_index in 0..self.tile_count {
             let tile = &self.tiles[tile_index];
@@ -1218,8 +1255,6 @@ impl World {
             buffers.cell_attack.push(cell.combat_attack_total);
             buffers.cell_defense.push(cell.combat_defense_total);
         }
-
-        buffers
     }
 
     pub fn inspect_tile(&self, tile_id: TileId) -> Option<TileInspection> {
@@ -2727,13 +2762,6 @@ impl World {
             }
         }
 
-        self.operation_counters.local_enval_average_calls = self
-            .operation_counters
-            .local_enval_average_calls
-            .saturating_add(1);
-        local_enval = self
-            .default_local_enval_average(tile_id)
-            .unwrap_or(local_enval);
         let optimal_enval = self.cells[cell_id.index()].genome.optimal_enval;
         let dist = (local_enval - optimal_enval).abs();
         let enzyme_count = self.cells[cell_id.index()].genome.enzymes.len().max(1) as f64;
@@ -3986,7 +4014,7 @@ impl Error for InvariantError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{InvariantError, MoleculeOwner, TileId, World};
+    use super::{InvariantError, MoleculeOwner, RenderBuffers, TileId, World};
     use crate::cell::{CellState, CELL_REACTION_LOG_CAPACITY};
     use crate::chem::{Composition, Element, ELEMENT_ORDER};
     use crate::config::{Config, MoleculeSeedingConfig};
@@ -5082,6 +5110,46 @@ mod tests {
         assert_eq!(cell_info.x, 2);
         assert_eq!(cell_info.y, 1);
         assert!(cell_info.energy.is_finite());
+    }
+
+    #[test]
+    fn default_local_enval_average_matches_generic_radius_two_average() {
+        let mut world = World::new(only_a_config("local-enval-fast-path", 7, 6)).unwrap();
+        for x in 0..world.width() {
+            for y in 0..world.height() {
+                let tile_id = world.tile_id(x, y).unwrap();
+                world
+                    .set_tile_enval(tile_id, (x as f32 * 0.25) - (y as f32 * 0.10))
+                    .unwrap();
+            }
+        }
+
+        for x in 0..world.width() {
+            for y in 0..world.height() {
+                let tile_id = world.tile_id(x, y).unwrap();
+                let fast = world.default_local_enval_average(tile_id).unwrap();
+                let generic = world
+                    .local_enval_average(tile_id, super::LOCAL_ENVAL_RADIUS)
+                    .unwrap();
+                assert_eq!(fast.to_bits(), generic.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn write_render_buffers_reuses_existing_allocations_and_matches_builder() {
+        let mut world = World::new(small_config("render-buffer-reuse", 8, 6)).unwrap();
+        world.spawn_founder_cells(4).unwrap();
+        world.step_many(5);
+
+        let expected = world.build_render_buffers();
+        let mut actual = RenderBuffers::default();
+        actual.tile_enval.reserve(128);
+        let reserved_tile_capacity = actual.tile_enval.capacity();
+        world.write_render_buffers(&mut actual);
+
+        assert_eq!(actual, expected);
+        assert!(actual.tile_enval.capacity() >= reserved_tile_capacity);
     }
 
     #[test]

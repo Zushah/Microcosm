@@ -235,9 +235,10 @@ struct WasmInstance {
 
 impl WasmInstance {
     fn new(mut world: World) -> Self {
-        let stats = WasmStats::from(&world.stats());
-        let render_buffers = world.build_render_buffers();
         world.rebuild_derived_caches();
+        let stats = WasmStats::from(&world.stats());
+        let mut render_buffers = RenderBuffers::default();
+        world.write_render_buffers(&mut render_buffers);
         Self {
             world,
             stats,
@@ -251,7 +252,7 @@ impl WasmInstance {
     }
 
     fn refresh_render_buffers(&mut self) {
-        self.render_buffers = self.world.build_render_buffers();
+        self.world.write_render_buffers(&mut self.render_buffers);
         self.refresh_stats();
     }
 }
@@ -541,6 +542,21 @@ pub extern "C" fn microcosm_step(handle: u32, ticks: u32) -> u32 {
             };
             instance.world.step_many(ticks);
             instance.refresh_stats();
+            runtime.last_error.clear();
+            STATUS_OK
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_step_no_stats(handle: u32, ticks: u32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance_mut(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            instance.world.step_many(ticks);
             runtime.last_error.clear();
             STATUS_OK
         }
@@ -1151,6 +1167,24 @@ mod tests {
         assert!(microcosm_render_epoch(handle) >= 5);
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
         assert_eq!(microcosm_step(handle, 1), STATUS_INVALID_HANDLE);
+    }
+
+    #[test]
+    fn no_stats_step_defers_stats_until_render_refresh() {
+        let json = br#"{"seed":"wasm-no-stats-step","width":8,"height":6,"initial_cells":4}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+        let before = unsafe { *microcosm_stats_ptr(handle) }.tick_count;
+
+        assert_eq!(microcosm_step_no_stats(handle, 3), STATUS_OK);
+        assert_eq!(unsafe { *microcosm_stats_ptr(handle) }.tick_count, before);
+
+        assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
+        assert_eq!(
+            unsafe { *microcosm_stats_ptr(handle) }.tick_count,
+            before + 3
+        );
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 
     #[test]

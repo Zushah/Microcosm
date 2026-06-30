@@ -16,6 +16,7 @@ export const REQUIRED_MICROCOSM_EXPORTS = Object.freeze([
     "microcosm_destroy",
     "microcosm_reset",
     "microcosm_step",
+    "microcosm_step_no_stats",
     "microcosm_refresh_render_buffers",
     "microcosm_stats_ptr",
     "microcosm_tile_count",

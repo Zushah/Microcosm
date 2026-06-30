@@ -254,7 +254,7 @@ export class MicrocosmRuntime {
     step(ticks = 1, options = {}) {
         this.assertReady();
         const count = Math.max(0, Number(ticks) | 0);
-        if (count > 0) this.assertStatus(readUintStatus(this._functions.step(this._handle, count)), "microcosm_step");
+        if (count > 0) this.assertStatus(readUintStatus(this._functions.stepNoStats(this._handle, count)), "microcosm_step_no_stats");
         if (options.refresh !== false) this.refreshRenderBuffers();
         return this._stats;
     }
@@ -460,6 +460,7 @@ export class MicrocosmRuntime {
             destroy: get("microcosm_destroy"),
             reset: get("microcosm_reset"),
             step: get("microcosm_step"),
+            stepNoStats: get("microcosm_step_no_stats"),
             refreshRenderBuffers: get("microcosm_refresh_render_buffers"),
             statsPtr: get("microcosm_stats_ptr"),
             tileCount: get("microcosm_tile_count"),
