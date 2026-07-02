@@ -1174,10 +1174,6 @@ fn print_stats_record(stats: &WorldStats, interval: &StatsInterval, mode: StatsM
     }
 }
 
-fn print_stats(stats: &WorldStats) {
-    print_compact_stats(stats, &StatsInterval::default());
-}
-
 fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
     println!(
         "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} molecules={} tile_mol={} cell_mol={} free_mol_records={} arena={} reused={} atoms={} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} predation={} d_predation={} consumed={} lineages={} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} elements=A:{} B:{} C:{} D:{} E:{} F:{}",
