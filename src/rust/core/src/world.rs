@@ -343,6 +343,8 @@ pub struct World {
     reaction_counters: ReactionCounters,
     operation_counters: OperationCounters,
     tile_element_counts: Vec<[u32; ELEMENT_COUNT]>,
+    #[serde(skip, default)]
+    tile_element_masks: Vec<u8>,
     tile_mass_counts: Vec<u32>,
     tile_diffusion_rotor: Vec<u8>,
     neighbors: Vec<NeighborIndices>,
@@ -392,6 +394,7 @@ impl World {
             reaction_counters: ReactionCounters::default(),
             operation_counters: OperationCounters::default(),
             tile_element_counts: vec![[0; ELEMENT_COUNT]; tile_count],
+            tile_element_masks: vec![0; tile_count],
             tile_mass_counts: vec![0; tile_count],
             tile_diffusion_rotor: (0..tile_count).map(initial_tile_diffusion_rotor).collect(),
             neighbors,
@@ -1165,11 +1168,18 @@ impl World {
         self.neighbors = build_neighbors(self.width, self.height);
         self.predation_pairs = build_predation_pairs(&self.neighbors);
         self.predation_occupied_tiles.clear();
+        self.tile_element_masks = self
+            .tile_element_counts
+            .iter()
+            .copied()
+            .map(element_mask_from_counts)
+            .collect();
         self.molecule_arena_high_water_mark = self
             .molecule_arena_high_water_mark
             .max(self.molecules.len());
         for cell in &mut self.cells {
             cell.refresh_combat_totals();
+            cell.refresh_internal_element_mask();
         }
     }
 
@@ -1218,9 +1228,7 @@ impl World {
                 .push(tile.molecules.len().min(u32::MAX as usize) as u32);
             buffers
                 .tile_element_mask
-                .push(u32::from(element_mask_from_counts(
-                    self.tile_element_counts[tile_index],
-                )));
+                .push(u32::from(self.tile_element_masks[tile_index]));
         }
 
         for cell_id in self.active_cells.iter().copied() {
@@ -1272,7 +1280,7 @@ impl World {
             molecule_count: self.tiles[tile_id.index()].molecules.len(),
             mass_count: self.tile_mass_counts[tile_id.index()],
             element_counts,
-            element_mask: element_mask_from_counts(element_counts),
+            element_mask: self.tile_element_masks[tile_id.index()],
         })
     }
 
@@ -1612,6 +1620,7 @@ impl World {
             || self.enval.len() != self.tile_count
             || self.enval_next.len() != self.tile_count
             || self.tile_element_counts.len() != self.tile_count
+            || self.tile_element_masks.len() != self.tile_count
             || self.tile_mass_counts.len() != self.tile_count
         {
             return Err(InvariantError::MismatchedWorldArrayLengths);
@@ -1728,6 +1737,7 @@ impl World {
                     || !cell.molecules.is_empty()
                     || cell.internal_atom_count != 0
                     || cell.internal_element_counts != [0; ELEMENT_COUNT]
+                    || cell.internal_element_mask != 0
                 {
                     return Err(InvariantError::DeadCellOwnsState(cell_id));
                 }
@@ -1799,6 +1809,9 @@ impl World {
             if actual_internal_counts != cell.internal_element_counts {
                 return Err(InvariantError::CellElementCountsMismatch(cell_id));
             }
+            if element_mask_from_counts(actual_internal_counts) != cell.internal_element_mask {
+                return Err(InvariantError::CellElementMaskMismatch(cell_id));
+            }
             if actual_internal_atoms != cell.internal_atom_count {
                 return Err(InvariantError::CellMassCountMismatch(cell_id));
             }
@@ -1865,6 +1878,11 @@ impl World {
                 return Err(InvariantError::TileElementCountsMismatch(TileId(
                     tile_index,
                 )));
+            }
+            if element_mask_from_counts(actual_element_counts[tile_index])
+                != self.tile_element_masks[tile_index]
+            {
+                return Err(InvariantError::TileElementMaskMismatch(TileId(tile_index)));
             }
             if actual_mass_counts[tile_index] != self.tile_mass_counts[tile_index] {
                 return Err(InvariantError::TileMassCountMismatch(TileId(tile_index)));
@@ -2149,6 +2167,7 @@ impl World {
                     .ok_or(WorldError::TileCountUnderflow(tile_id))?;
             }
         }
+        self.tile_element_masks[tile_id.index()] = element_mask_from_counts(*counts);
         let atoms = u32::from(composition.size());
         if sign >= 0 {
             self.tile_mass_counts[tile_id.index()] = self.tile_mass_counts[tile_id.index()]
@@ -2527,6 +2546,7 @@ impl World {
         let mut local_enval = self.default_local_enval_average(tile_id).unwrap_or(0.0);
         let mut positive_energy_gain = 0.0_f64;
         let enzyme_count = self.cells[cell_id.index()].genome.enzymes.len();
+        let genome_context = GenomeReactionContext::from(&self.cells[cell_id.index()].genome);
 
         for enzyme_index in 0..enzyme_count {
             if self.cells[cell_id.index()].state != CellState::Active {
@@ -2561,12 +2581,20 @@ impl World {
             if self.cells[cell_id.index()].state != CellState::Active {
                 return;
             }
+            let max_inputs = bio::max_inputs(&enzyme);
+            if max_inputs == 0 {
+                let _ = self.rng.next_f64();
+                continue;
+            }
+            if !self.substrate_pool_may_accept(cell_id, tile_id, &enzyme, max_inputs) {
+                let _ = self.rng.next_f64();
+                continue;
+            }
             let env = ReactionEnv {
                 tile_enval: self.enval[tile_id.index()],
                 local_enval,
                 average_enval: self.avg_enval,
             };
-            let genome_context = GenomeReactionContext::from(&self.cells[cell_id.index()].genome);
             if !bio::reaction_gate_for_context(&enzyme, genome_context, env, &mut self.rng) {
                 continue;
             }
@@ -2577,15 +2605,8 @@ impl World {
             self.reaction_counters
                 .gates_passed_by_type
                 .increment(enzyme.enzyme_type);
-            let max_inputs = bio::max_inputs(&enzyme);
-            if max_inputs == 0 {
-                self.reaction_counters
-                    .no_substrate_by_type
-                    .increment(enzyme.enzyme_type);
-                continue;
-            }
             let substrate_ids =
-                self.sample_accepted_substrates(cell_id, tile_id, &enzyme, max_inputs);
+                self.sample_accepted_substrates_unchecked(cell_id, tile_id, &enzyme, max_inputs);
             if substrate_ids.is_empty()
                 || (enzyme.enzyme_type == EnzymeType::Anabolase && substrate_ids.len() < 2)
             {
@@ -2781,6 +2802,7 @@ impl World {
         }
     }
 
+    #[cfg(test)]
     fn sample_accepted_substrates(
         &mut self,
         cell_id: CellId,
@@ -2790,10 +2812,22 @@ impl World {
     ) -> SampledSubstrateIds {
         debug_assert!(max_count <= MAX_REACTION_SUBSTRATES);
         let max_count = max_count.min(MAX_REACTION_SUBSTRATES);
-        let mut out = SampledSubstrateIds::new();
         if !self.substrate_pool_may_accept(cell_id, tile_id, enzyme, max_count) {
-            return out;
+            return SampledSubstrateIds::new();
         }
+        self.sample_accepted_substrates_unchecked(cell_id, tile_id, enzyme, max_count)
+    }
+
+    fn sample_accepted_substrates_unchecked(
+        &mut self,
+        cell_id: CellId,
+        tile_id: TileId,
+        enzyme: &crate::genome::Enzyme,
+        max_count: usize,
+    ) -> SampledSubstrateIds {
+        debug_assert!(max_count <= MAX_REACTION_SUBSTRATES);
+        let max_count = max_count.min(MAX_REACTION_SUBSTRATES);
+        let mut out = SampledSubstrateIds::new();
         let mut seen = 0_usize;
 
         let tile_len = self.tiles[tile_id.index()].molecules.len();
@@ -2834,8 +2868,8 @@ impl World {
         {
             return false;
         }
-        let pool_mask = element_mask_from_counts(self.tile_element_counts[tile_id.index()])
-            | element_mask_from_counts(self.cells[cell_id.index()].internal_element_counts);
+        let pool_mask = self.tile_element_masks[tile_id.index()]
+            | self.cells[cell_id.index()].internal_element_mask;
         match enzyme.enzyme_type {
             EnzymeType::Anabolase | EnzymeType::Catabolase | EnzymeType::Transmutase => {
                 (pool_mask & enzyme.specificity_mask) != 0
@@ -3047,6 +3081,7 @@ impl World {
         let tile_id = self.cells[cell_id.index()].tile_id;
         let molecules = std::mem::take(&mut self.cells[cell_id.index()].molecules);
         self.cells[cell_id.index()].internal_element_counts = [0; ELEMENT_COUNT];
+        self.cells[cell_id.index()].internal_element_mask = 0;
         self.cells[cell_id.index()].internal_atom_count = 0;
         if let Some(tile_id) = tile_id {
             for molecule_id in molecules {
@@ -3287,6 +3322,7 @@ impl World {
 
         let prey_molecules = std::mem::take(&mut self.cells[prey_id.index()].molecules);
         self.cells[prey_id.index()].internal_element_counts = [0; ELEMENT_COUNT];
+        self.cells[prey_id.index()].internal_element_mask = 0;
         self.cells[prey_id.index()].internal_atom_count = 0;
         for molecule_id in prey_molecules {
             if molecule_id.index() >= self.molecules.len() {
@@ -3713,8 +3749,10 @@ pub enum InvariantError {
     OwnedMoleculeInFreeList(MoleculeId),
     FreeMoleculeMissingFromFreeList(MoleculeId),
     TileElementCountsMismatch(TileId),
+    TileElementMaskMismatch(TileId),
     TileMassCountMismatch(TileId),
     CellElementCountsMismatch(CellId),
+    CellElementMaskMismatch(CellId),
     CellMassCountMismatch(CellId),
     InvalidWheelMolecule(MoleculeId),
     DuplicateWheelMolecule(MoleculeId),
@@ -3931,6 +3969,11 @@ impl fmt::Display for InvariantError {
                 "tile {} element counts do not match molecules",
                 tile.index()
             ),
+            Self::TileElementMaskMismatch(tile) => write!(
+                f,
+                "tile {} element mask does not match element counts",
+                tile.index()
+            ),
             Self::TileMassCountMismatch(tile) => write!(
                 f,
                 "tile {} mass count does not match molecules",
@@ -3939,6 +3982,11 @@ impl fmt::Display for InvariantError {
             Self::CellElementCountsMismatch(cell) => write!(
                 f,
                 "cell {} internal element counts do not match molecules",
+                cell.index()
+            ),
+            Self::CellElementMaskMismatch(cell) => write!(
+                f,
+                "cell {} internal element mask does not match element counts",
                 cell.index()
             ),
             Self::CellMassCountMismatch(cell) => write!(
@@ -4156,6 +4204,32 @@ mod tests {
             }
             assert_eq!(world.tile_element_counts(tile_id).unwrap(), actual);
         }
+    }
+
+    #[test]
+    fn cached_element_masks_track_tile_and_cell_composition() {
+        let mut world = World::new(only_a_config("element-mask-cache", 4, 4)).unwrap();
+        let tile_id = world.tile_id(0, 0).unwrap();
+        let avg_enval = world.avg_enval;
+        let genome = Genome::random_founder(&mut world.rng, avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile_id, genome).unwrap();
+
+        assert_eq!(
+            world.inspect_tile(tile_id).unwrap().element_mask & Element::A.mask(),
+            Element::A.mask()
+        );
+        let molecule = Molecule::new(Composition::single(Element::D), 1.0).unwrap();
+        let molecule_id = world.add_cell_molecule_record(cell_id, molecule).unwrap();
+        assert_eq!(
+            world.cells[cell_id.index()].internal_element_mask & Element::D.mask(),
+            Element::D.mask()
+        );
+        world.consume_molecule(molecule_id).unwrap();
+        assert_eq!(
+            world.cells[cell_id.index()].internal_element_mask & Element::D.mask(),
+            0
+        );
+        world.check_invariants().unwrap();
     }
 
     #[test]
@@ -5290,6 +5364,39 @@ mod tests {
             world.operation_counters.substrate_candidates_scanned,
             before
         );
+    }
+
+    #[test]
+    fn impossible_substrate_pool_skips_reaction_gate_without_scanning() {
+        let mut world = World::new(only_a_config("substrate-pregate-skip", 4, 4)).unwrap();
+        let tile_id = world.tile_id(0, 0).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let mut enzyme = Enzyme::anabolase_abc(&mut world.rng);
+        enzyme.specificity_mask = Element::D.mask();
+        genome.enzymes = vec![enzyme];
+        genome.initial_energy = 10.0;
+        genome.repro_threshold = 1_000_000.0;
+        genome.decay_time = 1_000_000.0;
+        genome.desired_element_reserve = 0;
+        genome.maintenance_cost_per_sec = 0.0;
+        let cell_id = world.spawn_cell_with_genome_at(tile_id, genome).unwrap();
+
+        let attempts_before = world.reaction_counters.total_attempts();
+        let gates_before = world.operation_counters.reaction_gates_passed;
+        let scans_before = world.operation_counters.substrate_candidates_scanned;
+
+        world.step_cell(cell_id);
+
+        assert_eq!(
+            world.reaction_counters.total_attempts(),
+            attempts_before + 1
+        );
+        assert_eq!(world.operation_counters.reaction_gates_passed, gates_before);
+        assert_eq!(
+            world.operation_counters.substrate_candidates_scanned,
+            scans_before
+        );
+        world.check_invariants().unwrap();
     }
 
     #[test]

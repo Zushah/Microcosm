@@ -69,6 +69,8 @@ pub struct Cell {
     pub lineage_id: LineageId,
     pub molecules: Vec<MoleculeId>,
     pub internal_element_counts: [u32; ELEMENT_COUNT],
+    #[serde(skip, default)]
+    pub internal_element_mask: u8,
     pub internal_atom_count: u32,
     pub time_without_food: f64,
     pub birth_sim_time: f64,
@@ -96,6 +98,7 @@ impl Cell {
             lineage_id,
             molecules: Vec::new(),
             internal_element_counts: [0; ELEMENT_COUNT],
+            internal_element_mask: 0,
             internal_atom_count: 0,
             time_without_food: 0.0,
             birth_sim_time,
@@ -123,6 +126,10 @@ impl Cell {
     pub fn refresh_combat_totals(&mut self) {
         self.combat_attack_total = self.genome.attack_total();
         self.combat_defense_total = self.genome.defense_total();
+    }
+
+    pub fn refresh_internal_element_mask(&mut self) {
+        self.internal_element_mask = element_mask_from_counts(self.internal_element_counts);
     }
 
     pub fn can_hold_molecule(&self, molecule_id: MoleculeId) -> bool {
@@ -160,8 +167,19 @@ impl Cell {
                 .checked_sub(atoms)
                 .ok_or(CellCountError::Underflow)?;
         }
+        self.refresh_internal_element_mask();
         Ok(())
     }
+}
+
+fn element_mask_from_counts(counts: [u32; ELEMENT_COUNT]) -> u8 {
+    let mut mask = 0_u8;
+    for element in ELEMENT_ORDER {
+        if counts[element.index()] > 0 {
+            mask |= element.mask();
+        }
+    }
+    mask
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
