@@ -25,6 +25,8 @@ let tpsTicks = 0;
 let tpsLastSampleMs = performance.now();
 let tpsValue = 0;
 let fallbackCanvasExpanded = false;
+let startupInfoMathRendered = false;
+const startupInfoUI = { modal: null, closeButton: null, openButton: null };
 
 const resolveWasmGPU = () => { const candidate = window.WasmGPU && (window.WasmGPU.default || window.WasmGPU); if (!candidate || !candidate.webassembly || typeof candidate.create !== "function") throw new Error("WasmGPU was not loaded or does not expose the expected API."); return candidate; };
 
@@ -168,6 +170,37 @@ const applyDisplayMode = (mode) => {
     if (runtime && runtime.ready) renderOnce();
 };
 
+const renderStartupInfoMath = () => {
+    if (!startupInfoUI.modal || startupInfoMathRendered) return;
+    if (typeof window.renderMathInElement !== "function") return;
+    window.renderMathInElement(startupInfoUI.modal, { delimiters: [{ left: "$$", right: "$$", display: true }, { left: "\\(", right: "\\)", display: false }], throwOnError: false });
+    startupInfoMathRendered = true;
+};
+
+const openStartupInfoModal = () => {
+    if (!startupInfoUI.modal) return;
+    startupInfoUI.modal.hidden = false;
+    startupInfoUI.modal.setAttribute("aria-hidden", "false");
+    renderStartupInfoMath();
+};
+
+const closeStartupInfoModal = () => {
+    if (!startupInfoUI.modal) return;
+    startupInfoUI.modal.hidden = true;
+    startupInfoUI.modal.setAttribute("aria-hidden", "true");
+};
+
+startupInfoUI.modal = document.getElementById("startupInfoModal");
+startupInfoUI.closeButton = document.getElementById("startupInfoClose");
+startupInfoUI.openButton = document.getElementById("infoButton");
+if (startupInfoUI.modal) {
+    startupInfoUI.modal.hidden = true; startupInfoUI.modal.setAttribute("aria-hidden", "true"); openStartupInfoModal();
+    if (typeof window.renderMathInElement !== "function") window.addEventListener("load", () => renderStartupInfoMath(), { once: true });
+    startupInfoUI.modal.addEventListener("click", (event) => { if (event.target === startupInfoUI.modal) closeStartupInfoModal(); });
+}
+if (startupInfoUI.closeButton) startupInfoUI.closeButton.addEventListener("click", () => closeStartupInfoModal());
+if (startupInfoUI.openButton) startupInfoUI.openButton.addEventListener("click", () => openStartupInfoModal());
+
 const frame = () => {
     animationFrameId = requestAnimationFrame(frame);
     if (!runtime || !runtime.ready || !renderer) return;
@@ -263,6 +296,7 @@ gui.bindControls({
     pause: () => setPaused(!paused),
     step: () => { try { stepOnce(); } catch (error) { gui.setError(error); } },
     reset: () => { try { resetRuntime(); } catch (error) { gui.setError(error); } },
+    info: () => { try { openStartupInfoModal(); } catch (error) { gui.setError(error); } },
     displayMode: (mode) => { try { applyDisplayMode(mode); } catch (error) { gui.setError(error); } },
     mode: (mode) => { try { if (interaction) interaction.setMode(mode); } catch (error) { gui.setError(error); } },
     brush: (options) => { try { if (interaction) interaction.setBrushOptions(options); } catch (error) { gui.setError(error); } },
