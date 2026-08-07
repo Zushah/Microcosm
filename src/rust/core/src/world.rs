@@ -15,7 +15,7 @@ use crate::genome::{
     Enzyme, EnzymeType, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 use crate::molecule::{Molecule, MoleculeError};
-use crate::render_buffers::{RenderBuffers, EMPTY_CELL_ID};
+use crate::render_buffers::{RenderBuffers, RenderVisualState, EMPTY_CELL_ID};
 use crate::rng::Rng;
 use crate::stats::{
     EnzymeTypeCounts, OperationCounters, ReactionCounters, StepProfile, WorldStats,
@@ -1190,7 +1190,15 @@ impl World {
     }
 
     pub fn write_render_buffers(&self, buffers: &mut RenderBuffers) {
-        buffers.clear();
+        self.write_render_buffers_with_visual(buffers, &RenderVisualState::default());
+    }
+
+    pub fn write_render_buffers_with_visual(
+        &self,
+        buffers: &mut RenderBuffers,
+        visual: &RenderVisualState,
+    ) {
+        buffers.clear_for_refresh();
         buffers.width = self.width.min(u32::MAX as usize) as u32;
         buffers.height = self.height.min(u32::MAX as usize) as u32;
         buffers.tick_count = self.tick_count;
@@ -1263,6 +1271,7 @@ impl World {
             buffers.cell_attack.push(cell.combat_attack_total);
             buffers.cell_defense.push(cell.combat_defense_total);
         }
+        buffers.refresh_lattice_rgba(visual);
     }
 
     pub fn inspect_tile(&self, tile_id: TileId) -> Option<TileInspection> {

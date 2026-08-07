@@ -136,6 +136,7 @@ const resetRuntime = () => {
     gui.clearGenomeEditResult();
     const config = buildConfig();
     runtime.reset(config);
+    renderer.invalidateVisualState();
     window.history.replaceState(null, "", seedUrl(config.seed).toString());
     if (interaction) interaction.clearSelection();
     renderer.updateFromRuntime(runtime);

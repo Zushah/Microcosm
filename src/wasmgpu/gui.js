@@ -826,6 +826,7 @@ export class MicrocosmGUI {
             <div><strong>tileEnval[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileEnval && runtime.views.tileEnval.array()))}</div>
             <div><strong>tileOccupancy[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileOccupancy && runtime.views.tileOccupancy.array()))}</div>
             <div><strong>tileElementMask[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileElementMask && runtime.views.tileElementMask.array()))}</div>
+            <div><strong>latticeRgba[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.latticeRgba && runtime.views.latticeRgba.array()))}</div>
             <div><strong>cellId[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellId && runtime.views.cellId.array()))}</div>
             <div><strong>cellX[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellX && runtime.views.cellX.array()))}</div>
             <div><strong>cellY[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellY && runtime.views.cellY.array()))}</div>

@@ -28,6 +28,8 @@ const TILE_VIEW_DEFINITIONS = Object.freeze([
     { key: "tileElementMask", ptr: "microcosm_tile_element_mask_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_element_mask" }
 ]);
 
+const LATTICE_VIEW_DEFINITION = Object.freeze({ key: "latticeRgba", ptr: "microcosm_lattice_rgba_ptr", length: "microcosm_lattice_rgba_len", dtype: "f32", name: "microcosm.lattice_rgba" });
+
 const CELL_VIEW_DEFINITIONS = Object.freeze([
     { key: "cellId", ptr: "microcosm_cell_id_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_id" },
     { key: "cellX", ptr: "microcosm_cell_x_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_x" },
@@ -41,7 +43,22 @@ const CELL_VIEW_DEFINITIONS = Object.freeze([
     { key: "cellDefense", ptr: "microcosm_cell_defense_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_defense" }
 ]);
 
-const VIEW_DEFINITIONS = Object.freeze([...TILE_VIEW_DEFINITIONS, ...CELL_VIEW_DEFINITIONS]);
+const VIEW_DEFINITIONS = Object.freeze([...TILE_VIEW_DEFINITIONS, LATTICE_VIEW_DEFINITION, ...CELL_VIEW_DEFINITIONS]);
+
+const DISPLAY_MODE_IDS = Object.freeze({
+    enval: 0,
+    occupancy: 1,
+    mass: 2,
+    molecules: 3,
+    "element-a": 4,
+    "element-b": 5,
+    "element-c": 6,
+    "element-d": 7,
+    "element-e": 8,
+    "element-f": 9
+});
+
+const VISUAL_FLAGS = Object.freeze({ selectedLineage: 1 << 0, selectedCell: 1 << 1, selectedTile: 1 << 2, hoverTile: 1 << 3, brushPreview: 1 << 4 });
 
 const DEFAULT_CELL_MOLECULE_LIMIT = 64;
 const DEFAULT_CELL_REACTION_LIMIT = 32;
@@ -269,6 +286,40 @@ export class MicrocosmRuntime {
         return this._stats;
     }
 
+    setRenderVisualState(state = {}) {
+        this.assertReady();
+        const displayMode = Object.prototype.hasOwnProperty.call(DISPLAY_MODE_IDS, state.displayMode) ? DISPLAY_MODE_IDS[state.displayMode] : DISPLAY_MODE_IDS.enval;
+        const selectedLineage = state.selectedLineageId == null ? null : Number(state.selectedLineageId) >>> 0;
+        const selectedCell = state.selectedCellId == null ? null : Number(state.selectedCellId) >>> 0;
+        const selectedTile = state.selectedTile || null;
+        const hoverTile = state.hoverTile || null;
+        const brush = state.brushPreview || null;
+        let flags = 0;
+        if (selectedLineage !== null) flags |= VISUAL_FLAGS.selectedLineage;
+        if (selectedCell !== null) flags |= VISUAL_FLAGS.selectedCell;
+        if (selectedTile) flags |= VISUAL_FLAGS.selectedTile;
+        if (hoverTile) flags |= VISUAL_FLAGS.hoverTile;
+        if (brush) flags |= VISUAL_FLAGS.brushPreview;
+        const status = readUintStatus(this._functions.setRenderVisualState(
+            this._handle,
+            displayMode,
+            flags,
+            selectedLineage ?? 0,
+            selectedCell ?? 0,
+            selectedTile ? Number(selectedTile.x) >>> 0 : 0,
+            selectedTile ? Number(selectedTile.y) >>> 0 : 0,
+            hoverTile ? Number(hoverTile.x) >>> 0 : 0,
+            hoverTile ? Number(hoverTile.y) >>> 0 : 0,
+            brush ? Number(brush.x) >>> 0 : 0,
+            brush ? Number(brush.y) >>> 0 : 0,
+            brush ? Math.max(1, Number(brush.width) | 0) >>> 0 : 1,
+            brush ? Math.max(1, Number(brush.height) | 0) >>> 0 : 1
+        ));
+        this.assertStatus(status, "microcosm_set_render_visual_state");
+        this._views.latticeRgba?.refresh();
+        return this._views.latticeRgba;
+    }
+
     refreshViews() {
         this.assertReady();
         for (const view of Object.values(this._views)) view.refresh();
@@ -431,17 +482,19 @@ export class MicrocosmRuntime {
 
     viewDiagnostics() {
         const expectedTileCount = this.tileCount, expectedCellCount = this.cellCount;
-        return VIEW_DEFINITIONS.map((definition) => ({
+        return VIEW_DEFINITIONS.map((definition) => {
+            const expectedLength = definition.key === "latticeRgba" ? expectedTileCount * 4 : definition.length === "microcosm_tile_count" ? expectedTileCount : expectedCellCount;
+            return ({
                 key: definition.key,
                 name: definition.name,
                 dtype: this._views[definition.key] ? this._views[definition.key].dtype : definition.dtype,
                 ptr: this._views[definition.key] ? this._views[definition.key].ptr : 0,
                 length: this._views[definition.key] ? this._views[definition.key].length : 0,
                 byteLength: this._views[definition.key] ? this._views[definition.key].byteLength : 0,
-                expectedLength: definition.length === "microcosm_tile_count" ? expectedTileCount : expectedCellCount,
-                ok: Boolean(this._views[definition.key]) && this._views[definition.key].length === (definition.length === "microcosm_tile_count" ? expectedTileCount : expectedCellCount) && this._views[definition.key].dtype === definition.dtype
-            })
-        );
+                expectedLength,
+                ok: Boolean(this._views[definition.key]) && this._views[definition.key].length === expectedLength && this._views[definition.key].dtype === definition.dtype
+            });
+        });
     }
 
     _bindFunctions() {
@@ -462,6 +515,7 @@ export class MicrocosmRuntime {
             step: get("microcosm_step"),
             stepNoStats: get("microcosm_step_no_stats"),
             refreshRenderBuffers: get("microcosm_refresh_render_buffers"),
+            setRenderVisualState: get("microcosm_set_render_visual_state"),
             statsPtr: get("microcosm_stats_ptr"),
             tileCount: get("microcosm_tile_count"),
             cellCount: get("microcosm_cell_count"),

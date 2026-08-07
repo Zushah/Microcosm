@@ -23,7 +23,9 @@ pub use genome::{
     MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 pub use molecule::{Molecule, MoleculeError};
-pub use render_buffers::{RenderBuffers, EMPTY_CELL_ID};
+pub use render_buffers::{
+    RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState, EMPTY_CELL_ID,
+};
 pub use rng::Rng;
 pub use snapshot::{
     load_from_path, save_to_path, SnapshotError, SNAPSHOT_EXTENSION, SNAPSHOT_VERSION,

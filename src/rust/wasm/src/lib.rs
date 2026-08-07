@@ -2,8 +2,8 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, GenomePatch, LineageId, MoleculeSeedingConfig, RenderBuffers, World,
-    WorldStats, VERSION,
+    CellId, Config, GenomePatch, LineageId, MoleculeSeedingConfig, RenderBrushPreview,
+    RenderBuffers, RenderDisplayMode, RenderVisualState, World, WorldStats, VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,6 +23,11 @@ const DEFAULT_LINEAGE_LIMIT: usize = 64;
 const MAX_CELL_MOLECULE_LIMIT: usize = 256;
 const MAX_CELL_REACTION_LIMIT: usize = 128;
 const MAX_LINEAGE_LIMIT: usize = 512;
+const VISUAL_HAS_SELECTED_LINEAGE: u32 = 1 << 0;
+const VISUAL_HAS_SELECTED_CELL: u32 = 1 << 1;
+const VISUAL_HAS_SELECTED_TILE: u32 = 1 << 2;
+const VISUAL_HAS_HOVER_TILE: u32 = 1 << 3;
+const VISUAL_HAS_BRUSH_PREVIEW: u32 = 1 << 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -231,6 +236,7 @@ struct WasmInstance {
     world: World,
     stats: WasmStats,
     render_buffers: RenderBuffers,
+    render_visual_state: RenderVisualState,
 }
 
 impl WasmInstance {
@@ -238,11 +244,13 @@ impl WasmInstance {
         world.rebuild_derived_caches();
         let stats = WasmStats::from(&world.stats());
         let mut render_buffers = RenderBuffers::default();
-        world.write_render_buffers(&mut render_buffers);
+        let render_visual_state = RenderVisualState::default();
+        world.write_render_buffers_with_visual(&mut render_buffers, &render_visual_state);
         Self {
             world,
             stats,
             render_buffers,
+            render_visual_state,
         }
     }
 
@@ -252,8 +260,14 @@ impl WasmInstance {
     }
 
     fn refresh_render_buffers(&mut self) {
-        self.world.write_render_buffers(&mut self.render_buffers);
+        self.world
+            .write_render_buffers_with_visual(&mut self.render_buffers, &self.render_visual_state);
         self.refresh_stats();
+    }
+
+    fn refresh_lattice_rgba(&mut self) {
+        self.render_buffers
+            .refresh_lattice_rgba(&self.render_visual_state);
     }
 }
 
@@ -572,6 +586,59 @@ pub extern "C" fn microcosm_refresh_render_buffers(handle: u32) -> u32 {
                 return STATUS_INVALID_HANDLE;
             };
             instance.refresh_render_buffers();
+            runtime.last_error.clear();
+            STATUS_OK
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn microcosm_set_render_visual_state(
+    handle: u32,
+    display_mode: u32,
+    flags: u32,
+    selected_lineage: u32,
+    selected_cell: u32,
+    selected_tile_x: u32,
+    selected_tile_y: u32,
+    hover_tile_x: u32,
+    hover_tile_y: u32,
+    brush_x: u32,
+    brush_y: u32,
+    brush_width: u32,
+    brush_height: u32,
+) -> u32 {
+    let Some(display_mode) = RenderDisplayMode::from_u32(display_mode) else {
+        return set_last_error(
+            STATUS_CONFIG_ERROR,
+            format!("unsupported render display mode {display_mode}"),
+        );
+    };
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance_mut(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            instance.render_visual_state = RenderVisualState {
+                display_mode,
+                selected_lineage: (flags & VISUAL_HAS_SELECTED_LINEAGE != 0)
+                    .then_some(selected_lineage),
+                selected_cell: (flags & VISUAL_HAS_SELECTED_CELL != 0).then_some(selected_cell),
+                selected_tile: (flags & VISUAL_HAS_SELECTED_TILE != 0)
+                    .then_some((selected_tile_x, selected_tile_y)),
+                hover_tile: (flags & VISUAL_HAS_HOVER_TILE != 0)
+                    .then_some((hover_tile_x, hover_tile_y)),
+                brush_preview: (flags & VISUAL_HAS_BRUSH_PREVIEW != 0).then_some(
+                    RenderBrushPreview {
+                        x: brush_x,
+                        y: brush_y,
+                        width: brush_width.max(1),
+                        height: brush_height.max(1),
+                    },
+                ),
+            };
+            instance.refresh_lattice_rgba();
             runtime.last_error.clear();
             STATUS_OK
         }
@@ -1106,6 +1173,19 @@ ptr_fn!(microcosm_tile_occupancy_ptr, tile_occupancy, u32);
 ptr_fn!(microcosm_tile_mass_ptr, tile_mass, u32);
 ptr_fn!(microcosm_tile_molecule_count_ptr, tile_molecule_count, u32);
 ptr_fn!(microcosm_tile_element_mask_ptr, tile_element_mask, u32);
+ptr_fn!(microcosm_lattice_rgba_ptr, lattice_rgba, f32);
+
+#[no_mangle]
+pub extern "C" fn microcosm_lattice_rgba_len(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(runtime) => runtime
+            .instance(handle)
+            .map(|instance| clamp_usize_to_u32(instance.render_buffers.lattice_rgba.len()))
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 ptr_fn!(microcosm_cell_id_ptr, cell_id, u32);
 ptr_fn!(microcosm_cell_x_ptr, cell_x, u32);
 ptr_fn!(microcosm_cell_y_ptr, cell_y, u32);
@@ -1162,6 +1242,35 @@ mod tests {
         assert_eq!(microcosm_cell_count(handle), 4);
         assert!(!microcosm_stats_ptr(handle).is_null());
         assert!(!microcosm_tile_enval_ptr(handle).is_null());
+        assert!(!microcosm_lattice_rgba_ptr(handle).is_null());
+        assert_eq!(microcosm_lattice_rgba_len(handle), 48 * 4);
+        assert_eq!(
+            microcosm_set_render_visual_state(
+                handle,
+                RenderDisplayMode::Enval as u32,
+                VISUAL_HAS_SELECTED_CELL,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+            ),
+            STATUS_OK
+        );
+        let lattice_rgba = unsafe {
+            std::slice::from_raw_parts(
+                microcosm_lattice_rgba_ptr(handle),
+                microcosm_lattice_rgba_len(handle) as usize,
+            )
+        };
+        assert!(lattice_rgba
+            .chunks_exact(4)
+            .any(|color| color == [1.0, 0.93, 0.30, 1.0]));
         assert_eq!(microcosm_step(handle, 5), STATUS_OK);
         assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
         assert!(microcosm_render_epoch(handle) >= 5);
