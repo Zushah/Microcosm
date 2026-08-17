@@ -1,9 +1,9 @@
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
     CellId, Config, GenomePatch, LineageId, MoleculeSeedingConfig, RenderBrushPreview,
-    RenderBuffers, RenderDisplayMode, RenderVisualState, World, WorldStats, VERSION,
+    RenderBuffers, RenderDisplayMode, RenderVisualState, VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -396,32 +396,32 @@ fn clamp_usize_to_u32(value: usize) -> u32 {
     value.min(u32::MAX as usize) as u32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_version_ptr() -> *const u8 {
     VERSION.as_ptr()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_version_len() -> usize {
     VERSION.len()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_abi_version_ptr() -> *const u8 {
     ABI_VERSION.as_ptr()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_abi_version_len() -> usize {
     ABI_VERSION.len()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_stats_size() -> usize {
     std::mem::size_of::<WasmStats>()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_last_error_ptr() -> *const u8 {
     match lock_runtime() {
         Ok(runtime) => runtime.last_error.as_ptr(),
@@ -429,7 +429,7 @@ pub extern "C" fn microcosm_last_error_ptr() -> *const u8 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_last_error_len() -> usize {
     match lock_runtime() {
         Ok(runtime) => runtime.last_error.len(),
@@ -437,7 +437,7 @@ pub extern "C" fn microcosm_last_error_len() -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_query_result_ptr() -> *const u8 {
     match lock_runtime() {
         Ok(runtime) => runtime.query_result.as_ptr(),
@@ -445,7 +445,7 @@ pub extern "C" fn microcosm_query_result_ptr() -> *const u8 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_query_result_len() -> usize {
     match lock_runtime() {
         Ok(runtime) => runtime.query_result.len(),
@@ -453,7 +453,7 @@ pub extern "C" fn microcosm_query_result_len() -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_alloc(len: usize, align: usize) -> *mut u8 {
     if len == 0 || align == 0 || !align.is_power_of_two() {
         return std::ptr::null_mut();
@@ -464,7 +464,7 @@ pub extern "C" fn microcosm_alloc(len: usize, align: usize) -> *mut u8 {
     unsafe { alloc(layout) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_free(ptr: *mut u8, len: usize, align: usize) {
     if ptr.is_null() || len == 0 || align == 0 || !align.is_power_of_two() {
         return;
@@ -476,7 +476,7 @@ pub extern "C" fn microcosm_free(ptr: *mut u8, len: usize, align: usize) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_create(config_ptr: *const u8, config_len: usize) -> u32 {
     let config = match parse_config_from_bytes(config_ptr, config_len) {
         Ok(config) => config,
@@ -501,7 +501,7 @@ pub extern "C" fn microcosm_create(config_ptr: *const u8, config_len: usize) -> 
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_destroy(handle: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -518,7 +518,7 @@ pub extern "C" fn microcosm_destroy(handle: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_reset(handle: u32, config_ptr: *const u8, config_len: usize) -> u32 {
     let config = match parse_config_from_bytes(config_ptr, config_len) {
         Ok(config) => config,
@@ -547,7 +547,7 @@ pub extern "C" fn microcosm_reset(handle: u32, config_ptr: *const u8, config_len
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_step(handle: u32, ticks: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -563,7 +563,7 @@ pub extern "C" fn microcosm_step(handle: u32, ticks: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_step_no_stats(handle: u32, ticks: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -578,7 +578,7 @@ pub extern "C" fn microcosm_step_no_stats(handle: u32, ticks: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_refresh_render_buffers(handle: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -593,7 +593,7 @@ pub extern "C" fn microcosm_refresh_render_buffers(handle: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_set_render_visual_state(
     handle: u32,
     display_mode: u32,
@@ -646,7 +646,7 @@ pub extern "C" fn microcosm_set_render_visual_state(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_stats_ptr(handle: u32) -> *const WasmStats {
     match lock_runtime() {
         Ok(runtime) => runtime
@@ -657,7 +657,7 @@ pub extern "C" fn microcosm_stats_ptr(handle: u32) -> *const WasmStats {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_tile_count(handle: u32) -> u32 {
     match lock_runtime() {
         Ok(runtime) => runtime
@@ -668,7 +668,7 @@ pub extern "C" fn microcosm_tile_count(handle: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_cell_count(handle: u32) -> u32 {
     match lock_runtime() {
         Ok(runtime) => runtime
@@ -679,7 +679,7 @@ pub extern "C" fn microcosm_cell_count(handle: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_render_epoch(handle: u32) -> u32 {
     match lock_runtime() {
         Ok(runtime) => runtime
@@ -690,7 +690,7 @@ pub extern "C" fn microcosm_render_epoch(handle: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -732,7 +732,7 @@ pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -772,7 +772,7 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_inspect_cell_detail(
     handle: u32,
     cell_id: u32,
@@ -818,7 +818,7 @@ pub extern "C" fn microcosm_inspect_cell_detail(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_inspect_cell_molecules(
     handle: u32,
     cell_id: u32,
@@ -858,7 +858,7 @@ pub extern "C" fn microcosm_inspect_cell_molecules(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_inspect_cell_reactions(
     handle: u32,
     cell_id: u32,
@@ -898,7 +898,7 @@ pub extern "C" fn microcosm_inspect_cell_reactions(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_inspect_lineage(handle: u32, lineage_id: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -928,7 +928,7 @@ pub extern "C" fn microcosm_inspect_lineage(handle: u32, lineage_id: u32) -> u32
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_list_lineages(handle: u32, limit: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -950,7 +950,7 @@ pub extern "C" fn microcosm_list_lineages(handle: u32, limit: u32) -> u32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_apply_cell_genome_patch(
     handle: u32,
     cell_id: u32,
@@ -992,7 +992,7 @@ pub extern "C" fn microcosm_apply_cell_genome_patch(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_apply_genome_brush(
     handle: u32,
     center_x: u32,
@@ -1043,7 +1043,7 @@ pub extern "C" fn microcosm_apply_genome_brush(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_set_tile_enval(handle: u32, x: u32, y: u32, value: f32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -1074,7 +1074,7 @@ pub extern "C" fn microcosm_set_tile_enval(handle: u32, x: u32, y: u32, value: f
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_adjust_tile_enval(handle: u32, x: u32, y: u32, delta: f32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -1105,7 +1105,7 @@ pub extern "C" fn microcosm_adjust_tile_enval(handle: u32, x: u32, y: u32, delta
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_brush_enval_rect(
     handle: u32,
     center_x: u32,
@@ -1155,7 +1155,7 @@ pub extern "C" fn microcosm_brush_enval_rect(
 
 macro_rules! ptr_fn {
     ($name:ident, $field:ident, $ty:ty) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $name(handle: u32) -> *const $ty {
             match lock_runtime() {
                 Ok(runtime) => runtime
@@ -1175,7 +1175,7 @@ ptr_fn!(microcosm_tile_molecule_count_ptr, tile_molecule_count, u32);
 ptr_fn!(microcosm_tile_element_mask_ptr, tile_element_mask, u32);
 ptr_fn!(microcosm_lattice_rgba_ptr, lattice_rgba, f32);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_lattice_rgba_len(handle: u32) -> u32 {
     match lock_runtime() {
         Ok(runtime) => runtime
@@ -1268,9 +1268,11 @@ mod tests {
                 microcosm_lattice_rgba_len(handle) as usize,
             )
         };
-        assert!(lattice_rgba
-            .chunks_exact(4)
-            .any(|color| color == [1.0, 0.93, 0.30, 1.0]));
+        assert!(
+            lattice_rgba
+                .chunks_exact(4)
+                .any(|color| color == [1.0, 0.93, 0.30, 1.0])
+        );
         assert_eq!(microcosm_step(handle, 5), STATUS_OK);
         assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
         assert!(microcosm_render_epoch(handle) >= 5);
@@ -1325,11 +1327,11 @@ mod tests {
     fn stats_size_and_versions_are_exposed() {
         assert_eq!(
             exported_string(microcosm_version_ptr(), microcosm_version_len()),
-            "0.17.2"
+            "0.12.0"
         );
         assert_eq!(
             exported_string(microcosm_abi_version_ptr(), microcosm_abi_version_len()),
-            "0.17.2"
+            "0.12.0"
         );
         assert_eq!(microcosm_stats_size(), std::mem::size_of::<WasmStats>());
     }
@@ -1386,9 +1388,11 @@ mod tests {
             detail["cell_detail"]["recent_reactions"]["reason"],
             "recorded"
         );
-        assert!(detail["cell_detail"]["recent_reactions"]["reactions"]
-            .as_array()
-            .is_some());
+        assert!(
+            detail["cell_detail"]["recent_reactions"]["reactions"]
+                .as_array()
+                .is_some()
+        );
 
         assert_eq!(microcosm_inspect_cell_molecules(handle, 0, 1), STATUS_OK);
         let molecules = query_json();
@@ -1401,9 +1405,11 @@ mod tests {
         assert_eq!(reactions["recent_reactions"]["available"], true);
         assert_eq!(reactions["recent_reactions"]["reason"], "recorded");
         assert_eq!(reactions["recent_reactions"]["limit"], 4);
-        assert!(reactions["recent_reactions"]["reactions"]
-            .as_array()
-            .is_some());
+        assert!(
+            reactions["recent_reactions"]["reactions"]
+                .as_array()
+                .is_some()
+        );
 
         let lineage = detail["cell_detail"]["cell"]["lineage_id"]
             .as_u64()
@@ -1447,20 +1453,24 @@ mod tests {
         assert_eq!(result["result"]["target"], "cell");
         assert_eq!(result["result"]["cell_id"], 0);
         assert_eq!(result["result"]["patched_cell_count"], 1);
-        assert!(result["result"]["changed_fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|field| field.as_str() == Some("optimal_enval")));
+        assert!(
+            result["result"]["changed_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field.as_str() == Some("optimal_enval"))
+        );
 
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2, 2), STATUS_OK);
         let detail = query_json();
         assert_eq!(detail["cell_detail"]["genome"]["optimal_enval"], 0.125);
-        assert!(detail["cell_detail"]["genome"]["enzymes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase")));
+        assert!(
+            detail["cell_detail"]["genome"]["enzymes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase"))
+        );
 
         let invalid = br#"{"schema":"microcosm.genome_patch.v1","genome":{"mutation_rate":2.0}}"#;
         assert_eq!(

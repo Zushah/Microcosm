@@ -1,4 +1,4 @@
-use crate::chem::{Composition, Element, ELEMENT_COUNT, ELEMENT_ORDER};
+use crate::chem::{Composition, ELEMENT_COUNT, ELEMENT_ORDER, Element};
 use crate::genome::{Enzyme, EnzymeType, Genome};
 use crate::molecule::Molecule;
 use crate::rng::Rng;
@@ -558,11 +558,7 @@ fn fragment_composition(composition: Composition, rng: &mut Rng) -> Option<Vec<M
     if let Ok(composition) = Composition::try_new(second) {
         out.push(Molecule::new(composition, 1.0).ok()?);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn transmuted_molecule(molecule: Molecule, source: Element, target: Element) -> Option<Molecule> {
@@ -624,7 +620,7 @@ fn composition_delta_is_zero(
 
 #[cfg(test)]
 mod tests {
-    use super::{attempt_reaction, enzyme_accepts, ReactionEnv};
+    use super::{ReactionEnv, attempt_reaction, enzyme_accepts};
     use crate::chem::{Composition, Element};
     use crate::genome::{Enzyme, Genome};
     use crate::molecule::Molecule;

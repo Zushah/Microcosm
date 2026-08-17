@@ -135,7 +135,10 @@ impl fmt::Display for ConfigError {
             }
             Self::TileCountOverflow => write!(f, "world tile count overflows usize"),
             Self::InvalidDtSeconds(value) => {
-                write!(f, "invalid dt_seconds: expected a positive finite value, got {value}")
+                write!(
+                    f,
+                    "invalid dt_seconds: expected a positive finite value, got {value}"
+                )
             }
             Self::InvalidDiffusionWheelSize(value) => write!(
                 f,

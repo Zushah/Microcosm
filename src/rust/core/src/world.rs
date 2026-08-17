@@ -9,17 +9,17 @@ use crate::bio::{self, GenomeReactionContext, ReactionEnv};
 use crate::cell::{
     Cell, CellCountError, CellId, CellState, ReactionMoleculeSummary, ReactionRecord,
 };
-use crate::chem::{Composition, Element, ELEMENT_COUNT, ELEMENT_ORDER};
+use crate::chem::{Composition, ELEMENT_COUNT, ELEMENT_ORDER, Element};
 use crate::config::{Config, ConfigError};
 use crate::genome::{
     Enzyme, EnzymeType, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 use crate::molecule::{Molecule, MoleculeError};
-use crate::render_buffers::{RenderBuffers, RenderVisualState, EMPTY_CELL_ID};
+use crate::render_buffers::{EMPTY_CELL_ID, RenderBuffers, RenderVisualState};
 use crate::rng::Rng;
 use crate::stats::{
-    EnzymeTypeCounts, OperationCounters, ReactionCounters, StepProfile, WorldStats,
-    ENZYME_COUNT_HISTOGRAM_LEN,
+    ENZYME_COUNT_HISTOGRAM_LEN, EnzymeTypeCounts, OperationCounters, ReactionCounters, StepProfile,
+    WorldStats,
 };
 
 const LOCAL_ENVAL_RADIUS: usize = 2;
@@ -4072,8 +4072,8 @@ impl Error for InvariantError {}
 #[cfg(test)]
 mod tests {
     use super::{InvariantError, MoleculeOwner, RenderBuffers, TileId, World};
-    use crate::cell::{CellState, CELL_REACTION_LOG_CAPACITY};
-    use crate::chem::{Composition, Element, ELEMENT_ORDER};
+    use crate::cell::{CELL_REACTION_LOG_CAPACITY, CellState};
+    use crate::chem::{Composition, ELEMENT_ORDER, Element};
     use crate::config::{Config, MoleculeSeedingConfig};
     use crate::genome::{
         Enzyme, EnzymeFieldPatch, EnzymePatchOperation, EnzymeType, Genome, GenomeFieldPatch,
@@ -4337,11 +4337,13 @@ mod tests {
         assert_eq!(world.free_molecule_ids.last().copied(), Some(molecule_id));
         assert_eq!(world.stats().free_molecule_record_count, 1);
         assert_eq!(world.stats().molecule_arena_len, arena_len);
-        assert!(!world
-            .diffusion_wheel
-            .iter()
-            .flatten()
-            .any(|scheduled| *scheduled == molecule_id));
+        assert!(
+            !world
+                .diffusion_wheel
+                .iter()
+                .flatten()
+                .any(|scheduled| *scheduled == molecule_id)
+        );
 
         let reused = world
             .add_tile_molecule(tile, Composition::single(Element::C), 1.0)
@@ -4396,18 +4398,22 @@ mod tests {
         let molecule_id = world
             .add_tile_molecule(tile, Composition::single(Element::B), 1.0)
             .unwrap();
-        assert!(world
-            .diffusion_wheel
-            .iter()
-            .flatten()
-            .any(|scheduled| *scheduled == molecule_id));
+        assert!(
+            world
+                .diffusion_wheel
+                .iter()
+                .flatten()
+                .any(|scheduled| *scheduled == molecule_id)
+        );
 
         world.consume_molecule(molecule_id).unwrap();
-        assert!(!world
-            .diffusion_wheel
-            .iter()
-            .flatten()
-            .any(|scheduled| *scheduled == molecule_id));
+        assert!(
+            !world
+                .diffusion_wheel
+                .iter()
+                .flatten()
+                .any(|scheduled| *scheduled == molecule_id)
+        );
 
         let reused = world
             .add_tile_molecule(tile, Composition::single(Element::D), 1.0)
@@ -4671,10 +4677,12 @@ mod tests {
         let result = world.apply_cell_genome_patch(cell_id, &patch).unwrap();
         let cell = &world.cells[cell_id.index()];
         assert_eq!(result.patched_cell_count, 1);
-        assert!(result
-            .changed_fields
-            .iter()
-            .any(|field| field == "optimal_enval"));
+        assert!(
+            result
+                .changed_fields
+                .iter()
+                .any(|field| field == "optimal_enval")
+        );
         assert!((cell.genome.optimal_enval - 0.25).abs() <= 1.0e-6);
         assert_eq!(cell.genome.repro_threshold, 8.5);
         assert_eq!(cell.maintenance_cost_per_sec, 0.11);
@@ -4729,9 +4737,11 @@ mod tests {
             world.cells[cell_id.index()].genome.enzymes.len(),
             MIN_CELL_ENZYMES
         );
-        assert!(world
-            .apply_cell_genome_patch(cell_id, &remove_patch)
-            .is_err());
+        assert!(
+            world
+                .apply_cell_genome_patch(cell_id, &remove_patch)
+                .is_err()
+        );
 
         while world.cells[cell_id.index()].genome.enzymes.len() < MAX_CELL_ENZYMES {
             world.cells[cell_id.index()]
@@ -4753,9 +4763,11 @@ mod tests {
                 }),
             }],
         };
-        assert!(world
-            .apply_cell_genome_patch(cell_id, &append_patch)
-            .is_err());
+        assert!(
+            world
+                .apply_cell_genome_patch(cell_id, &append_patch)
+                .is_err()
+        );
         assert_eq!(
             world.cells[cell_id.index()].genome.enzymes.len(),
             MAX_CELL_ENZYMES
@@ -4942,10 +4954,12 @@ mod tests {
                 .population,
             0
         );
-        assert!(!world
-            .top_lineages(10)
-            .iter()
-            .any(|(lineage, _)| *lineage == LineageId(2)));
+        assert!(
+            !world
+                .top_lineages(10)
+                .iter()
+                .any(|(lineage, _)| *lineage == LineageId(2))
+        );
         world.check_invariants().unwrap();
     }
 
@@ -5160,10 +5174,12 @@ mod tests {
         assert_eq!(before.cell_count(), world.stats().live_cell_count);
         assert!(before.tile_enval.iter().all(|value| value.is_finite()));
         assert!(before.cell_energy.iter().all(|value| value.is_finite()));
-        assert!(before
-            .tile_occupancy
-            .iter()
-            .any(|value| *value != crate::EMPTY_CELL_ID));
+        assert!(
+            before
+                .tile_occupancy
+                .iter()
+                .any(|value| *value != crate::EMPTY_CELL_ID)
+        );
 
         world.step_many(5);
         let after = world.build_render_buffers();

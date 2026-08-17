@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::chem::{Element, ELEMENT_COUNT};
+use crate::chem::{ELEMENT_COUNT, Element};
 use crate::genome::EnzymeType;
 
 pub const ENZYME_COUNT_HISTOGRAM_LEN: usize = 11;

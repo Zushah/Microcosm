@@ -1,0 +1,57 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows 11 AMD64
+            os: windows-2025
+          - name: Windows 11 ARM64
+            os: windows-11-arm
+          - name: MacOS 26 AMD64
+            os: macos-26-intel
+          - name: MacOS 26 ARM64
+            os: macos-26
+          - name: Ubuntu 24 AMD64
+            os: ubuntu-24.04
+          - name: Ubuntu 24 ARM64
+            os: ubuntu-24.04-arm
+
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v7
+
+      -
+        name: Setup
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+          rustup target add wasm32-unknown-unknown
+
+      -
+        name: Build
+        run: |
+          cargo build --manifest-path src/rust/Cargo.toml --all-targets
+          cargo build --manifest-path src/rust/Cargo.toml --target wasm32-unknown-unknown
+
+      -
+        name: Test
+        run: cargo test --manifest-path src/rust/Cargo.toml -- --test-threads=1

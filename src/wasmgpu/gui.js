@@ -415,11 +415,8 @@ export class MicrocosmGUI {
         this.updateGenomeEditControls(interaction);
         this.updateDetailQueries(runtime, interaction);
         const diagnostics = [
-            ["Runtime", runtime.ready ? "ready" : "not ready"],
             ["Version", runtime.version],
-            ["Handle", runtime.handle],
             ["Tick", stats.tick_count],
-            ["Sim time", stats.sim_time_seconds],
             ["FPS", state.fps],
             ["TPS", state.tps],
             ["World", `${stats.width} × ${stats.height}`],
@@ -427,10 +424,9 @@ export class MicrocosmGUI {
             ["Molecules", stats.molecule_count],
             ["Births", stats.births],
             ["Deaths", stats.deaths],
-            ["Avg cell energy", stats.average_cell_energy],
-            ["Avg enval", stats.average_enval],
-            ["Reaction successes", stats.reaction_successes],
-            ["Render epoch", runtime.renderEpoch]
+            ["Average cell energy", stats.average_cell_energy],
+            ["Average enval", stats.average_enval],
+            ["Reaction successes", stats.reaction_successes]
         ];
         if (this.elements.diagnostics) this.elements.diagnostics.innerHTML = diagnostics.map(([label, value]) => `
             <div class="datum">
@@ -440,17 +436,14 @@ export class MicrocosmGUI {
         `).join("");
         if (this.elements.renderStats) {
             const rows = [
-                ["Strategy", renderStats.strategy || "—"],
                 ["Display mode", renderStats.displayMode || "—"],
                 ["Tiles rendered", renderStats.tileCountRendered],
                 ["Cells rendered", renderStats.cellCountRendered],
                 ["Selected lineage", renderStats.selectedLineage],
                 ["Selected cell", renderStats.selectedCellId],
-                ["Navigation", renderStats.navigation || "—"],
                 ["Zoom", renderStats.zoom],
                 ["Camera center", renderStats.cameraCenter || "—"],
-                ["Renderer frames", renderStats.frameCount],
-                ["Paused", state.paused ? "yes" : "no"]
+                ["Renderer frames", renderStats.frameCount]
             ];
             this.elements.renderStats.innerHTML = rows.map(([label, value]) => `
                 <div class="datum">
@@ -567,7 +560,7 @@ export class MicrocosmGUI {
                 ["Energy", cell.energy],
                 ["Age", `${displayValue(cell.age_seconds)}s`],
                 ["Optimal enval", cell.optimal_enval],
-                ["Local enval avg", cell.local_enval_average],
+                ["Local enval average", cell.local_enval_average],
                 ["Enzymes", cell.enzyme_count],
                 ["Internal atoms", cell.internal_atom_count],
                 ["Attack", cell.combat_attack_total],
@@ -761,10 +754,10 @@ export class MicrocosmGUI {
             ["Deaths", lineage.deaths],
             ["Extinct", lineage.extinct ? "yes" : "no"],
             ["Live share", lineage.share],
-            ["Avg energy", lineage.average_energy],
-            ["Avg enzymes", lineage.average_enzyme_count],
-            ["Avg attack", lineage.average_attack_total],
-            ["Avg defense", lineage.average_defense_total],
+            ["Average energy", lineage.average_energy],
+            ["Average enzymes", lineage.average_enzyme_count],
+            ["Average attack", lineage.average_attack_total],
+            ["Average defense", lineage.average_defense_total],
             ["Max attack", lineage.max_attack_total],
             ["Max defense", lineage.max_defense_total],
             ["Cells with attackase", lineage.cells_with_attackase],
@@ -793,8 +786,8 @@ export class MicrocosmGUI {
             { label: "Births", value: (lineage) => lineage.births },
             { label: "Deaths", value: (lineage) => lineage.deaths },
             { label: "Share", value: (lineage) => lineage.share },
-            { label: "Avg E", value: (lineage) => lineage.average_energy },
-            { label: "Avg enz", value: (lineage) => lineage.average_enzyme_count },
+            { label: "Average energy", value: (lineage) => lineage.average_energy },
+            { label: "Average enzymes", value: (lineage) => lineage.average_enzyme_count },
             { label: "Action", value: (lineage) => htmlValue(buttonForLineage(lineage.lineage_id)) }
         ], list.lineages || [], "No extant lineages returned.");
         this.elements.lineageList.innerHTML = header + table;

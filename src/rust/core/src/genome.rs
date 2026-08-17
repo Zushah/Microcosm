@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::chem::{normalize_specificity_mask, Element, ALL_ELEMENT_MASK, ELEMENT_ORDER};
+use crate::chem::{ALL_ELEMENT_MASK, ELEMENT_ORDER, Element, normalize_specificity_mask};
 use crate::rng::Rng;
 
 pub const MIN_CELL_ENZYMES: usize = 1;
@@ -1070,7 +1070,7 @@ fn specificity_mask_from_strings(elements: &[String]) -> Result<u8, GenomePatchE
             other => {
                 return Err(GenomePatchError::new(format!(
                     "invalid specificity element '{other}'"
-                )))
+                )));
             }
         };
         mask |= bit;

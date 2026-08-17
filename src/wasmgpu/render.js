@@ -70,13 +70,11 @@ export class MicrocosmRenderer {
 
     get diagnostics() {
         return {
-            strategy: "Wasm-backed composited LatticeSpace tile and cell field",
             displayMode: this._displayMode,
             tileCountRendered: this._tileCount,
             cellCountRendered: this._cellCount,
             frameCount: this._frameCount,
             world: this._width > 0 && this._height > 0 ? `${this._width} × ${this._height}` : "—",
-            navigation: this._controls ? "WasmGPU OrbitControls pan/zoom" : "—",
             zoom: this._controls ? this._controls.zoom : 1,
             cameraCenter: this.cameraCenterLabel(),
             selectedLineage: this._selectedLineage,

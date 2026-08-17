@@ -2,5 +2,4 @@
 *.png binary
 *.wasm binary
 index.html linguist-detectable=false
-src/styles/* linguist-detectable=false
-*.glsl text
+src/style.css linguist-detectable=false

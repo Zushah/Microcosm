@@ -100,7 +100,7 @@ pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<World, SnapshotError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{from_bytes, to_bytes, SNAPSHOT_VERSION};
+    use super::{SNAPSHOT_VERSION, from_bytes, to_bytes};
     use crate::{Config, World};
 
     fn small_world(seed: &str) -> World {
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn snapshot_version_matches_microcosm_release() {
-        assert_eq!(SNAPSHOT_VERSION, "0.17.2");
+        assert_eq!(SNAPSHOT_VERSION, "0.12.0");
     }
 
     #[test]

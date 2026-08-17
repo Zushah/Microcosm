@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Local;
 use microcosmcore::{
-    load_from_path, save_to_path, Config, StepProfile, World, WorldStats, SNAPSHOT_EXTENSION,
+    Config, SNAPSHOT_EXTENSION, StepProfile, World, WorldStats, load_from_path, save_to_path,
 };
 
 const CSV_EXTENSION: &str = "csv";
