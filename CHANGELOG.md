@@ -2,8 +2,11 @@
 
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
+## 16. [`v0.12.1`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-02&until=2026-09-02) 2026-09-02
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Bump WasmGPU from v0.9.0 to v0.10.0
+
 ## 15. [`v0.12.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-05-18&until=2026-08-17) 2026-08-17
-- [`current`](https://github.com/Zushah/OpenMCAT/commit/HEAD) Release v0.12.0
+- [`b205523`](https://github.com/Zushah/Microcosm/commit/b205523) Release v0.12.0
 - [`aece4b5`](https://github.com/Zushah/Microcosm/commit/aece4b5) Bump WasmGPU from v0.8.0 to v0.9.0
 - [`43252de`](https://github.com/Zushah/Microcosm/commit/43252de) Fix live memory samples display
 - [`5f11726`](https://github.com/Zushah/Microcosm/commit/5f11726) Update description

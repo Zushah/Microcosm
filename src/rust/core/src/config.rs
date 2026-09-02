@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_WIDTH: usize = 320;
 pub const DEFAULT_HEIGHT: usize = 240;
-pub const DEFAULT_SEED: &str = "demo";
+pub const DEFAULT_SEED: &str = "42";
 pub const DEFAULT_INITIAL_FOUNDER_COUNT: usize = 32;
 pub const DEFAULT_DT_SECONDS: f64 = 0.010;
 pub const DEFAULT_MOLECULE_DIFFUSION_WHEEL_SIZE: usize = 4096;

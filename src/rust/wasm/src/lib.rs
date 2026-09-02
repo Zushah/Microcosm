@@ -1327,11 +1327,11 @@ mod tests {
     fn stats_size_and_versions_are_exposed() {
         assert_eq!(
             exported_string(microcosm_version_ptr(), microcosm_version_len()),
-            "0.12.0"
+            "0.12.1"
         );
         assert_eq!(
             exported_string(microcosm_abi_version_ptr(), microcosm_abi_version_len()),
-            "0.12.0"
+            "0.12.1"
         );
         assert_eq!(microcosm_stats_size(), std::mem::size_of::<WasmStats>());
     }

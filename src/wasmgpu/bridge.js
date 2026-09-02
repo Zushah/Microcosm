@@ -58,12 +58,6 @@ export const REQUIRED_MICROCOSM_EXPORTS = Object.freeze([
 
 const isObject = (value) => typeof value === "object" && value !== null;
 
-const normalizeWasmGPU = (WasmGPU) => {
-    const candidate = WasmGPU && (WasmGPU.default || WasmGPU);
-    if (!candidate || !candidate.webassembly) throw new Error("Microcosm bridge requires a WasmGPU object with a WebAssembly interop accessor.");
-    return candidate;
-};
-
 const describeUrl = (url) => url instanceof URL ? url.href : String(url);
 
 export const normalizeInstantiateResult = (result) => {
@@ -106,7 +100,8 @@ export const createExportView = (module, descriptor) => module.view({
 });
 
 export const createMicrocosmBridge = async (options = {}) => {
-    const WasmGPU = normalizeWasmGPU(options.WasmGPU || globalThis.WasmGPU);
+    const WasmGPU = options.WasmGPU;
+    if (!WasmGPU || !WasmGPU.webassembly) throw new Error("Microcosm bridge requires a WasmGPU object with a WebAssembly interop accessor.");
     const wasmUrl = options.wasmUrl || new URL("../rust/microcosm.wasm", import.meta.url);
     const imports = options.imports || {};
     const name = options.name || DEFAULT_BRIDGE_NAME;

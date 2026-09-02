@@ -137,19 +137,19 @@ mod tests {
     use super::Rng;
 
     #[test]
-    fn demo_seed_matches_js_reference_values() {
+    fn seed_42_matches_js_reference_values() {
         let expected: [f64; 8] = [
-            0.57372393994592130,
-            0.018507251981645823,
-            0.65470190742053092,
-            0.053753884742036462,
-            0.059289659839123487,
-            0.74546227557584643,
-            0.29615715239197016,
-            0.98563182982616127,
+            0.5263380950782448,
+            0.36687696748413146,
+            0.3030670350417495,
+            0.02422904781997204,
+            0.08089715242385864,
+            0.8965561708901078,
+            0.1568871580529958,
+            0.07495629484765232,
         ];
 
-        let mut rng = Rng::from_seed_str("demo");
+        let mut rng = Rng::from_seed_str("42");
         for expected_value in expected {
             assert_eq!(rng.next_f64().to_bits(), expected_value.to_bits());
         }

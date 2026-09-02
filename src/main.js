@@ -1,3 +1,4 @@
+import { WasmGPU } from "https://cdn.jsdelivr.net/gh/Zushah/WasmGPU@0.10.0/release/WasmGPU.min.js";
 import { MicrocosmRuntime } from "./wasmgpu/runtime.js";
 import { MicrocosmRenderer } from "./wasmgpu/render.js";
 import { MicrocosmGUI } from "./wasmgpu/gui.js";
@@ -26,9 +27,8 @@ let tpsLastSampleMs = performance.now();
 let tpsValue = 0;
 let fallbackCanvasExpanded = false;
 let startupInfoMathRendered = false;
-const startupInfoUI = { modal: null, closeButton: null, openButton: null };
 
-const resolveWasmGPU = () => { const candidate = window.WasmGPU && (window.WasmGPU.default || window.WasmGPU); if (!candidate || !candidate.webassembly || typeof candidate.create !== "function") throw new Error("WasmGPU was not loaded or does not expose the expected API."); return candidate; };
+const startupInfoUI = { modal: null, closeButton: null, openButton: null };
 
 const normalizeSeedValue = (value) => { const text = `${value ?? ""}`.trim(); return text !== "" ? text : "42"; };
 
@@ -250,7 +250,6 @@ const init = async () => {
         const seed = initialSeed();
         gui.seed = seed;
         window.history.replaceState(null, "", seedUrl(seed).toString());
-        const WasmGPU = resolveWasmGPU();
         renderer = await MicrocosmRenderer.create({
             WasmGPU,
             canvas: gui.canvas,

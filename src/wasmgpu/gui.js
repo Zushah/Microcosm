@@ -199,7 +199,7 @@ export class MicrocosmGUI {
     }
 
     get seed() {
-        return this.elements.seedInput ? this.elements.seedInput.value : "demo";
+        return this.elements.seedInput ? this.elements.seedInput.value : "42";
     }
 
     set seed(value) {

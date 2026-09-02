@@ -1,11 +1,5 @@
 const TILE_DISPLAY_MODES = Object.freeze(["enval", "occupancy", "mass", "molecules", "element-a", "element-b", "element-c", "element-d", "element-e", "element-f"]);
 
-const normalizeWasmGPU = (WasmGPU) => {
-    const candidate = WasmGPU && (WasmGPU.default || WasmGPU);
-    if (!candidate || typeof candidate.create !== "function") throw new Error("MicrocosmRenderer requires a WasmGPU object with WasmGPU.create(...).");
-    return candidate;
-};
-
 const sameTile = (a, b) => a === b || Boolean(a && b && a.x === b.x && a.y === b.y);
 
 const sameBrush = (a, b) => a === b || Boolean(a && b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height);
@@ -14,7 +8,8 @@ export const MICROCOSM_DISPLAY_MODES = TILE_DISPLAY_MODES;
 
 export class MicrocosmRenderer {
     static async create(options = {}) {
-        const WasmGPU = normalizeWasmGPU(options.WasmGPU || globalThis.WasmGPU);
+        const WasmGPU = options.WasmGPU;
+        if (!WasmGPU || typeof WasmGPU.create !== "function") throw new Error("MicrocosmRenderer requires a WasmGPU object with WasmGPU.create(...).");
         const canvas = options.canvas || document.getElementById("wasmgpuCanvas");
         if (!(canvas instanceof HTMLCanvasElement)) throw new Error("MicrocosmRenderer requires a canvas element.");
         const wgpu = await WasmGPU.create(canvas, {
@@ -24,7 +19,6 @@ export class MicrocosmRenderer {
             occlusionCulling: false,
             ...(options.descriptor || {})
         });
-        if (typeof wgpu.createLatticeSpace !== "function") throw new Error("MicrocosmRenderer requires WasmGPU v0.9.0 or newer with createLatticeSpace(...).");
         const renderer = new MicrocosmRenderer(wgpu, canvas, options);
         renderer.initializeScene();
         return renderer;
