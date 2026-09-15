@@ -1,6 +1,6 @@
-src/rust/Cargo.lock
-src/rust/target/
-src/rust/out/
+rust/Cargo.lock
+rust/target/
+rust/out/
 *.log
 npm-debug.log*
 .DS_Store
@@ -9,4 +9,6 @@ Thumbs.db
 .idea/
 .cache/
 .tmp/
+.temp/
+tmp/
 temp/

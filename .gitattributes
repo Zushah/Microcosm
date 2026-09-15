@@ -2,4 +2,4 @@
 *.png binary
 *.wasm binary
 index.html linguist-detectable=false
-src/style.css linguist-detectable=false
+style.css linguist-detectable=false
