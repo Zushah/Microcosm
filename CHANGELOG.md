@@ -3,7 +3,8 @@
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
 ## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-09-15) 2026-09-15
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Rework deployment workflow
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Bump Chalkboard from v3.0.2 to v3.0.5 and KaTeX from v0.16.45 to v0.18.7
+- [`cd28057`](https://github.com/Zushah/Microcosm/commit/cd28057) Rework deployment workflow
 - [`039b0fe`](https://github.com/Zushah/Microcosm/commit/039b0fe) Relocate source files
 - [`18e067c`](https://github.com/Zushah/Microcosm/commit/18e067c) Replace molecular chemistry with continuous elemental fields
 
