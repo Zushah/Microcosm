@@ -3,49 +3,48 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::chem::{ELEMENT_ORDER, ElementAmounts, ElementAmountsError};
+
 pub const DEFAULT_WIDTH: usize = 320;
 pub const DEFAULT_HEIGHT: usize = 240;
 pub const DEFAULT_SEED: &str = "42";
 pub const DEFAULT_INITIAL_FOUNDER_COUNT: usize = 32;
 pub const DEFAULT_DT_SECONDS: f64 = 0.010;
-pub const DEFAULT_MOLECULE_DIFFUSION_WHEEL_SIZE: usize = 4096;
 pub const DEFAULT_ENVAL_DIFFUSION_ALPHA: f32 = 0.18;
 
+pub const DEFAULT_ELEMENT_FIELD_AMOUNTS: ElementAmounts =
+    ElementAmounts::new([1.00, 0.65, 0.50, 0.12, 0.08, 0.05]);
+pub const DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES: ElementAmounts =
+    ElementAmounts::new([0.028, 0.018, 0.014, 0.012, 0.030, 0.022]);
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MoleculeSeedingConfig {
-    pub b: f32,
-    pub c: f32,
-    pub d: f32,
-    pub e: f32,
-    pub f: f32,
-    pub bc: f32,
+pub struct ElementFieldConfig {
+    pub initial_amounts: ElementAmounts,
+    pub diffusivities: ElementAmounts,
 }
 
-impl Default for MoleculeSeedingConfig {
+impl Default for ElementFieldConfig {
     fn default() -> Self {
         Self {
-            b: 0.60,
-            c: 0.45,
-            d: 0.12,
-            e: 0.08,
-            f: 0.05,
-            bc: 0.05,
+            initial_amounts: DEFAULT_ELEMENT_FIELD_AMOUNTS,
+            diffusivities: DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
         }
     }
 }
 
-impl MoleculeSeedingConfig {
+impl ElementFieldConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        for (name, value) in [
-            ("molecule_seeding.b", self.b),
-            ("molecule_seeding.c", self.c),
-            ("molecule_seeding.d", self.d),
-            ("molecule_seeding.e", self.e),
-            ("molecule_seeding.f", self.f),
-            ("molecule_seeding.bc", self.bc),
-        ] {
-            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                return Err(ConfigError::InvalidProbability(name, value));
+        self.initial_amounts
+            .validate_nonnegative("element_fields.initial_amounts")?;
+        self.diffusivities
+            .validate_nonnegative("element_fields.diffusivities")?;
+        for element in ELEMENT_ORDER {
+            let diffusivity = self.diffusivities[element];
+            if diffusivity > 1.0 {
+                return Err(ConfigError::InvalidElementDiffusivity {
+                    element: element.symbol(),
+                    value: diffusivity,
+                });
             }
         }
         Ok(())
@@ -59,9 +58,8 @@ pub struct Config {
     pub seed: String,
     pub initial_founder_count: usize,
     pub dt_seconds: f64,
-    pub molecule_diffusion_wheel_size: usize,
     pub enval_diffusion_alpha: f32,
-    pub molecule_seeding: MoleculeSeedingConfig,
+    pub element_fields: ElementFieldConfig,
     pub predation_enabled: bool,
 }
 
@@ -73,9 +71,8 @@ impl Default for Config {
             seed: DEFAULT_SEED.to_owned(),
             initial_founder_count: DEFAULT_INITIAL_FOUNDER_COUNT,
             dt_seconds: DEFAULT_DT_SECONDS,
-            molecule_diffusion_wheel_size: DEFAULT_MOLECULE_DIFFUSION_WHEEL_SIZE,
             enval_diffusion_alpha: DEFAULT_ENVAL_DIFFUSION_ALPHA,
-            molecule_seeding: MoleculeSeedingConfig::default(),
+            element_fields: ElementFieldConfig::default(),
             predation_enabled: true,
         }
     }
@@ -99,13 +96,6 @@ impl Config {
         if !self.dt_seconds.is_finite() || self.dt_seconds <= 0.0 {
             return Err(ConfigError::InvalidDtSeconds(self.dt_seconds));
         }
-        if self.molecule_diffusion_wheel_size == 0
-            || !self.molecule_diffusion_wheel_size.is_power_of_two()
-        {
-            return Err(ConfigError::InvalidDiffusionWheelSize(
-                self.molecule_diffusion_wheel_size,
-            ));
-        }
         if !self.enval_diffusion_alpha.is_finite()
             || !(0.0..=1.0).contains(&self.enval_diffusion_alpha)
         {
@@ -114,7 +104,7 @@ impl Config {
                 self.enval_diffusion_alpha,
             ));
         }
-        self.molecule_seeding.validate()
+        self.element_fields.validate()
     }
 }
 
@@ -123,8 +113,15 @@ pub enum ConfigError {
     InvalidDimension(&'static str, usize),
     TileCountOverflow,
     InvalidDtSeconds(f64),
-    InvalidDiffusionWheelSize(usize),
     InvalidProbability(&'static str, f32),
+    InvalidElementAmount(ElementAmountsError),
+    InvalidElementDiffusivity { element: &'static str, value: f32 },
+}
+
+impl From<ElementAmountsError> for ConfigError {
+    fn from(value: ElementAmountsError) -> Self {
+        Self::InvalidElementAmount(value)
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -140,16 +137,67 @@ impl fmt::Display for ConfigError {
                     "invalid dt_seconds: expected a positive finite value, got {value}"
                 )
             }
-            Self::InvalidDiffusionWheelSize(value) => write!(
-                f,
-                "invalid molecule_diffusion_wheel_size: expected a nonzero power of two, got {value}"
-            ),
             Self::InvalidProbability(name, value) => write!(
                 f,
                 "invalid {name}: expected a finite probability in [0, 1], got {value}"
+            ),
+            Self::InvalidElementAmount(error) => error.fmt(f),
+            Self::InvalidElementDiffusivity { element, value } => write!(
+                f,
+                "invalid element_fields.diffusivities.{element}: expected a finite mixing strength in [0, 1], got {value}"
             ),
         }
     }
 }
 
 impl Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
+        ElementFieldConfig,
+    };
+    use crate::chem::Element;
+
+    fn approx_eq(a: f32, b: f32) {
+        assert!((a - b).abs() <= 1.0e-6, "{a} != {b}");
+    }
+
+    #[test]
+    fn continuous_field_defaults_preserve_expected_elemental_abundance() {
+        assert_eq!(
+            *DEFAULT_ELEMENT_FIELD_AMOUNTS.as_array(),
+            [1.00, 0.65, 0.50, 0.12, 0.08, 0.05]
+        );
+        assert_eq!(
+            *DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES.as_array(),
+            [0.028, 0.018, 0.014, 0.012, 0.030, 0.022]
+        );
+
+        for element in crate::chem::ELEMENT_ORDER {
+            approx_eq(
+                DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES[element],
+                0.01 + 0.02 * element.properties().polarity,
+            );
+        }
+        Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn continuous_field_config_rejects_invalid_amounts_and_diffusivities() {
+        let mut config = ElementFieldConfig::default();
+        config.initial_amounts[Element::A] = -0.01;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidElementAmount(_))
+        ));
+
+        let mut config = ElementFieldConfig::default();
+        config.diffusivities[Element::F] = 1.01;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidElementDiffusivity { element: "F", .. })
+        ));
+    }
+}

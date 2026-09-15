@@ -23,9 +23,9 @@ const STATUS_LABELS = Object.freeze({
 const TILE_VIEW_DEFINITIONS = Object.freeze([
     { key: "tileEnval", ptr: "microcosm_tile_enval_ptr", length: "microcosm_tile_count", dtype: "f32", name: "microcosm.tile_enval" },
     { key: "tileOccupancy", ptr: "microcosm_tile_occupancy_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_occupancy" },
-    { key: "tileMass", ptr: "microcosm_tile_mass_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_mass" },
-    { key: "tileMoleculeCount", ptr: "microcosm_tile_molecule_count_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_molecule_count" },
-    { key: "tileElementMask", ptr: "microcosm_tile_element_mask_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_element_mask" }
+    { key: "tileMassDensity", ptr: "microcosm_tile_mass_density_ptr", length: "microcosm_tile_count", dtype: "f32", name: "microcosm.tile_mass_density" },
+    { key: "tileTotalElements", ptr: "microcosm_tile_total_elements_ptr", length: "microcosm_tile_count", dtype: "f32", name: "microcosm.tile_total_elements" },
+    { key: "tileElementConcentrations", ptr: "microcosm_tile_element_concentrations_ptr", length: "microcosm_tile_element_concentrations_len", dtype: "f32", name: "microcosm.tile_element_concentrations" }
 ]);
 
 const LATTICE_VIEW_DEFINITION = Object.freeze({ key: "latticeRgba", ptr: "microcosm_lattice_rgba_ptr", length: "microcosm_lattice_rgba_len", dtype: "f32", name: "microcosm.lattice_rgba" });
@@ -49,7 +49,7 @@ const DISPLAY_MODE_IDS = Object.freeze({
     enval: 0,
     occupancy: 1,
     mass: 2,
-    molecules: 3,
+    "total-elements": 3,
     "element-a": 4,
     "element-b": 5,
     "element-c": 6,
@@ -60,11 +60,9 @@ const DISPLAY_MODE_IDS = Object.freeze({
 
 const VISUAL_FLAGS = Object.freeze({ selectedLineage: 1 << 0, selectedCell: 1 << 1, selectedTile: 1 << 2, hoverTile: 1 << 3, brushPreview: 1 << 4 });
 
-const DEFAULT_CELL_MOLECULE_LIMIT = 64;
-const DEFAULT_CELL_REACTION_LIMIT = 32;
+const DEFAULT_CELL_FLUX_LIMIT = 32;
 const DEFAULT_LINEAGE_LIMIT = 64;
-const MAX_CELL_MOLECULE_LIMIT = 256;
-const MAX_CELL_REACTION_LIMIT = 128;
+const MAX_CELL_FLUX_LIMIT = 128;
 const MAX_LINEAGE_LIMIT = 512;
 
 const STATS_FIELD_TYPES = Object.freeze([
@@ -76,18 +74,25 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["occupied_tile_count", "u32"],
     ["empty_tile_count", "u32"],
     ["occupancy_fraction", "f64"],
-    ["molecule_count", "u32"],
-    ["tile_molecule_count", "u32"],
-    ["cell_molecule_count", "u32"],
-    ["free_molecule_record_count", "u32"],
-    ["active_molecule_record_count", "u32"],
-    ["molecule_arena_len", "u32"],
-    ["molecule_arena_high_water_mark", "u32"],
-    ["molecule_slots_reused", "u64"],
-    ["molecule_slots_newly_allocated", "u64"],
-    ["total_atom_count", "u64"],
-    ["tile_atom_count", "u64"],
-    ["cell_atom_count", "u64"],
+    ["extracellular_a", "f64"],
+    ["extracellular_b", "f64"],
+    ["extracellular_c", "f64"],
+    ["extracellular_d", "f64"],
+    ["extracellular_e", "f64"],
+    ["extracellular_f", "f64"],
+    ["intracellular_a", "f64"],
+    ["intracellular_b", "f64"],
+    ["intracellular_c", "f64"],
+    ["intracellular_d", "f64"],
+    ["intracellular_e", "f64"],
+    ["intracellular_f", "f64"],
+    ["system_a", "f64"],
+    ["system_b", "f64"],
+    ["system_c", "f64"],
+    ["system_d", "f64"],
+    ["system_e", "f64"],
+    ["system_f", "f64"],
+    ["total_element_amount", "f64"],
     ["live_cell_count", "u32"],
     ["cell_record_count", "u32"],
     ["dead_cell_count", "u32"],
@@ -113,9 +118,7 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["max_enzyme_count", "u32"],
     ["cells_at_enzyme_cap", "u32"],
     ["fraction_cells_at_enzyme_cap", "f64"],
-    ["enzyme_anabolase_count", "u64"],
-    ["enzyme_catabolase_count", "u64"],
-    ["enzyme_transmutase_count", "u64"],
+    ["enzyme_metabolic_count", "u64"],
     ["enzyme_defensase_count", "u64"],
     ["enzyme_attackase_count", "u64"],
     ["average_attack_total", "f64"],
@@ -130,11 +133,13 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["enval_p50", "f32"],
     ["enval_p95", "f32"],
     ["reaction_attempts", "u64"],
-    ["reaction_gates_passed", "u64"],
     ["reaction_successes", "u64"],
-    ["molecule_uptakes", "u64"],
-    ["molecule_outputs", "u64"],
+    ["executed_metabolic_flux", "f64"],
+    ["uptake_flux", "f64"],
+    ["secretion_flux", "f64"],
     ["divisions", "u64"],
+    ["element_field_diffusion_tiles", "u64"],
+    ["element_uptake_events", "u64"],
     ["cell_steps", "u64"],
     ["enzyme_entries_seen", "u64"],
     ["metabolic_enzyme_attempts", "u64"],
@@ -378,29 +383,27 @@ export class MicrocosmRuntime {
     inspectCellDetail(cellId, options = {}) {
         this.assertReady();
         const id = Math.max(0, Number(cellId) | 0);
-        const moleculeLimit = normalizeLimit(options.moleculeLimit, DEFAULT_CELL_MOLECULE_LIMIT, MAX_CELL_MOLECULE_LIMIT, "moleculeLimit");
-        const reactionLimit = normalizeLimit(options.reactionLimit, DEFAULT_CELL_REACTION_LIMIT, MAX_CELL_REACTION_LIMIT, "reactionLimit");
-        const status = readUintStatus(this._functions.inspectCellDetail(this._handle, id, moleculeLimit, reactionLimit));
+        const fluxLimit = normalizeLimit(options.fluxLimit, DEFAULT_CELL_FLUX_LIMIT, MAX_CELL_FLUX_LIMIT, "fluxLimit");
+        const status = readUintStatus(this._functions.inspectCellDetail(this._handle, id, fluxLimit));
         this.assertStatus(status, "microcosm_inspect_cell_detail");
         return this.readQueryResult("microcosm.inspect_cell_detail");
     }
 
-    inspectCellMolecules(cellId, options = {}) {
+    inspectCellElements(cellId) {
         this.assertReady();
         const id = Math.max(0, Number(cellId) | 0);
-        const moleculeLimit = normalizeLimit(options.limit ?? options.moleculeLimit, DEFAULT_CELL_MOLECULE_LIMIT, MAX_CELL_MOLECULE_LIMIT, "moleculeLimit");
-        const status = readUintStatus(this._functions.inspectCellMolecules(this._handle, id, moleculeLimit));
-        this.assertStatus(status, "microcosm_inspect_cell_molecules");
-        return this.readQueryResult("microcosm.inspect_cell_molecules");
+        const status = readUintStatus(this._functions.inspectCellElements(this._handle, id));
+        this.assertStatus(status, "microcosm_inspect_cell_elements");
+        return this.readQueryResult("microcosm.inspect_cell_elements");
     }
 
-    inspectCellReactions(cellId, options = {}) {
+    inspectCellFluxes(cellId, options = {}) {
         this.assertReady();
         const id = Math.max(0, Number(cellId) | 0);
-        const reactionLimit = normalizeLimit(options.limit ?? options.reactionLimit, DEFAULT_CELL_REACTION_LIMIT, MAX_CELL_REACTION_LIMIT, "reactionLimit");
-        const status = readUintStatus(this._functions.inspectCellReactions(this._handle, id, reactionLimit));
-        this.assertStatus(status, "microcosm_inspect_cell_reactions");
-        return this.readQueryResult("microcosm.inspect_cell_reactions");
+        const fluxLimit = normalizeLimit(options.limit ?? options.fluxLimit, DEFAULT_CELL_FLUX_LIMIT, MAX_CELL_FLUX_LIMIT, "fluxLimit");
+        const status = readUintStatus(this._functions.inspectCellFluxes(this._handle, id, fluxLimit));
+        this.assertStatus(status, "microcosm_inspect_cell_fluxes");
+        return this.readQueryResult("microcosm.inspect_cell_fluxes");
     }
 
     inspectLineage(lineageId) {
@@ -483,7 +486,13 @@ export class MicrocosmRuntime {
     viewDiagnostics() {
         const expectedTileCount = this.tileCount, expectedCellCount = this.cellCount;
         return VIEW_DEFINITIONS.map((definition) => {
-            const expectedLength = definition.key === "latticeRgba" ? expectedTileCount * 4 : definition.length === "microcosm_tile_count" ? expectedTileCount : expectedCellCount;
+            const expectedLength = definition.key === "latticeRgba"
+                ? expectedTileCount * 4
+                : definition.key === "tileElementConcentrations"
+                    ? expectedTileCount * 6
+                    : definition.length === "microcosm_tile_count"
+                        ? expectedTileCount
+                        : expectedCellCount;
             return ({
                 key: definition.key,
                 name: definition.name,
@@ -525,8 +534,8 @@ export class MicrocosmRuntime {
             inspectTile: get("microcosm_inspect_tile"),
             inspectCell: get("microcosm_inspect_cell"),
             inspectCellDetail: get("microcosm_inspect_cell_detail"),
-            inspectCellMolecules: get("microcosm_inspect_cell_molecules"),
-            inspectCellReactions: get("microcosm_inspect_cell_reactions"),
+            inspectCellElements: get("microcosm_inspect_cell_elements"),
+            inspectCellFluxes: get("microcosm_inspect_cell_fluxes"),
             inspectLineage: get("microcosm_inspect_lineage"),
             listLineages: get("microcosm_list_lineages"),
             applyCellGenomePatch: get("microcosm_apply_cell_genome_patch"),

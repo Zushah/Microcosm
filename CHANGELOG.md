@@ -2,8 +2,11 @@
 
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
+## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-09-15) 2026-09-15
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Replace molecular chemistry with continuous elemental fields
+
 ## 16. [`v0.12.1`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-02&until=2026-09-02) 2026-09-02
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Bump WasmGPU from v0.9.0 to v0.10.0
+- [`76fd487`](https://github.com/Zushah/Microcosm/commit/76fd487) Bump WasmGPU from v0.9.0 to v0.10.0
 
 ## 15. [`v0.12.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-05-18&until=2026-08-17) 2026-08-17
 - [`b205523`](https://github.com/Zushah/Microcosm/commit/b205523) Release v0.12.0

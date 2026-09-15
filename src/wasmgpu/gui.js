@@ -4,26 +4,24 @@ const DISPLAY_LABELS = Object.freeze({
     enval: "Enval",
     occupancy: "Occupancy",
     mass: "Mass",
-    molecules: "Molecules",
-    "element-a": "Element A presence",
-    "element-b": "Element B presence",
-    "element-c": "Element C presence",
-    "element-d": "Element D presence",
-    "element-e": "Element E presence",
-    "element-f": "Element F presence"
+    "total-elements": "Total elements",
+    "element-a": "Element A concentration",
+    "element-b": "Element B concentration",
+    "element-c": "Element C concentration",
+    "element-d": "Element D concentration",
+    "element-e": "Element E concentration",
+    "element-f": "Element F concentration"
 });
 
 const ELEMENT_KEYS = Object.freeze(["A", "B", "C", "D", "E", "F"]);
 const DETAIL_REFRESH_INTERVAL_MS = 1500;
 const LINEAGE_REFRESH_INTERVAL_MS = 2500;
 const LINEAGE_LIST_REFRESH_INTERVAL_MS = 5000;
-const CELL_MOLECULE_LIMIT = 64;
-const CELL_REACTION_LIMIT = 24;
+const CELL_FLUX_LIMIT = 24;
 const LINEAGE_LIST_LIMIT = 32;
-const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v1";
-const ELEMENT_MASKS = Object.freeze({ A: 1, B: 2, C: 4, D: 8, E: 16, F: 32 });
+const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v2";
 const COMBAT_ENZYME_TYPES = new Set(["attackase", "defensase"]);
-const INTEGER_GENOME_FIELDS = new Set(["desired_element_reserve"]);
+const INTEGER_GENOME_FIELDS = new Set();
 const INTEGER_ENZYME_FIELDS = new Set(["combat_level"]);
 
 const displayValue = (value) => {
@@ -50,43 +48,19 @@ const elementCountValue = (counts, index, key) => { if (!counts) return null; if
 
 const elementCountsText = (counts) => { if (!counts) return "—"; return ELEMENT_KEYS.map((key, index) => `${key}:${displayValue(elementCountValue(counts, index, key))}`).join("  "); };
 
-const compositionText = (counts) => { if (!counts) return "—"; return ELEMENT_KEYS.map((key, index) => [key, elementCountValue(counts, index, key)]).filter(([, value]) => Number(value || 0) > 0).map(([key, value]) => `${key}${Number(value) > 1 ? displayValue(value) : ""}`).join(" ") || "empty"; };
-
-const specificityMaskFromText = (value) => {
-    const text = `${value ?? ""}`.trim().toUpperCase().replace(/[\s,]+/g, "");
-    if (text === "" || text === "ALL") return 63;
-    if (!/^[A-F]+$/.test(text)) throw new Error("Specificity must contain A-F letters or ALL.");
-    let mask = 0;
-    for (let i = 0; i < text.length; i++) mask |= ELEMENT_MASKS[text[i]] || 0;
-    return mask || 63;
+const parseElementVector = (value, label) => {
+    const values = `${value ?? ""}`.trim().split(/[\s,]+/).filter(Boolean).map(Number);
+    if (values.length !== ELEMENT_KEYS.length || values.some((entry) => !Number.isFinite(entry) || entry < 0)) throw new Error(`${label} must contain six finite nonnegative A-F values.`);
+    return values;
 };
 
-const specificityTextFromMask = (mask) => {
-    const normalized = Number(mask) >>> 0;
-    const text = ELEMENT_KEYS.filter((key) => (normalized & ELEMENT_MASKS[key]) !== 0).join("");
-    return text === "ABCDEF" ? "ALL" : (text || "ALL");
-};
+const elementVectorText = (values) => Array.isArray(values) ? values.map(displayValue).join(", ") : "";
 
 const parseEditNumber = (value, label, integer = false) => {
     const number = Number(value);
     if (!Number.isFinite(number)) throw new Error(`${label} must be a finite number.`);
     if (integer && !Number.isInteger(number)) throw new Error(`${label} must be an integer.`);
     return integer ? number | 0 : number;
-};
-
-const moleculeSummaryText = (molecule) => {
-    if (!molecule) return "—";
-    const formula = molecule.formula || compositionText(molecule.composition_counts);
-    const size = molecule.size == null ? "" : ` size ${displayValue(molecule.size)}`;
-    const energy = molecule.energy == null ? "" : ` E ${displayValue(molecule.energy)}`;
-    return `${formula}${size}${energy}`;
-};
-
-const moleculeListSummaryText = (molecules, limit = 3) => {
-    if (!Array.isArray(molecules) || molecules.length === 0) return "—";
-    const shown = molecules.slice(0, limit).map((molecule) => moleculeSummaryText(molecule));
-    if (molecules.length > limit) shown.push(`+${displayValue(molecules.length - limit)} more`);
-    return shown.join(", ");
 };
 
 const statusClass = (status) => status && status.startsWith("edit") ? "modeEdit" : "modeExplore";
@@ -130,8 +104,8 @@ export class MicrocosmGUI {
             copyCellDetailButton: root.getElementById("copyCellDetailButton"),
             copyTileButton: root.getElementById("copyTileButton"),
             copyLineageButton: root.getElementById("copyLineageButton"),
-            copyMoleculesButton: root.getElementById("copyMoleculesButton"),
-            copyReactionsButton: root.getElementById("copyReactionsButton"),
+            copyElementsButton: root.getElementById("copyElementsButton"),
+            copyFluxesButton: root.getElementById("copyFluxesButton"),
             useSelectedGenomeButton: root.getElementById("useSelectedGenomeButton"),
             applyGenomePatchButton: root.getElementById("applyGenomePatchButton"),
             applyGenomeBrushButton: root.getElementById("applyGenomeBrushButton"),
@@ -140,7 +114,8 @@ export class MicrocosmGUI {
             enzymeEditOp: root.getElementById("enzymeEditOp"),
             enzymeEditIndex: root.getElementById("enzymeEditIndex"),
             enzymeEditType: root.getElementById("enzymeEditType"),
-            enzymeEditSpecificity: root.getElementById("enzymeEditSpecificity"),
+            enzymeEditReactants: root.getElementById("enzymeEditReactants"),
+            enzymeEditProducts: root.getElementById("enzymeEditProducts"),
             enzymeEditField: root.getElementById("enzymeEditField"),
             enzymeEditValue: root.getElementById("enzymeEditValue"),
             genomeEditResult: root.getElementById("genomeEditResult"),
@@ -151,8 +126,8 @@ export class MicrocosmGUI {
             cellDetailInspector: root.getElementById("cellDetailInspector"),
             genomeInspector: root.getElementById("genomeInspector"),
             enzymeInspector: root.getElementById("enzymeInspector"),
-            moleculeInspector: root.getElementById("moleculeInspector"),
-            reactionInspector: root.getElementById("reactionInspector"),
+            elementInspector: root.getElementById("elementInspector"),
+            fluxInspector: root.getElementById("fluxInspector"),
             lineageDetailInspector: root.getElementById("lineageDetailInspector"),
             lineageList: root.getElementById("lineageList"),
             canvas: root.getElementById("wasmgpuCanvas"),
@@ -170,13 +145,13 @@ export class MicrocosmGUI {
             selectedCellId: null,
             selectedLineageId: null,
             cellDetail: null,
-            molecules: null,
-            reactions: null,
+            elements: null,
+            fluxes: null,
             lineage: null,
             lineageList: null,
             cellError: null,
-            moleculeError: null,
-            reactionError: null,
+            elementError: null,
+            fluxError: null,
             lineageError: null,
             lineageListError: null,
             lastCellRefreshMs: 0,
@@ -271,8 +246,8 @@ export class MicrocosmGUI {
         if (this.elements.copyCellDetailButton) this.elements.copyCellDetailButton.addEventListener("click", () => this.copyPayload("cell", this.elements.copyCellDetailButton));
         if (this.elements.copyTileButton) this.elements.copyTileButton.addEventListener("click", () => this.copyPayload("tile", this.elements.copyTileButton));
         if (this.elements.copyLineageButton) this.elements.copyLineageButton.addEventListener("click", () => this.copyPayload("lineage", this.elements.copyLineageButton));
-        if (this.elements.copyMoleculesButton) this.elements.copyMoleculesButton.addEventListener("click", () => this.copyPayload("molecules", this.elements.copyMoleculesButton));
-        if (this.elements.copyReactionsButton) this.elements.copyReactionsButton.addEventListener("click", () => this.copyPayload("reactions", this.elements.copyReactionsButton));
+        if (this.elements.copyElementsButton) this.elements.copyElementsButton.addEventListener("click", () => this.copyPayload("elements", this.elements.copyElementsButton));
+        if (this.elements.copyFluxesButton) this.elements.copyFluxesButton.addEventListener("click", () => this.copyPayload("fluxes", this.elements.copyFluxesButton));
         if (this.elements.useSelectedGenomeButton) this.elements.useSelectedGenomeButton.addEventListener("click", () => this.useSelectedGenomeAsDraft());
         if (this.elements.applyGenomePatchButton) this.elements.applyGenomePatchButton.addEventListener("click", () => { try { if (handlers.applyGenomePatch) handlers.applyGenomePatch(this.genomePatchDraft); } catch (error) { this.setError(error); } });
         if (this.elements.applyGenomeBrushButton) this.elements.applyGenomeBrushButton.addEventListener("click", () => { try { if (handlers.applyGenomeBrush) handlers.applyGenomeBrush(this.genomeBrushPatchDraft); } catch (error) { this.setError(error); } });
@@ -347,9 +322,12 @@ export class MicrocosmGUI {
         const index = this.elements.enzymeEditIndex ? parseEditNumber(this.elements.enzymeEditIndex.value, "enzyme index", true) : 0;
         if (index < 0) throw new Error("enzyme index must be >= 0.");
         if (op === "remove") return { op, index };
-        const enzymeType = this.elements.enzymeEditType ? this.elements.enzymeEditType.value : "anabolase";
+        const enzymeType = this.elements.enzymeEditType ? this.elements.enzymeEditType.value : "metabolic";
         const fields = { enzyme_type: enzymeType };
-        if (!COMBAT_ENZYME_TYPES.has(enzymeType)) fields.specificity_mask = specificityMaskFromText(this.elements.enzymeEditSpecificity ? this.elements.enzymeEditSpecificity.value : "ALL");
+        if (!COMBAT_ENZYME_TYPES.has(enzymeType)) {
+            fields.reactants = parseElementVector(this.elements.enzymeEditReactants ? this.elements.enzymeEditReactants.value : "", "Reactants");
+            fields.products = parseElementVector(this.elements.enzymeEditProducts ? this.elements.enzymeEditProducts.value : "", "Products");
+        }
         const scalarField = this.elements.enzymeEditField ? this.elements.enzymeEditField.value : "";
         if (scalarField) fields[scalarField] = parseEditNumber(this.elements.enzymeEditValue ? this.elements.enzymeEditValue.value : "", scalarField, INTEGER_ENZYME_FIELDS.has(scalarField));
         if (op === "append") return { op, enzyme: fields };
@@ -367,8 +345,9 @@ export class MicrocosmGUI {
         const enzyme = enzymes[0] || null;
         if (this.elements.enzymeEditOp) this.elements.enzymeEditOp.value = "none";
         if (this.elements.enzymeEditIndex) this.elements.enzymeEditIndex.value = enzyme ? String(enzyme.index || 0) : "0";
-        if (this.elements.enzymeEditType && enzyme) this.elements.enzymeEditType.value = enzyme.enzyme_type || "anabolase";
-        if (this.elements.enzymeEditSpecificity && enzyme) this.elements.enzymeEditSpecificity.value = specificityTextFromMask(enzyme.specificity_mask);
+        if (this.elements.enzymeEditType && enzyme) this.elements.enzymeEditType.value = enzyme.enzyme_type || "metabolic";
+        if (this.elements.enzymeEditReactants && enzyme) this.elements.enzymeEditReactants.value = elementVectorText(enzyme.reactants);
+        if (this.elements.enzymeEditProducts && enzyme) this.elements.enzymeEditProducts.value = elementVectorText(enzyme.products);
         if (this.elements.enzymeEditField) this.elements.enzymeEditField.value = enzyme && enzyme.is_combat ? "combat_level" : "enval_sigma";
         if (this.elements.enzymeEditValue && enzyme) this.elements.enzymeEditValue.value = displayValue(enzyme.is_combat ? enzyme.combat_level : enzyme.enval_sigma);
         this.setGenomeEditResult({ message: "Loaded selected genome values into the draft controls. Choose an enzyme operation before applying enzyme edits." });
@@ -421,12 +400,12 @@ export class MicrocosmGUI {
             ["TPS", state.tps],
             ["World", `${stats.width} × ${stats.height}`],
             ["Live cells", stats.live_cell_count],
-            ["Molecules", stats.molecule_count],
+            ["Total elements", stats.total_element_amount],
             ["Births", stats.births],
             ["Deaths", stats.deaths],
             ["Average cell energy", stats.average_cell_energy],
             ["Average enval", stats.average_enval],
-            ["Reaction successes", stats.reaction_successes]
+            ["Metabolic flux", stats.executed_metabolic_flux]
         ];
         if (this.elements.diagnostics) this.elements.diagnostics.innerHTML = diagnostics.map(([label, value]) => `
             <div class="datum">
@@ -466,11 +445,11 @@ export class MicrocosmGUI {
         if (selectedCellId !== this._detail.selectedCellId) {
             this._detail.selectedCellId = selectedCellId;
             this._detail.cellDetail = null;
-            this._detail.molecules = null;
-            this._detail.reactions = null;
+            this._detail.elements = null;
+            this._detail.fluxes = null;
             this._detail.cellError = null;
-            this._detail.moleculeError = null;
-            this._detail.reactionError = null;
+            this._detail.elementError = null;
+            this._detail.fluxError = null;
             this._detail.lastCellRefreshMs = 0;
         }
         if (selectedLineageId !== this._detail.selectedLineageId) {
@@ -495,12 +474,12 @@ export class MicrocosmGUI {
     }
 
     refreshCellDetails(runtime, cellId) {
-        try { this._detail.cellDetail = runtime.inspectCellDetail(cellId, { moleculeLimit: CELL_MOLECULE_LIMIT, reactionLimit: CELL_REACTION_LIMIT }); this._detail.cellError = null; }
+        try { this._detail.cellDetail = runtime.inspectCellDetail(cellId, { fluxLimit: CELL_FLUX_LIMIT }); this._detail.cellError = null; }
         catch (error) { this._detail.cellDetail = null; this._detail.cellError = errorText(error); }
-        try { this._detail.molecules = runtime.inspectCellMolecules(cellId, { limit: CELL_MOLECULE_LIMIT }); this._detail.moleculeError = null; }
-        catch (error) { this._detail.molecules = null; this._detail.moleculeError = errorText(error); }
-        try { this._detail.reactions = runtime.inspectCellReactions(cellId, { limit: CELL_REACTION_LIMIT }); this._detail.reactionError = null; }
-        catch (error) { this._detail.reactions = null; this._detail.reactionError = errorText(error); }
+        try { this._detail.elements = runtime.inspectCellElements(cellId); this._detail.elementError = null; }
+        catch (error) { this._detail.elements = null; this._detail.elementError = errorText(error); }
+        try { this._detail.fluxes = runtime.inspectCellFluxes(cellId, { limit: CELL_FLUX_LIMIT }); this._detail.fluxError = null; }
+        catch (error) { this._detail.fluxes = null; this._detail.fluxError = errorText(error); }
     }
 
     refreshLineageDetail(runtime, lineageId) {
@@ -520,8 +499,8 @@ export class MicrocosmGUI {
             selectedTile: interaction.selectedTileInfo,
             selectedCell: interaction.selectedCellInfo,
             selectedCellDetail: this._detail.cellDetail,
-            selectedCellMolecules: this._detail.molecules,
-            selectedCellReactions: this._detail.reactions,
+            selectedCellElements: this._detail.elements,
+            selectedCellFluxes: this._detail.fluxes,
             selectedLineage: this._detail.lineage,
             lineageList: this._detail.lineageList,
             selectedLineageId: interaction.selectedLineageId,
@@ -534,8 +513,8 @@ export class MicrocosmGUI {
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Enval", tile.enval],
                 ["Cell", tile.cell_id ?? "—"],
-                ["Molecules", tile.molecule_count],
-                ["Mass", tile.mass_count]
+                ["Total elements", tile.total_element_concentration],
+                ["Mass density", tile.mass_density]
             ]) : payloadMessage("Move over the canvas to probe a tile.");
         }
         if (this.elements.tileInspector) {
@@ -545,10 +524,9 @@ export class MicrocosmGUI {
                 ["Tile id", tile.tile_id],
                 ["Enval", tile.enval],
                 ["Occupied cell", tile.cell_id ?? "—"],
-                ["Molecule count", tile.molecule_count],
-                ["Mass count", tile.mass_count],
-                ["Element counts", elementCountsText(tile.element_counts)],
-                ["Element mask", tile.element_mask]
+                ["Total elements", tile.total_element_concentration],
+                ["Mass density", tile.mass_density],
+                ["Concentrations", elementCountsText(tile.element_concentrations)]
             ]) : payloadMessage("Left-click a tile to select it.");
         }
         if (this.elements.cellInspector) {
@@ -562,7 +540,7 @@ export class MicrocosmGUI {
                 ["Optimal enval", cell.optimal_enval],
                 ["Local enval average", cell.local_enval_average],
                 ["Enzymes", cell.enzyme_count],
-                ["Internal atoms", cell.internal_atom_count],
+                ["Internal elements", cell.total_internal_elements],
                 ["Attack", cell.combat_attack_total],
                 ["Defense", cell.combat_defense_total],
                 ["Repro threshold", cell.repro_threshold],
@@ -584,8 +562,8 @@ export class MicrocosmGUI {
         this.renderCellDetail(detail);
         this.renderGenome(detail && detail.genome);
         this.renderEnzymes(detail && detail.genome && detail.genome.enzymes);
-        this.renderMolecules(detail);
-        this.renderReactions(detail);
+        this.renderElements(detail);
+        this.renderFluxes(detail);
         this.renderLineageDetail(interaction);
         this.renderLineageList();
         this.renderGenomeEditResult();
@@ -595,14 +573,18 @@ export class MicrocosmGUI {
         return this._detail.cellDetail && this._detail.cellDetail.cell_detail ? this._detail.cellDetail.cell_detail : null;
     }
 
-    moleculePayload(detail) {
-        if (this._detail.molecules && this._detail.molecules.internal) return this._detail.molecules.internal;
-        return detail && detail.internal ? detail.internal : null;
+    elementPayload(detail) {
+        if (this._detail.elements) return this._detail.elements;
+        if (!detail) return null;
+        return {
+            internal_elements: detail.internal_elements,
+            total_internal_elements: detail.total_internal_elements
+        };
     }
 
-    reactionPayload(detail) {
-        if (this._detail.reactions && this._detail.reactions.recent_reactions) return this._detail.reactions.recent_reactions;
-        return detail && detail.recent_reactions ? detail.recent_reactions : null;
+    fluxPayload(detail) {
+        if (this._detail.fluxes && this._detail.fluxes.recent_fluxes) return this._detail.fluxes.recent_fluxes;
+        return detail && detail.recent_fluxes ? detail.recent_fluxes : null;
     }
 
     renderCellDetail(detail) {
@@ -624,7 +606,7 @@ export class MicrocosmGUI {
             ["Maintenance / sec", detail.maintenance_cost_per_sec],
             ["Death sim time", detail.death_sim_time ?? "—"],
             ["Enzyme count", cell.enzyme_count],
-            ["Internal atoms", cell.internal_atom_count],
+            ["Internal elements", cell.total_internal_elements],
             ["Attack total", cell.combat_attack_total],
             ["Defense total", cell.combat_defense_total],
             ["Reproduction threshold", cell.repro_threshold],
@@ -644,7 +626,6 @@ export class MicrocosmGUI {
             ["Reproduction threshold", genome.repro_threshold],
             ["Initial energy", genome.initial_energy],
             ["Decay time", genome.decay_time],
-            ["Default secretion", genome.default_secretion_prob],
             ["Desired reserve", genome.desired_element_reserve],
             ["Enval stress factor", genome.enval_stress_factor],
             ["Enval mutation floor", genome.enval_mutation_floor],
@@ -658,89 +639,58 @@ export class MicrocosmGUI {
         this.elements.enzymeInspector.innerHTML = makeTable([
             { label: "#", value: (enzyme) => enzyme.index },
             { label: "Type", value: (enzyme) => enzyme.enzyme_type },
-            { label: "Specificity", value: (enzyme) => Array.isArray(enzyme.specificity_elements) && enzyme.specificity_elements.length > 0 ? enzyme.specificity_elements.join("") : "—" },
+            { label: "Reactants A-F", value: (enzyme) => enzyme.is_metabolic ? elementCountsText(enzyme.reactants) : "—" },
+            { label: "Products A-F", value: (enzyme) => enzyme.is_metabolic ? elementCountsText(enzyme.products) : "—" },
+            { label: "Rate", value: (enzyme) => enzyme.is_metabolic ? enzyme.rate : "—" },
             { label: "σ", value: (enzyme) => enzyme.enval_sigma },
             { label: "Throughput", value: (enzyme) => enzyme.enval_throughput },
-            { label: "Secretion", value: (enzyme) => enzyme.secretion_prob },
-            { label: "Bond", value: (enzyme) => enzyme.is_combat ? `level ${displayValue(enzyme.combat_level)}` : `×${displayValue(enzyme.bond_multiplier)} / cost ${displayValue(enzyme.bond_cost_fraction)} / harvest ${displayValue(enzyme.bond_harvest_fraction)}` }
+            { label: "Harvest", value: (enzyme) => enzyme.is_metabolic ? enzyme.energy_harvest_fraction : "—" },
+            { label: "Secretion", value: (enzyme) => enzyme.is_metabolic ? enzyme.secretion_fraction : "—" },
+            { label: "Combat", value: (enzyme) => enzyme.is_combat ? `level ${displayValue(enzyme.combat_level)}` : "—" }
         ], enzymes || [], "Select a live cell to inspect enzymes.");
     }
 
-    renderMolecules(detail) {
-        if (!this.elements.moleculeInspector) return;
-        if (this._detail.moleculeError && !this.moleculePayload(detail)) { this.elements.moleculeInspector.innerHTML = payloadMessage(`Molecule detail unavailable: ${this._detail.moleculeError}`, "smallNote errorText"); return; }
-        const internal = this.moleculePayload(detail);
-        if (!internal) { this.elements.moleculeInspector.innerHTML = payloadMessage("Internal molecule detail is available after selecting a live cell."); return; }
-        const shown = internal.molecules ? internal.molecules.length : 0;
-        const summary = `
-            <div class="detailSubsection">
-                ${detailRows([
-                    ["Molecule count", internal.molecule_count],
-                    ["Returned", `${shown} / ${displayValue(internal.molecule_count)}`],
-                    ["Atom count", internal.atom_count],
-                    ["Element counts", elementCountsText(internal.element_counts)],
-                    ["Limit", internal.limit],
-                    ["Truncated", internal.truncated ? "yes" : "no"]
-                ])}
-                ${internal.truncated ? payloadMessage(`Showing ${shown} of ${displayValue(internal.molecule_count)} internal molecules.`, "smallNote warningText") : ""}
-            </div>
-        `;
-        const table = makeTable([
-            { label: "#", value: (molecule) => molecule.list_index },
-            { label: "Formula", value: (molecule) => molecule.formula || compositionText(molecule.composition_counts) },
-            { label: "Counts", value: (molecule) => compositionText(molecule.composition_counts) },
-            { label: "Size", value: (molecule) => molecule.size },
-            { label: "Mask", value: (molecule) => molecule.element_mask },
-            { label: "Bond", value: (molecule) => molecule.bond_multiplier },
-            { label: "Energy", value: (molecule) => molecule.energy },
-            { label: "Polarity", value: (molecule) => molecule.polarity },
-            { label: "Diffusion", value: (molecule) => `${displayValue(molecule.diffusion_rate)} / ${displayValue(molecule.diffusion_period)}` }
-        ], internal.molecules || [], "No internal molecules returned.");
-        this.elements.moleculeInspector.innerHTML = summary + table;
+    renderElements(detail) {
+        if (!this.elements.elementInspector) return;
+        if (this._detail.elementError && !this.elementPayload(detail)) { this.elements.elementInspector.innerHTML = payloadMessage(`Internal element detail unavailable: ${this._detail.elementError}`, "smallNote errorText"); return; }
+        const payload = this.elementPayload(detail);
+        if (!payload) { this.elements.elementInspector.innerHTML = payloadMessage("Internal element detail is available after selecting a live cell."); return; }
+        this.elements.elementInspector.innerHTML = detailRows([
+            ["A-F amounts", elementCountsText(payload.internal_elements)],
+            ["Total amount", payload.total_internal_elements]
+        ]);
     }
 
-    renderReactions(detail) {
-        if (!this.elements.reactionInspector) return;
-        if (this._detail.reactionError && !this.reactionPayload(detail)) { this.elements.reactionInspector.innerHTML = payloadMessage(`Reaction detail unavailable: ${this._detail.reactionError}`, "smallNote errorText"); return; }
-        const reactions = this.reactionPayload(detail);
-        if (!reactions) { this.elements.reactionInspector.innerHTML = payloadMessage("Reaction data is available after selecting a live cell."); return; }
-        if (reactions.available === false) {
-            this.elements.reactionInspector.innerHTML = `
-                ${payloadMessage("Recent reaction logs are unavailable from this Rust core/WASM build or for this cell state.", "smallNote warningText")}
-                ${detailRows([
-                    ["Reason", reactions.reason || "not_recorded"],
-                    ["Limit", reactions.limit],
-                    ["Truncated", reactions.truncated ? "yes" : "no"]
-                ])}
-            `;
-            return;
-        }
-        const records = reactions.reactions || reactions.records || [];
+    renderFluxes(detail) {
+        if (!this.elements.fluxInspector) return;
+        if (this._detail.fluxError && !this.fluxPayload(detail)) { this.elements.fluxInspector.innerHTML = payloadMessage(`Flux detail unavailable: ${this._detail.fluxError}`, "smallNote errorText"); return; }
+        const fluxes = this.fluxPayload(detail);
+        if (!fluxes) { this.elements.fluxInspector.innerHTML = payloadMessage("Flux data is available after selecting a live cell."); return; }
+        const records = fluxes.fluxes || [];
         const summary = `
             <div class="detailSubsection">
                 ${detailRows([
-                    ["Reason", reactions.reason || "recorded"],
-                    ["Returned", `${displayValue(reactions.returned_count ?? records.length)} / ${displayValue(reactions.reaction_count ?? records.length)}`],
-                    ["Limit", reactions.limit],
-                    ["Order", reactions.order || "newest_first"],
-                    ["Truncated", reactions.truncated ? "yes" : "no"]
+                    ["Reason", fluxes.reason || "recorded"],
+                    ["Returned", `${displayValue(fluxes.returned_count ?? records.length)} / ${displayValue(fluxes.flux_count ?? records.length)}`],
+                    ["Limit", fluxes.limit],
+                    ["Order", fluxes.order || "newest_first"],
+                    ["Truncated", fluxes.truncated ? "yes" : "no"]
                 ])}
             </div>
         `;
         const table = makeTable([
-            { label: "Tick", value: (record) => record.tick_count ?? record.tick ?? "—" },
+            { label: "Tick", value: (record) => record.tick_count ?? "—" },
             { label: "Time", value: (record) => record.sim_time_seconds == null ? "—" : `${displayValue(record.sim_time_seconds)}s` },
-            { label: "Enzyme", value: (record) => record.enzyme_type ? `${record.enzyme_index ?? "—"}: ${record.enzyme_type}` : (record.enzyme_index ?? "—") },
-            { label: "Status", value: (record) => record.status ?? record.reason ?? "—" },
-            { label: "ΔE", value: (record) => record.delta_cell_energy ?? record.delta_energy ?? "—" },
-            { label: "ΔV", value: (record) => record.delta_enval ?? "—" },
-            { label: "Substrates", value: (record) => moleculeListSummaryText(record.substrates) },
-            { label: "Product", value: (record) => moleculeSummaryText(record.produced) },
-            { label: "Byproducts", value: (record) => moleculeListSummaryText(record.byproducts) }
-        ], records, "No successful reactions recorded yet for this cell.");
-        this.elements.reactionInspector.innerHTML = summary + table;
+            { label: "Catalyst", value: (record) => `${record.catalyst_index ?? "—"}: ${record.catalyst_type || "—"}` },
+            { label: "Reactants", value: (record) => elementCountsText(record.reactants) },
+            { label: "Products", value: (record) => elementCountsText(record.products) },
+            { label: "Extent", value: (record) => `${displayValue(record.executed_extent)} / ${displayValue(record.requested_extent)}` },
+            { label: "Secreted", value: (record) => elementCountsText(record.secreted_elements) },
+            { label: "ΔE", value: (record) => record.delta_cell_energy ?? "—" },
+            { label: "Enval in/out", value: (record) => `${displayValue(record.enval_input)} / ${displayValue(record.enval_output)}` }
+        ], records, "No successful metabolic flux recorded yet for this cell.");
+        this.elements.fluxInspector.innerHTML = summary + table;
     }
-
     renderLineageDetail(interaction) {
         if (!this.elements.lineageDetailInspector) return;
         if (!interaction || interaction.selectedLineageId == null) { this.elements.lineageDetailInspector.innerHTML = payloadMessage("Right-click a cell or select a lineage from the table."); return; }
@@ -818,7 +768,8 @@ export class MicrocosmGUI {
         this.elements.samples.innerHTML = `
             <div><strong>tileEnval[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileEnval && runtime.views.tileEnval.array()))}</div>
             <div><strong>tileOccupancy[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileOccupancy && runtime.views.tileOccupancy.array()))}</div>
-            <div><strong>tileElementMask[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileElementMask && runtime.views.tileElementMask.array()))}</div>
+            <div><strong>tileTotalElements[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileTotalElements && runtime.views.tileTotalElements.array()))}</div>
+            <div><strong>tileElementConcentrations[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileElementConcentrations && runtime.views.tileElementConcentrations.array()))}</div>
             <div><strong>latticeRgba[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.latticeRgba && runtime.views.latticeRgba.array()))}</div>
             <div><strong>cellId[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellId && runtime.views.cellId.array()))}</div>
             <div><strong>cellX[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellX && runtime.views.cellX.array()))}</div>
@@ -833,8 +784,8 @@ export class MicrocosmGUI {
             case "cell": return this._detail.cellDetail;
             case "tile": return this._lastInspectionPayload && this._lastInspectionPayload.selectedTile;
             case "lineage": return this._detail.lineage;
-            case "molecules": return this._detail.molecules;
-            case "reactions": return this._detail.reactions;
+            case "elements": return this._detail.elements;
+            case "fluxes": return this._detail.fluxes;
             case "genome-edit": return this._lastGenomeEditResult;
             default: return this._lastInspectionPayload;
         }

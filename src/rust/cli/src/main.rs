@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -185,8 +187,9 @@ struct StatsInterval {
     divisions: u64,
     reaction_attempts: u64,
     reaction_successes: u64,
-    molecule_uptakes: u64,
-    molecule_outputs: u64,
+    executed_metabolic_flux: f64,
+    uptake_flux: f64,
+    secretion_flux: f64,
     cell_steps: u64,
     enzyme_attempts: u64,
     steps_per_sec: f64,
@@ -228,8 +231,9 @@ impl StatsInterval {
             divisions: reactions.divisions,
             reaction_attempts,
             reaction_successes,
-            molecule_uptakes: reactions.molecule_uptakes,
-            molecule_outputs: reactions.molecule_outputs,
+            executed_metabolic_flux: reactions.executed_metabolic_flux,
+            uptake_flux: reactions.uptake_flux,
+            secretion_flux: reactions.secretion_flux,
             cell_steps: operations.cell_steps,
             enzyme_attempts: operations.metabolic_enzyme_attempts,
             steps_per_sec: tick_delta as f64 / safe_wall,
@@ -496,12 +500,12 @@ fn bench_command(options: BenchOptions) -> ExitCode {
     let seconds = elapsed.as_secs_f64().max(1.0e-9);
     let actual_cell_steps = stats.operation_counters.cell_steps;
     println!(
-        "bench steps={} elapsed_sec={:.6} steps_per_sec={:.3} final_cells={} final_molecules={} actual_cell_steps={} cell_steps_per_sec={:.3}",
+        "bench steps={} elapsed_sec={:.6} steps_per_sec={:.3} final_cells={} final_elements={:.6} actual_cell_steps={} cell_steps_per_sec={:.3}",
         options.steps,
         seconds,
         options.steps as f64 / seconds,
         stats.live_cell_count,
-        stats.molecule_count,
+        stats.total_element_amount,
         actual_cell_steps,
         actual_cell_steps as f64 / seconds,
     );
@@ -956,7 +960,7 @@ fn open_csv(path: Option<&PathBuf>) -> Result<Option<BufWriter<File>>, std::io::
 }
 
 fn csv_header() -> &'static str {
-    "tick,sim_time,population,live_cells,cell_records,dead_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,predation_events,interval_predation,cells_consumed,interval_consumed,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_share,molecules,tile_molecules,cell_molecules,free_molecule_records,active_molecule_records,molecule_arena_len,molecule_arena_high_water,molecule_slots_reused,molecule_slots_newly_allocated,total_atoms,tile_atoms,cell_atoms,avg_molecules_per_tile,avg_internal_molecules_per_cell,avg_atoms_per_cell,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_time_without_food,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,cells_with_attackase,cells_with_defensase,avg_attack,max_attack,avg_defense,max_defense,enz_anabolase,enz_catabolase,enz_transmutase,enz_defensase,enz_attackase,rx_attempts,rx_gates_passed,rx_successes,rx_no_substrate,rx_success_anabolase,rx_success_catabolase,rx_success_transmutase,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,molecule_uptakes,molecule_outputs,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_molecule_uptakes,interval_molecule_outputs,interval_cell_steps,interval_cell_steps_per_sec,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,predator_energy_gained,avg_energy_gained_per_predation,enzyme_transfers,enzyme_replacements,elements_a,elements_b,elements_c,elements_d,elements_e,elements_f"
+    "tick,sim_time,population,live_cells,cell_records,dead_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,predation_events,interval_predation,cells_consumed,interval_consumed,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_time_without_food,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,cells_with_attackase,cells_with_defensase,avg_attack,max_attack,avg_defense,max_defense,enz_metabolic,enz_defensase,enz_attackase,rx_attempts,rx_successes,rx_no_substrate,rx_success_metabolic,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,predator_energy_gained,avg_energy_gained_per_predation,enzyme_transfers,enzyme_replacements"
 }
 
 fn emit_world_stats_profiled(
@@ -1054,22 +1058,28 @@ fn write_csv_record(
         stats.total_lineage_records.to_string(),
         stats.extinct_lineage_count.to_string(),
         stats.dominant_lineage_id.to_string(),
+        stats.dominant_lineage_population.to_string(),
         format!("{:.8}", stats.dominant_lineage_share),
-        stats.molecule_count.to_string(),
-        stats.tile_molecule_count.to_string(),
-        stats.cell_molecule_count.to_string(),
-        stats.free_molecule_record_count.to_string(),
-        stats.active_molecule_record_count.to_string(),
-        stats.molecule_arena_len.to_string(),
-        stats.molecule_arena_high_water_mark.to_string(),
-        stats.molecule_slots_reused.to_string(),
-        stats.molecule_slots_newly_allocated.to_string(),
-        stats.total_atom_count.to_string(),
-        stats.tile_atom_count.to_string(),
-        stats.cell_atom_count.to_string(),
-        format!("{:.6}", stats.average_molecules_per_tile),
-        format!("{:.6}", stats.average_internal_molecules_per_live_cell),
-        format!("{:.6}", stats.average_atoms_per_live_cell),
+        format!("{:.8}", stats.lineage_entropy),
+        format!("{:.8}", stats.extracellular_element_amounts[0]),
+        format!("{:.8}", stats.extracellular_element_amounts[1]),
+        format!("{:.8}", stats.extracellular_element_amounts[2]),
+        format!("{:.8}", stats.extracellular_element_amounts[3]),
+        format!("{:.8}", stats.extracellular_element_amounts[4]),
+        format!("{:.8}", stats.extracellular_element_amounts[5]),
+        format!("{:.8}", stats.intracellular_element_amounts[0]),
+        format!("{:.8}", stats.intracellular_element_amounts[1]),
+        format!("{:.8}", stats.intracellular_element_amounts[2]),
+        format!("{:.8}", stats.intracellular_element_amounts[3]),
+        format!("{:.8}", stats.intracellular_element_amounts[4]),
+        format!("{:.8}", stats.intracellular_element_amounts[5]),
+        format!("{:.8}", stats.system_element_amounts[0]),
+        format!("{:.8}", stats.system_element_amounts[1]),
+        format!("{:.8}", stats.system_element_amounts[2]),
+        format!("{:.8}", stats.system_element_amounts[3]),
+        format!("{:.8}", stats.system_element_amounts[4]),
+        format!("{:.8}", stats.system_element_amounts[5]),
+        format!("{:.8}", stats.total_element_amount),
         format!("{:.6}", stats.average_cell_energy),
         format!("{:.6}", stats.min_cell_energy),
         format!("{:.6}", stats.max_cell_energy),
@@ -1088,17 +1098,10 @@ fn write_csv_record(
         stats.max_attack_total.to_string(),
         format!("{:.6}", stats.average_defense_total),
         stats.max_defense_total.to_string(),
-        stats.enzyme_type_totals.anabolase.to_string(),
-        stats.enzyme_type_totals.catabolase.to_string(),
-        stats.enzyme_type_totals.transmutase.to_string(),
+        stats.enzyme_type_totals.metabolic.to_string(),
         stats.enzyme_type_totals.defensase.to_string(),
         stats.enzyme_type_totals.attackase.to_string(),
         stats.reaction_counters.total_attempts().to_string(),
-        stats
-            .reaction_counters
-            .gates_passed_by_type
-            .total()
-            .to_string(),
         stats.reaction_counters.total_successes().to_string(),
         stats
             .reaction_counters
@@ -1108,17 +1111,7 @@ fn write_csv_record(
         stats
             .reaction_counters
             .successes_by_type
-            .anabolase
-            .to_string(),
-        stats
-            .reaction_counters
-            .successes_by_type
-            .catabolase
-            .to_string(),
-        stats
-            .reaction_counters
-            .successes_by_type
-            .transmutase
+            .metabolic
             .to_string(),
         format!(
             "{:.6}",
@@ -1129,16 +1122,24 @@ fn write_csv_record(
             "{:.6}",
             stats.reaction_counters.enval_output_by_type.total()
         ),
-        stats.reaction_counters.molecule_uptakes.to_string(),
-        stats.reaction_counters.molecule_outputs.to_string(),
+        format!("{:.8}", stats.reaction_counters.executed_metabolic_flux),
+        format!("{:.8}", stats.reaction_counters.uptake_flux),
+        format!("{:.8}", stats.reaction_counters.secretion_flux),
         stats.reaction_counters.divisions.to_string(),
         interval.divisions.to_string(),
         interval.reaction_attempts.to_string(),
         interval.reaction_successes.to_string(),
-        interval.molecule_uptakes.to_string(),
-        interval.molecule_outputs.to_string(),
+        format!("{:.8}", interval.executed_metabolic_flux),
+        format!("{:.8}", interval.uptake_flux),
+        format!("{:.8}", interval.secretion_flux),
+        stats.operation_counters.cell_steps.to_string(),
         interval.cell_steps.to_string(),
         format!("{:.3}", interval.cell_steps_per_sec),
+        stats
+            .operation_counters
+            .element_field_diffusion_tiles
+            .to_string(),
+        stats.operation_counters.element_uptake_events.to_string(),
         format!("{:.6}", stats.average_enval),
         format!("{:.6}", stats.min_enval),
         format!("{:.6}", stats.max_enval),
@@ -1153,13 +1154,8 @@ fn write_csv_record(
         format!("{:.6}", stats.average_energy_gained_per_predation),
         stats.predation_enzyme_transfers.to_string(),
         stats.predation_enzyme_replacements.to_string(),
-        stats.element_counts[0].to_string(),
-        stats.element_counts[1].to_string(),
-        stats.element_counts[2].to_string(),
-        stats.element_counts[3].to_string(),
-        stats.element_counts[4].to_string(),
-        stats.element_counts[5].to_string(),
     ];
+    debug_assert_eq!(fields.len(), csv_header().split(',').count());
     writeln!(writer, "{}", fields.join(","))
 }
 
@@ -1175,21 +1171,16 @@ fn print_stats_record(stats: &WorldStats, interval: &StatsInterval, mode: StatsM
 }
 
 fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
+    let extracellular = stats.extracellular_element_amounts.iter().sum::<f64>();
+    let intracellular = stats.intracellular_element_amounts.iter().sum::<f64>();
     println!(
-        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} molecules={} tile_mol={} cell_mol={} free_mol_records={} arena={} reused={} atoms={} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} predation={} d_predation={} consumed={} lineages={} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} elements=A:{} B:{} C:{} D:{} E:{} F:{}",
+        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} predation={} d_predation={} consumed={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4}",
         stats.tick_count,
         stats.sim_time_seconds,
         stats.width,
         stats.height,
         stats.tile_count,
         stats.occupancy_fraction,
-        stats.molecule_count,
-        stats.tile_molecule_count,
-        stats.cell_molecule_count,
-        stats.free_molecule_record_count,
-        stats.molecule_arena_len,
-        stats.molecule_slots_reused,
-        stats.total_atom_count,
         stats.live_cell_count,
         interval.population_delta,
         stats.births,
@@ -1200,23 +1191,30 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
         interval.predation_events,
         stats.cells_consumed,
         stats.lineage_count,
+        stats.total_element_amount,
+        extracellular,
+        intracellular,
         stats.average_cell_energy,
         stats.average_enzyme_count,
         stats.fraction_cells_at_enzyme_cap,
         stats.reaction_counters.total_successes(),
         interval.reaction_successes,
+        stats.reaction_counters.executed_metabolic_flux,
+        interval.executed_metabolic_flux,
+        stats.reaction_counters.uptake_flux,
+        stats.reaction_counters.secretion_flux,
         stats.operation_counters.cell_steps,
         interval.cell_steps,
         stats.average_enval,
         stats.min_enval,
         stats.max_enval,
         stats.enval_std_dev,
-        stats.element_counts[0],
-        stats.element_counts[1],
-        stats.element_counts[2],
-        stats.element_counts[3],
-        stats.element_counts[4],
-        stats.element_counts[5],
+        stats.system_element_amounts[0],
+        stats.system_element_amounts[1],
+        stats.system_element_amounts[2],
+        stats.system_element_amounts[3],
+        stats.system_element_amounts[4],
+        stats.system_element_amounts[5],
     );
 }
 
@@ -1236,21 +1234,11 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.occupied_tile_count, stats.empty_tile_count, stats.occupancy_fraction
     );
     println!(
-        "  molecules active={} tile={} cell={} free_records={} arena_len={} high_water={} slots_reused={} slots_new={} atoms total={} tile={} cell={} avg_tile_mol={:.3} avg_cell_mol={:.3} avg_cell_atoms={:.3}",
-        stats.active_molecule_record_count,
-        stats.tile_molecule_count,
-        stats.cell_molecule_count,
-        stats.free_molecule_record_count,
-        stats.molecule_arena_len,
-        stats.molecule_arena_high_water_mark,
-        stats.molecule_slots_reused,
-        stats.molecule_slots_newly_allocated,
-        stats.total_atom_count,
-        stats.tile_atom_count,
-        stats.cell_atom_count,
-        stats.average_molecules_per_tile,
-        stats.average_internal_molecules_per_live_cell,
-        stats.average_atoms_per_live_cell,
+        "  chemistry total={:.6} extracellular={:?} intracellular={:?} system={:?}",
+        stats.total_element_amount,
+        stats.extracellular_element_amounts,
+        stats.intracellular_element_amounts,
+        stats.system_element_amounts,
     );
     println!(
         "  cells live={} records={} dead_records={} births={} (+{}) deaths={} (+{}) divisions={} (+{}) avg_energy={:.3} min_energy={:.3} max_energy={:.3} avg_age={:.3}s max_age={:.3}s avg_no_food={:.3}",
@@ -1271,7 +1259,7 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.average_time_without_food,
     );
     println!(
-        "  enzymes avg={:.2} min={} max={} cap={} cap_frac={:.3} hist_1_10={:?} attack_cells={} defense_cells={} avg_attack={:.2} max_attack={} avg_defense={:.2} max_defense={} totals=Abl:{} Cbl:{} Trn:{} Def:{} Atk:{}",
+        "  enzymes avg={:.2} min={} max={} cap={} cap_frac={:.3} hist_1_10={:?} attack_cells={} defense_cells={} avg_attack={:.2} max_attack={} avg_defense={:.2} max_defense={} totals=Met:{} Def:{} Atk:{}",
         stats.average_enzyme_count,
         stats.min_enzyme_count,
         stats.max_enzyme_count,
@@ -1284,9 +1272,7 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.max_attack_total,
         stats.average_defense_total,
         stats.max_defense_total,
-        stats.enzyme_type_totals.anabolase,
-        stats.enzyme_type_totals.catabolase,
-        stats.enzyme_type_totals.transmutase,
+        stats.enzyme_type_totals.metabolic,
         stats.enzyme_type_totals.defensase,
         stats.enzyme_type_totals.attackase,
     );
@@ -1312,17 +1298,18 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.predation_enzyme_replacements,
     );
     println!(
-        "  reactions attempts={} (+{}) gates={} successes={} (+{}) no_substrate={} uptake={} (+{}) output={} (+{}) energy_delta={:.3} enval_in={:.3} enval_out={:.3}",
+        "  metabolism attempts={} (+{}) successes={} (+{}) no_substrate={} executed_flux={:.6} (+{:.6}) uptake_flux={:.6} (+{:.6}) secretion_flux={:.6} (+{:.6}) energy_delta={:.3} enval_in={:.3} enval_out={:.3}",
         stats.reaction_counters.total_attempts(),
         interval.reaction_attempts,
-        stats.reaction_counters.gates_passed_by_type.total(),
         stats.reaction_counters.total_successes(),
         interval.reaction_successes,
         stats.reaction_counters.no_substrate_by_type.total(),
-        stats.reaction_counters.molecule_uptakes,
-        interval.molecule_uptakes,
-        stats.reaction_counters.molecule_outputs,
-        interval.molecule_outputs,
+        stats.reaction_counters.executed_metabolic_flux,
+        interval.executed_metabolic_flux,
+        stats.reaction_counters.uptake_flux,
+        interval.uptake_flux,
+        stats.reaction_counters.secretion_flux,
+        interval.secretion_flux,
         stats.reaction_counters.energy_delta_by_type.total(),
         stats.reaction_counters.enval_input_by_type.total(),
         stats.reaction_counters.enval_output_by_type.total(),
@@ -1353,15 +1340,7 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
 }
 
 fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
-    fn merge_object(
-        target: &mut serde_json::Map<String, serde_json::Value>,
-        value: serde_json::Value,
-    ) {
-        if let serde_json::Value::Object(map) = value {
-            target.extend(map);
-        }
-    }
-    let mut value = serde_json::json!({
+    let value = serde_json::json!({
         "tick": stats.tick_count,
         "sim_time": stats.sim_time_seconds,
         "width": stats.width,
@@ -1370,95 +1349,84 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
         "cell_records": stats.cell_record_count,
         "dead_cells": stats.dead_cell_count,
         "occupancy_fraction": stats.occupancy_fraction,
-        "molecules": stats.molecule_count,
-        "tile_molecules": stats.tile_molecule_count,
-        "cell_molecules": stats.cell_molecule_count,
-        "free_molecule_records": stats.free_molecule_record_count,
-        "active_molecule_records": stats.active_molecule_record_count,
-        "molecule_arena_len": stats.molecule_arena_len,
-        "molecule_arena_high_water": stats.molecule_arena_high_water_mark,
-        "molecule_slots_reused": stats.molecule_slots_reused,
-        "molecule_slots_newly_allocated": stats.molecule_slots_newly_allocated,
+        "births": stats.births,
+        "deaths": stats.deaths,
+        "predation_events": stats.predation_events,
+        "cells_consumed": stats.cells_consumed,
+        "lineages": stats.lineage_count,
+        "total_lineage_records": stats.total_lineage_records,
+        "extinct_lineages": stats.extinct_lineage_count,
+        "dominant_lineage": stats.dominant_lineage_id,
+        "dominant_lineage_share": stats.dominant_lineage_share,
+        "lineage_entropy": stats.lineage_entropy,
+        "avg_energy": stats.average_cell_energy,
+        "min_energy": stats.min_cell_energy,
+        "max_energy": stats.max_cell_energy,
+        "total_energy": stats.total_cell_energy,
+        "avg_enzyme_count": stats.average_enzyme_count,
+        "cells_at_enzyme_cap": stats.cells_at_enzyme_cap,
+        "chemistry": {
+            "extracellular": element_amounts_json(stats.extracellular_element_amounts),
+            "intracellular": element_amounts_json(stats.intracellular_element_amounts),
+            "system": element_amounts_json(stats.system_element_amounts),
+            "total_element_amount": stats.total_element_amount,
+        },
+        "enzyme_type_totals": {
+            "metabolic": stats.enzyme_type_totals.metabolic,
+            "defensase": stats.enzyme_type_totals.defensase,
+            "attackase": stats.enzyme_type_totals.attackase,
+        },
+        "metabolism": {
+            "attempts": stats.reaction_counters.total_attempts(),
+            "successes": stats.reaction_counters.total_successes(),
+            "no_substrate": stats.reaction_counters.no_substrate_by_type.total(),
+            "executed_metabolic_flux": stats.reaction_counters.executed_metabolic_flux,
+            "uptake_flux": stats.reaction_counters.uptake_flux,
+            "secretion_flux": stats.reaction_counters.secretion_flux,
+            "divisions": stats.reaction_counters.divisions,
+            "energy_delta": stats.reaction_counters.energy_delta_by_type.total(),
+            "enval_input": stats.reaction_counters.enval_input_by_type.total(),
+            "enval_output": stats.reaction_counters.enval_output_by_type.total(),
+        },
+        "enval": {
+            "average": stats.average_enval,
+            "min": stats.min_enval,
+            "max": stats.max_enval,
+            "stddev": stats.enval_std_dev,
+            "p05": stats.enval_p05,
+            "p50": stats.enval_p50,
+            "p95": stats.enval_p95,
+        },
+        "interval": {
+            "ticks": interval.tick_delta,
+            "sim_seconds": interval.sim_seconds_delta,
+            "wall_seconds": interval.wall_seconds,
+            "population_delta": interval.population_delta,
+            "births": interval.births,
+            "deaths": interval.deaths,
+            "predation_events": interval.predation_events,
+            "reaction_attempts": interval.reaction_attempts,
+            "reaction_successes": interval.reaction_successes,
+            "executed_metabolic_flux": interval.executed_metabolic_flux,
+            "uptake_flux": interval.uptake_flux,
+            "secretion_flux": interval.secretion_flux,
+            "cell_steps": interval.cell_steps,
+            "cell_steps_per_sec": interval.cell_steps_per_sec,
+            "enzyme_attempts_per_sec": interval.enzyme_attempts_per_sec,
+        },
     });
-    {
-        let object = value
-            .as_object_mut()
-            .expect("top-level stats JSON should be an object");
-        merge_object(
-            object,
-            serde_json::json!({
-                "total_atoms": stats.total_atom_count,
-                "tile_atoms": stats.tile_atom_count,
-                "cell_atoms": stats.cell_atom_count,
-                "births": stats.births,
-                "deaths": stats.deaths,
-                "predation_events": stats.predation_events,
-                "cells_consumed": stats.cells_consumed,
-                "lineages": stats.lineage_count,
-                "dominant_lineage": stats.dominant_lineage_id,
-                "dominant_lineage_share": stats.dominant_lineage_share,
-                "avg_energy": stats.average_cell_energy,
-                "min_energy": stats.min_cell_energy,
-                "max_energy": stats.max_cell_energy,
-                "avg_enzyme_count": stats.average_enzyme_count,
-                "cells_at_enzyme_cap": stats.cells_at_enzyme_cap,
-            }),
-        );
-        object.insert(
-            "enzyme_type_totals".to_string(),
-            serde_json::json!({
-                "anabolase": stats.enzyme_type_totals.anabolase,
-                "catabolase": stats.enzyme_type_totals.catabolase,
-                "transmutase": stats.enzyme_type_totals.transmutase,
-                "defensase": stats.enzyme_type_totals.defensase,
-                "attackase": stats.enzyme_type_totals.attackase,
-            }),
-        );
-        object.insert(
-            "reactions".to_string(),
-            serde_json::json!({
-                "attempts": stats.reaction_counters.total_attempts(),
-                "gates_passed": stats.reaction_counters.gates_passed_by_type.total(),
-                "successes": stats.reaction_counters.total_successes(),
-                "no_substrate": stats.reaction_counters.no_substrate_by_type.total(),
-                "uptakes": stats.reaction_counters.molecule_uptakes,
-                "outputs": stats.reaction_counters.molecule_outputs,
-                "divisions": stats.reaction_counters.divisions,
-            }),
-        );
-        object.insert(
-            "enval".to_string(),
-            serde_json::json!({
-                "average": stats.average_enval,
-                "min": stats.min_enval,
-                "max": stats.max_enval,
-                "stddev": stats.enval_std_dev,
-                "p05": stats.enval_p05,
-                "p50": stats.enval_p50,
-                "p95": stats.enval_p95,
-            }),
-        );
-        object.insert(
-            "interval".to_string(),
-            serde_json::json!({
-                "ticks": interval.tick_delta,
-                "sim_seconds": interval.sim_seconds_delta,
-                "wall_seconds": interval.wall_seconds,
-                "population_delta": interval.population_delta,
-                "births": interval.births,
-                "deaths": interval.deaths,
-                "predation_events": interval.predation_events,
-                "reaction_attempts": interval.reaction_attempts,
-                "reaction_successes": interval.reaction_successes,
-                "molecule_uptakes": interval.molecule_uptakes,
-                "molecule_outputs": interval.molecule_outputs,
-                "cell_steps": interval.cell_steps,
-                "cell_steps_per_sec": interval.cell_steps_per_sec,
-                "enzyme_attempts_per_sec": interval.enzyme_attempts_per_sec,
-            }),
-        );
-    }
     println!("{}", value);
+}
+
+fn element_amounts_json(amounts: [f64; 6]) -> serde_json::Value {
+    serde_json::json!({
+        "A": amounts[0],
+        "B": amounts[1],
+        "C": amounts[2],
+        "D": amounts[3],
+        "E": amounts[4],
+        "F": amounts[5],
+    })
 }
 
 fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, json: bool) {
@@ -1466,7 +1434,7 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
     let steps = steps.max(1) as f64;
     let wall_seconds = wall.as_secs_f64().max(1.0e-9);
     let measured_ms = duration_ms(profile.step.total);
-    let molecule_ms = duration_ms(profile.step.molecule_diffusion);
+    let element_ms = duration_ms(profile.step.element_field_diffusion);
     let cell_ms = duration_ms(profile.step.cell_step);
     let predation_ms = duration_ms(profile.step.predation);
     let enval_ms = duration_ms(profile.step.enval_diffusion);
@@ -1489,7 +1457,7 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
                 "max_step_ms": duration_ms(profile.max_step),
                 "p50_step_ms": p50,
                 "p95_step_ms": p95,
-                "molecule_ms_per_step": molecule_ms / steps,
+                "element_field_diffusion_ms_per_step": element_ms / steps,
                 "cells_ms_per_step": cell_ms / steps,
                 "predation_ms_per_step": predation_ms / steps,
                 "enval_ms_per_step": enval_ms / steps,
@@ -1504,29 +1472,29 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
                 "predation_candidate_neighbor_pairs": counters.predation_candidate_neighbor_pairs,
                 "predation_cross_lineage_pairs": counters.predation_cross_lineage_pairs,
                 "combat_enzyme_skips": counters.combat_enzyme_skips,
-                "molecule_diffusion_events": counters.molecule_diffusion_events,
-                "molecule_moves": counters.molecule_moves,
-                "molecule_slots_reused": counters.molecule_slots_reused,
-                "molecule_slots_newly_allocated": counters.molecule_slots_newly_allocated
+                "element_field_diffusion_tiles": counters.element_field_diffusion_tiles,
+                "element_uptake_events": counters.element_uptake_events,
+                "cell_divisions": counters.cell_divisions,
+                "cell_deaths": counters.cell_deaths
             }
         });
         println!("{}", value);
         return;
     }
     println!(
-        "profile wall_ms={:.3} avg_step_ms={:.6} min_step_ms={:.6} max_step_ms={:.6} p50_step_ms={:.6} p95_step_ms={:.6} molecule_ms={:.6} cells_ms={:.6} predation_ms={:.6} enval_ms={:.6} measured_total_ms={:.6} molecule_pct={:.2} cells_pct={:.2} predation_pct={:.2} enval_pct={:.2} stats_output_ms={:.6} invariants_ms={:.6} snapshot_io_ms={:.6} csv_flush_ms={:.6} cell_steps={} cell_steps_per_sec={:.3} enzyme_entries={} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reaction_gates={} reactions={} reactions_per_sec={:.3} substrate_candidates={} molecule_diffusion_events={} molecule_moves={} uptakes={} products={} byproducts={} divisions={} deaths={} predation_pairs={} predation_occupied_tiles={} predation_candidates={} predation_cross_lineage={} predation_events={} consumed={} combat_enzyme_skips={} enval_avg_calls={} molecule_slots_reused={} molecule_slots_new={} enzyme_list_clones={} genome_clones={}",
+        "profile wall_ms={:.3} avg_step_ms={:.6} min_step_ms={:.6} max_step_ms={:.6} p50_step_ms={:.6} p95_step_ms={:.6} element_field_ms={:.6} cells_ms={:.6} predation_ms={:.6} enval_ms={:.6} measured_total_ms={:.6} element_field_pct={:.2} cells_pct={:.2} predation_pct={:.2} enval_pct={:.2} stats_output_ms={:.6} invariants_ms={:.6} snapshot_io_ms={:.6} csv_flush_ms={:.6} cell_steps={} cell_steps_per_sec={:.3} enzyme_entries={} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reactions={} reactions_per_sec={:.3} element_field_tiles={} uptake_events={} divisions={} deaths={} predation_pairs={} predation_occupied_tiles={} predation_candidates={} predation_cross_lineage={} predation_events={} consumed={} combat_enzyme_skips={} enval_avg_calls={} enzyme_list_clones={} genome_clones={}",
         duration_ms(wall),
         measured_ms / steps,
         profile.min_step.map(duration_ms).unwrap_or(0.0),
         duration_ms(profile.max_step),
         p50,
         p95,
-        molecule_ms / steps,
+        element_ms / steps,
         cell_ms / steps,
         predation_ms / steps,
         enval_ms / steps,
         measured_ms / steps,
-        pct(molecule_ms),
+        pct(element_ms),
         pct(cell_ms),
         pct(predation_ms),
         pct(enval_ms),
@@ -1539,15 +1507,10 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         counters.enzyme_entries_seen,
         counters.metabolic_enzyme_attempts,
         counters.metabolic_enzyme_attempts as f64 / wall_seconds,
-        counters.reaction_gates_passed,
         counters.reactions_succeeded,
         counters.reactions_succeeded as f64 / wall_seconds,
-        counters.substrate_candidates_scanned,
-        counters.molecule_diffusion_events,
-        counters.molecule_moves,
-        counters.molecule_uptakes,
-        counters.products_created,
-        counters.byproducts_created,
+        counters.element_field_diffusion_tiles,
+        counters.element_uptake_events,
         counters.cell_divisions,
         counters.cell_deaths,
         counters.predation_pairs_checked,
@@ -1558,8 +1521,6 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         counters.predation_cells_consumed,
         counters.combat_enzyme_skips,
         counters.local_enval_average_calls,
-        counters.molecule_slots_reused,
-        counters.molecule_slots_newly_allocated,
         counters.enzyme_list_clones,
         counters.genome_clones,
     );
@@ -1756,13 +1717,13 @@ mod tests {
     fn csv_header_is_wide_and_stable_enough_for_observability() {
         let columns = csv_header().split(',').collect::<Vec<_>>();
         assert!(columns.contains(&"occupancy_fraction"));
-        assert!(columns.contains(&"tile_molecules"));
-        assert!(columns.contains(&"cell_molecules"));
-        assert!(columns.contains(&"active_molecule_records"));
-        assert!(columns.contains(&"molecule_arena_len"));
-        assert!(columns.contains(&"molecule_arena_high_water"));
-        assert!(columns.contains(&"molecule_slots_reused"));
-        assert!(columns.contains(&"molecule_slots_newly_allocated"));
+        assert!(columns.contains(&"extracellular_a"));
+        assert!(columns.contains(&"intracellular_f"));
+        assert!(columns.contains(&"system_a"));
+        assert!(columns.contains(&"total_element_amount"));
+        assert!(columns.contains(&"executed_metabolic_flux"));
+        assert!(columns.contains(&"uptake_flux"));
+        assert!(columns.contains(&"secretion_flux"));
         assert!(columns.contains(&"rx_successes"));
         assert!(columns.contains(&"interval_cell_steps"));
         assert!(columns.len() > 80);

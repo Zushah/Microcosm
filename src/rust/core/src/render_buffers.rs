@@ -17,7 +17,7 @@ pub enum RenderDisplayMode {
     Enval = 0,
     Occupancy = 1,
     Mass = 2,
-    Molecules = 3,
+    TotalElements = 3,
     ElementA = 4,
     ElementB = 5,
     ElementC = 6,
@@ -32,7 +32,7 @@ impl RenderDisplayMode {
             0 => Self::Enval,
             1 => Self::Occupancy,
             2 => Self::Mass,
-            3 => Self::Molecules,
+            3 => Self::TotalElements,
             4 => Self::ElementA,
             5 => Self::ElementB,
             6 => Self::ElementC,
@@ -84,9 +84,10 @@ pub struct RenderBuffers {
 
     pub tile_enval: Vec<f32>,
     pub tile_occupancy: Vec<u32>,
-    pub tile_mass: Vec<u32>,
-    pub tile_molecule_count: Vec<u32>,
-    pub tile_element_mask: Vec<u32>,
+    pub tile_mass_density: Vec<f32>,
+    pub tile_total_elements: Vec<f32>,
+    /// Packed by tile, then element: `[tile0_A, ..., tile0_F, tile1_A, ...]`.
+    pub tile_element_concentrations: Vec<f32>,
 
     pub lattice_rgba: Vec<f32>,
 
@@ -119,9 +120,9 @@ impl RenderBuffers {
         self.render_epoch = 0;
         self.tile_enval.clear();
         self.tile_occupancy.clear();
-        self.tile_mass.clear();
-        self.tile_molecule_count.clear();
-        self.tile_element_mask.clear();
+        self.tile_mass_density.clear();
+        self.tile_total_elements.clear();
+        self.tile_element_concentrations.clear();
         self.lattice_rgba.clear();
         self.cell_id.clear();
         self.cell_x.clear();
@@ -148,6 +149,13 @@ impl RenderBuffers {
         let height = self.height as usize;
 
         debug_assert_eq!(tile_count, width.saturating_mul(height));
+        debug_assert_eq!(self.tile_occupancy.len(), tile_count);
+        debug_assert_eq!(self.tile_mass_density.len(), tile_count);
+        debug_assert_eq!(self.tile_total_elements.len(), tile_count);
+        debug_assert_eq!(
+            self.tile_element_concentrations.len(),
+            tile_count.saturating_mul(6)
+        );
         for x in 0..width {
             for y in 0..height {
                 let index = x * height + y;
@@ -235,18 +243,18 @@ impl RenderBuffers {
             ),
             RenderDisplayMode::Mass => blend_rgb01(
                 [86.0, 154.0, 112.0],
-                1.0 - (-(self.tile_mass[index] as f64) * 0.08).exp(),
+                1.0 - (-(self.tile_mass_density[index] as f64) * 0.08).exp(),
             ),
-            RenderDisplayMode::Molecules => blend_rgb01(
+            RenderDisplayMode::TotalElements => blend_rgb01(
                 [69.0, 139.0, 186.0],
-                1.0 - (-(self.tile_molecule_count[index] as f64) * 0.30).exp(),
+                1.0 - (-(self.tile_total_elements[index] as f64) * 0.20).exp(),
             ),
             element_mode => {
                 let element = element_mode.element_index().unwrap_or(0);
-                let present = self.tile_element_mask[index] & (1 << element) != 0;
+                let concentration = self.tile_element_concentrations[index * 6 + element] as f64;
                 blend_rgb01(
                     TILE_ELEMENT_RGB255[element],
-                    if present { 1.0 } else { 0.0 },
+                    1.0 - (-concentration.max(0.0)).exp(),
                 )
             }
         };
@@ -376,9 +384,9 @@ mod tests {
             height: 3,
             tile_enval: vec![0.0; 6],
             tile_occupancy: vec![EMPTY_CELL_ID; 6],
-            tile_mass: vec![0; 6],
-            tile_molecule_count: vec![0; 6],
-            tile_element_mask: vec![0; 6],
+            tile_mass_density: vec![0.0; 6],
+            tile_total_elements: vec![0.0; 6],
+            tile_element_concentrations: vec![0.0; 36],
             cell_id: vec![17],
             cell_x: vec![1],
             cell_y: vec![2],
@@ -410,5 +418,37 @@ mod tests {
         assert!(tile_in_brush(3, 2, brush, 4, 3));
         assert!(tile_in_brush(0, 0, brush, 4, 3));
         assert!(!tile_in_brush(2, 0, brush, 4, 3));
+    }
+
+    #[test]
+    fn element_heatmap_intensity_is_graded_by_continuous_concentration() {
+        let mut concentrations = vec![0.0; 12];
+        concentrations[0] = 0.1;
+        concentrations[6] = 2.0;
+        let mut buffers = RenderBuffers {
+            width: 2,
+            height: 1,
+            tile_enval: vec![0.0; 2],
+            tile_occupancy: vec![EMPTY_CELL_ID; 2],
+            tile_mass_density: vec![0.0; 2],
+            tile_total_elements: vec![0.1, 2.0],
+            tile_element_concentrations: concentrations,
+            ..RenderBuffers::default()
+        };
+
+        buffers.refresh_lattice_rgba(&RenderVisualState {
+            display_mode: RenderDisplayMode::ElementA,
+            ..RenderVisualState::default()
+        });
+
+        let neutral = TILE_NEUTRAL_RGB255.map(|value| (value / 255.0) as f32);
+        let distance_from_neutral = |offset: usize| {
+            (0..3)
+                .map(|component| {
+                    (buffers.lattice_rgba[offset + component] - neutral[component]).abs()
+                })
+                .sum::<f32>()
+        };
+        assert!(distance_from_neutral(4) > distance_from_neutral(0));
     }
 }

@@ -4,7 +4,6 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 pub const ELEMENT_COUNT: usize = 6;
-pub const ALL_ELEMENT_MASK: u8 = 0b0011_1111;
 pub const ELEMENT_ORDER: [Element; ELEMENT_COUNT] = [
     Element::A,
     Element::B,
@@ -28,10 +27,6 @@ pub enum Element {
 impl Element {
     pub const fn index(self) -> usize {
         self as usize
-    }
-
-    pub const fn mask(self) -> u8 {
-        1_u8 << self.index()
     }
 
     pub const fn symbol(self) -> &'static str {
@@ -96,178 +91,132 @@ pub const ELEMENT_PROPERTIES: [ElementProperties; ELEMENT_COUNT] = [
     },
 ];
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Composition {
-    counts: [u16; ELEMENT_COUNT],
-}
+/// A compact, fixed-size vector of continuous A-F quantities.
+///
+/// This type deliberately does not clamp values: callers must preserve their
+/// accounting invariants, while [`ElementAmounts::validate_nonnegative`] can
+/// be used at configuration and runtime boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct ElementAmounts([f32; ELEMENT_COUNT]);
 
-impl Composition {
-    pub fn try_new(counts: [u16; ELEMENT_COUNT]) -> Result<Self, CompositionError> {
-        let composition = Self { counts };
-        if composition.is_empty() {
-            Err(CompositionError::Empty)
-        } else {
-            Ok(composition)
-        }
+impl ElementAmounts {
+    pub const ZERO: Self = Self([0.0; ELEMENT_COUNT]);
+
+    pub const fn new(values: [f32; ELEMENT_COUNT]) -> Self {
+        Self(values)
     }
 
-    pub const fn from_counts_unchecked(counts: [u16; ELEMENT_COUNT]) -> Self {
-        Self { counts }
+    pub const fn as_array(&self) -> &[f32; ELEMENT_COUNT] {
+        &self.0
     }
 
-    pub fn single(element: Element) -> Self {
-        let mut counts = [0_u16; ELEMENT_COUNT];
-        counts[element.index()] = 1;
-        Self { counts }
+    pub fn as_mut_array(&mut self) -> &mut [f32; ELEMENT_COUNT] {
+        &mut self.0
     }
 
-    pub fn bc_dimer() -> Self {
-        let mut counts = [0_u16; ELEMENT_COUNT];
-        counts[Element::B.index()] = 1;
-        counts[Element::C.index()] = 1;
-        Self { counts }
+    pub fn get(&self, element: Element) -> f32 {
+        self.0[element.index()]
     }
 
-    pub const fn counts(&self) -> &[u16; ELEMENT_COUNT] {
-        &self.counts
+    pub fn set(&mut self, element: Element, value: f32) {
+        self.0[element.index()] = value;
     }
 
-    pub fn count(&self, element: Element) -> u16 {
-        self.counts[element.index()]
+    pub fn total(self) -> f64 {
+        self.0.iter().map(|value| f64::from(*value)).sum()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.counts.iter().all(|count| *count == 0)
+    pub fn intrinsic_energy(self) -> f64 {
+        ELEMENT_ORDER
+            .iter()
+            .map(|element| f64::from(self.get(*element)) * f64::from(element.properties().energy))
+            .sum()
     }
 
-    pub fn size(&self) -> u16 {
-        self.counts.iter().copied().sum()
+    pub fn mass(self) -> f64 {
+        ELEMENT_ORDER
+            .iter()
+            .map(|element| f64::from(self.get(*element)) * f64::from(element.properties().mass))
+            .sum()
     }
 
-    pub fn atom_count(&self) -> u64 {
-        u64::from(self.size())
-    }
-
-    pub fn element_mask(&self) -> u8 {
-        let mut mask = 0_u8;
+    pub fn validate_nonnegative(self, name: &'static str) -> Result<(), ElementAmountsError> {
         for element in ELEMENT_ORDER {
-            if self.count(element) > 0 {
-                mask |= element.mask();
+            let value = self.get(element);
+            if !value.is_finite() || value < 0.0 {
+                return Err(ElementAmountsError {
+                    name,
+                    element,
+                    value,
+                });
             }
         }
-        mask
-    }
-
-    pub fn elemental_energy_sum(&self) -> f32 {
-        let mut energy = 0.0;
-        for element in ELEMENT_ORDER {
-            energy += element.properties().energy * f32::from(self.count(element));
-        }
-        energy
-    }
-
-    pub fn mean_polarity(&self) -> f32 {
-        let size = self.size();
-        if size == 0 {
-            return 0.0;
-        }
-        let mut polarity = 0.0;
-        for element in ELEMENT_ORDER {
-            polarity += element.properties().polarity * f32::from(self.count(element));
-        }
-        polarity / f32::from(size)
-    }
-
-    pub fn density_against(&self, element_counts: &[u32; ELEMENT_COUNT]) -> u64 {
-        let mut density = 0_u64;
-        for element in ELEMENT_ORDER {
-            density += u64::from(self.count(element)) * u64::from(element_counts[element.index()]);
-        }
-        density
+        Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompositionError {
-    Empty,
+impl std::ops::Index<Element> for ElementAmounts {
+    type Output = f32;
+
+    fn index(&self, element: Element) -> &Self::Output {
+        &self.0[element.index()]
+    }
 }
 
-impl fmt::Display for CompositionError {
+impl std::ops::IndexMut<Element> for ElementAmounts {
+    fn index_mut(&mut self, element: Element) -> &mut Self::Output {
+        &mut self.0[element.index()]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ElementAmountsError {
+    pub name: &'static str,
+    pub element: Element,
+    pub value: f32,
+}
+
+impl fmt::Display for ElementAmountsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => f.write_str("composition must contain at least one atom"),
-        }
+        write!(
+            f,
+            "invalid {}.{}: expected a finite nonnegative value, got {}",
+            self.name, self.element, self.value
+        )
     }
 }
 
-impl Error for CompositionError {}
-
-pub fn normalize_specificity_mask(mask: u8, fallback_mask: u8) -> u8 {
-    let normalized = mask & ALL_ELEMENT_MASK;
-    let fallback = fallback_mask & ALL_ELEMENT_MASK;
-    if normalized != 0 {
-        normalized
-    } else if fallback != 0 {
-        fallback
-    } else {
-        ALL_ELEMENT_MASK
-    }
-}
+impl Error for ElementAmountsError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Composition, Element};
-    use crate::molecule::Molecule;
+    use super::{Element, ElementAmounts};
 
     fn approx_eq(a: f32, b: f32) {
         assert!((a - b).abs() <= 1.0e-6, "{a} != {b}");
     }
 
     #[test]
-    fn creates_a_molecule_with_expected_derived_state() {
-        let molecule = Molecule::new(Composition::single(Element::A), 1.0).unwrap();
-        assert_eq!(molecule.size, 1);
-        assert_eq!(molecule.element_mask, Element::A.mask());
-        approx_eq(molecule.elemental_energy_sum, 0.5);
-        approx_eq(molecule.energy, 0.5);
-        approx_eq(molecule.polarity, 0.9);
-        approx_eq(molecule.diffusion_rate, 0.028);
-        assert_eq!(molecule.diffusion_period, 36);
+    fn continuous_element_amounts_are_indexed_and_accumulated_in_element_order() {
+        let mut amounts = ElementAmounts::new([1.0, 0.65, 0.5, 0.12, 0.08, 0.05]);
+        approx_eq(amounts[Element::C], 0.5);
+        amounts[Element::C] = 0.75;
+        approx_eq(amounts.get(Element::C), 0.75);
+        assert!((amounts.total() - 2.65).abs() <= 1.0e-6);
+        assert!((amounts.mass() - 3.16).abs() <= 1.0e-6);
+        assert!((amounts.intrinsic_energy() - 2.535).abs() <= 1.0e-6);
+        amounts.validate_nonnegative("amounts").unwrap();
     }
 
     #[test]
-    fn creates_bc_dimer_with_expected_derived_state() {
-        let molecule = Molecule::new(Composition::bc_dimer(), 1.0).unwrap();
-        assert_eq!(molecule.size, 2);
-        assert_eq!(molecule.element_mask, Element::B.mask() | Element::C.mask());
-        approx_eq(molecule.elemental_energy_sum, 1.9);
-        approx_eq(molecule.energy, 1.9);
-        approx_eq(molecule.polarity, 0.3);
-        approx_eq(molecule.diffusion_rate, 0.014);
-        assert_eq!(molecule.diffusion_period, 71);
-    }
+    fn continuous_element_amounts_reject_negative_and_nonfinite_values() {
+        let negative = ElementAmounts::new([0.0, 0.0, -0.01, 0.0, 0.0, 0.0]);
+        let error = negative.validate_nonnegative("amounts").unwrap_err();
+        assert_eq!(error.element, Element::C);
 
-    #[test]
-    fn empty_composition_is_rejected() {
-        assert_eq!(
-            Composition::try_new([0; 6]).unwrap_err(),
-            super::CompositionError::Empty
-        );
-        assert!(Molecule::new(Composition::default(), 1.0).is_err());
-    }
-
-    #[test]
-    fn composition_size_and_mask_are_deterministic() {
-        let composition = Composition::try_new([2, 0, 1, 0, 3, 0]).unwrap();
-        assert_eq!(composition.size(), 6);
-        assert_eq!(
-            composition.element_mask(),
-            Element::A.mask() | Element::C.mask() | Element::E.mask()
-        );
-        approx_eq(composition.elemental_energy_sum(), 10.9);
-        approx_eq(
-            composition.mean_polarity(),
-            (2.0 * 0.9 + 0.2 + 3.0 * 1.0) / 6.0,
-        );
+        let nonfinite = ElementAmounts::new([0.0, 0.0, 0.0, f32::INFINITY, 0.0, 0.0]);
+        let error = nonfinite.validate_nonnegative("amounts").unwrap_err();
+        assert_eq!(error.element, Element::D);
     }
 }

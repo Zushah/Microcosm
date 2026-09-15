@@ -9,9 +9,7 @@ pub const ENZYME_COUNT_HISTOGRAM_LEN: usize = 11;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnzymeTypeCounts {
-    pub anabolase: u64,
-    pub catabolase: u64,
-    pub transmutase: u64,
+    pub metabolic: u64,
     pub defensase: u64,
     pub attackase: u64,
 }
@@ -19,9 +17,7 @@ pub struct EnzymeTypeCounts {
 impl EnzymeTypeCounts {
     pub fn add(&mut self, enzyme_type: EnzymeType, value: u64) {
         match enzyme_type {
-            EnzymeType::Anabolase => self.anabolase = self.anabolase.saturating_add(value),
-            EnzymeType::Catabolase => self.catabolase = self.catabolase.saturating_add(value),
-            EnzymeType::Transmutase => self.transmutase = self.transmutase.saturating_add(value),
+            EnzymeType::Metabolic => self.metabolic = self.metabolic.saturating_add(value),
             EnzymeType::Defensase => self.defensase = self.defensase.saturating_add(value),
             EnzymeType::Attackase => self.attackase = self.attackase.saturating_add(value),
         }
@@ -33,36 +29,28 @@ impl EnzymeTypeCounts {
 
     pub fn get(self, enzyme_type: EnzymeType) -> u64 {
         match enzyme_type {
-            EnzymeType::Anabolase => self.anabolase,
-            EnzymeType::Catabolase => self.catabolase,
-            EnzymeType::Transmutase => self.transmutase,
+            EnzymeType::Metabolic => self.metabolic,
             EnzymeType::Defensase => self.defensase,
             EnzymeType::Attackase => self.attackase,
         }
     }
 
     pub fn total(self) -> u64 {
-        self.anabolase
-            .saturating_add(self.catabolase)
-            .saturating_add(self.transmutase)
+        self.metabolic
             .saturating_add(self.defensase)
             .saturating_add(self.attackase)
     }
 
     pub fn saturating_delta(self, previous: Self) -> Self {
         Self {
-            anabolase: self.anabolase.saturating_sub(previous.anabolase),
-            catabolase: self.catabolase.saturating_sub(previous.catabolase),
-            transmutase: self.transmutase.saturating_sub(previous.transmutase),
+            metabolic: self.metabolic.saturating_sub(previous.metabolic),
             defensase: self.defensase.saturating_sub(previous.defensase),
             attackase: self.attackase.saturating_sub(previous.attackase),
         }
     }
 
     pub fn add_assign(&mut self, other: Self) {
-        self.anabolase = self.anabolase.saturating_add(other.anabolase);
-        self.catabolase = self.catabolase.saturating_add(other.catabolase);
-        self.transmutase = self.transmutase.saturating_add(other.transmutase);
+        self.metabolic = self.metabolic.saturating_add(other.metabolic);
         self.defensase = self.defensase.saturating_add(other.defensase);
         self.attackase = self.attackase.saturating_add(other.attackase);
     }
@@ -70,9 +58,7 @@ impl EnzymeTypeCounts {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EnzymeTypeAmounts {
-    pub anabolase: f64,
-    pub catabolase: f64,
-    pub transmutase: f64,
+    pub metabolic: f64,
     pub defensase: f64,
     pub attackase: f64,
 }
@@ -80,23 +66,19 @@ pub struct EnzymeTypeAmounts {
 impl EnzymeTypeAmounts {
     pub fn add(&mut self, enzyme_type: EnzymeType, value: f64) {
         match enzyme_type {
-            EnzymeType::Anabolase => self.anabolase += value,
-            EnzymeType::Catabolase => self.catabolase += value,
-            EnzymeType::Transmutase => self.transmutase += value,
+            EnzymeType::Metabolic => self.metabolic += value,
             EnzymeType::Defensase => self.defensase += value,
             EnzymeType::Attackase => self.attackase += value,
         }
     }
 
     pub fn total(self) -> f64 {
-        self.anabolase + self.catabolase + self.transmutase + self.defensase + self.attackase
+        self.metabolic + self.defensase + self.attackase
     }
 
     pub fn delta(self, previous: Self) -> Self {
         Self {
-            anabolase: self.anabolase - previous.anabolase,
-            catabolase: self.catabolase - previous.catabolase,
-            transmutase: self.transmutase - previous.transmutase,
+            metabolic: self.metabolic - previous.metabolic,
             defensase: self.defensase - previous.defensase,
             attackase: self.attackase - previous.attackase,
         }
@@ -105,19 +87,12 @@ impl EnzymeTypeAmounts {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationCounters {
+    pub element_field_diffusion_tiles: u64,
     pub cell_steps: u64,
     pub enzyme_entries_seen: u64,
     pub metabolic_enzyme_attempts: u64,
-    pub reaction_gates_passed: u64,
     pub reactions_succeeded: u64,
-    pub substrate_candidates_scanned: u64,
-    pub molecule_diffusion_events: u64,
-    pub molecule_moves: u64,
-    pub molecule_slots_reused: u64,
-    pub molecule_slots_newly_allocated: u64,
-    pub molecule_uptakes: u64,
-    pub products_created: u64,
-    pub byproducts_created: u64,
+    pub element_uptake_events: u64,
     pub cell_divisions: u64,
     pub cell_deaths: u64,
     pub predation_pairs_checked: u64,
@@ -135,6 +110,9 @@ pub struct OperationCounters {
 impl OperationCounters {
     pub fn saturating_delta(self, previous: Self) -> Self {
         Self {
+            element_field_diffusion_tiles: self
+                .element_field_diffusion_tiles
+                .saturating_sub(previous.element_field_diffusion_tiles),
             cell_steps: self.cell_steps.saturating_sub(previous.cell_steps),
             enzyme_entries_seen: self
                 .enzyme_entries_seen
@@ -142,34 +120,12 @@ impl OperationCounters {
             metabolic_enzyme_attempts: self
                 .metabolic_enzyme_attempts
                 .saturating_sub(previous.metabolic_enzyme_attempts),
-            reaction_gates_passed: self
-                .reaction_gates_passed
-                .saturating_sub(previous.reaction_gates_passed),
             reactions_succeeded: self
                 .reactions_succeeded
                 .saturating_sub(previous.reactions_succeeded),
-            substrate_candidates_scanned: self
-                .substrate_candidates_scanned
-                .saturating_sub(previous.substrate_candidates_scanned),
-            molecule_diffusion_events: self
-                .molecule_diffusion_events
-                .saturating_sub(previous.molecule_diffusion_events),
-            molecule_moves: self.molecule_moves.saturating_sub(previous.molecule_moves),
-            molecule_slots_reused: self
-                .molecule_slots_reused
-                .saturating_sub(previous.molecule_slots_reused),
-            molecule_slots_newly_allocated: self
-                .molecule_slots_newly_allocated
-                .saturating_sub(previous.molecule_slots_newly_allocated),
-            molecule_uptakes: self
-                .molecule_uptakes
-                .saturating_sub(previous.molecule_uptakes),
-            products_created: self
-                .products_created
-                .saturating_sub(previous.products_created),
-            byproducts_created: self
-                .byproducts_created
-                .saturating_sub(previous.byproducts_created),
+            element_uptake_events: self
+                .element_uptake_events
+                .saturating_sub(previous.element_uptake_events),
             cell_divisions: self.cell_divisions.saturating_sub(previous.cell_divisions),
             cell_deaths: self.cell_deaths.saturating_sub(previous.cell_deaths),
             predation_pairs_checked: self
@@ -204,6 +160,9 @@ impl OperationCounters {
     }
 
     pub fn add_assign(&mut self, other: Self) {
+        self.element_field_diffusion_tiles = self
+            .element_field_diffusion_tiles
+            .saturating_add(other.element_field_diffusion_tiles);
         self.cell_steps = self.cell_steps.saturating_add(other.cell_steps);
         self.enzyme_entries_seen = self
             .enzyme_entries_seen
@@ -211,30 +170,12 @@ impl OperationCounters {
         self.metabolic_enzyme_attempts = self
             .metabolic_enzyme_attempts
             .saturating_add(other.metabolic_enzyme_attempts);
-        self.reaction_gates_passed = self
-            .reaction_gates_passed
-            .saturating_add(other.reaction_gates_passed);
         self.reactions_succeeded = self
             .reactions_succeeded
             .saturating_add(other.reactions_succeeded);
-        self.substrate_candidates_scanned = self
-            .substrate_candidates_scanned
-            .saturating_add(other.substrate_candidates_scanned);
-        self.molecule_diffusion_events = self
-            .molecule_diffusion_events
-            .saturating_add(other.molecule_diffusion_events);
-        self.molecule_moves = self.molecule_moves.saturating_add(other.molecule_moves);
-        self.molecule_slots_reused = self
-            .molecule_slots_reused
-            .saturating_add(other.molecule_slots_reused);
-        self.molecule_slots_newly_allocated = self
-            .molecule_slots_newly_allocated
-            .saturating_add(other.molecule_slots_newly_allocated);
-        self.molecule_uptakes = self.molecule_uptakes.saturating_add(other.molecule_uptakes);
-        self.products_created = self.products_created.saturating_add(other.products_created);
-        self.byproducts_created = self
-            .byproducts_created
-            .saturating_add(other.byproducts_created);
+        self.element_uptake_events = self
+            .element_uptake_events
+            .saturating_add(other.element_uptake_events);
         self.cell_divisions = self.cell_divisions.saturating_add(other.cell_divisions);
         self.cell_deaths = self.cell_deaths.saturating_add(other.cell_deaths);
         self.predation_pairs_checked = self
@@ -269,14 +210,14 @@ impl OperationCounters {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReactionCounters {
     pub attempts_by_type: EnzymeTypeCounts,
-    pub gates_passed_by_type: EnzymeTypeCounts,
     pub successes_by_type: EnzymeTypeCounts,
     pub no_substrate_by_type: EnzymeTypeCounts,
     pub energy_delta_by_type: EnzymeTypeAmounts,
     pub enval_input_by_type: EnzymeTypeAmounts,
     pub enval_output_by_type: EnzymeTypeAmounts,
-    pub molecule_uptakes: u64,
-    pub molecule_outputs: u64,
+    pub executed_metabolic_flux: f64,
+    pub uptake_flux: f64,
+    pub secretion_flux: f64,
     pub divisions: u64,
 }
 
@@ -286,9 +227,6 @@ impl ReactionCounters {
             attempts_by_type: self
                 .attempts_by_type
                 .saturating_delta(previous.attempts_by_type),
-            gates_passed_by_type: self
-                .gates_passed_by_type
-                .saturating_delta(previous.gates_passed_by_type),
             successes_by_type: self
                 .successes_by_type
                 .saturating_delta(previous.successes_by_type),
@@ -302,12 +240,10 @@ impl ReactionCounters {
             enval_output_by_type: self
                 .enval_output_by_type
                 .delta(previous.enval_output_by_type),
-            molecule_uptakes: self
-                .molecule_uptakes
-                .saturating_sub(previous.molecule_uptakes),
-            molecule_outputs: self
-                .molecule_outputs
-                .saturating_sub(previous.molecule_outputs),
+            executed_metabolic_flux: self.executed_metabolic_flux
+                - previous.executed_metabolic_flux,
+            uptake_flux: self.uptake_flux - previous.uptake_flux,
+            secretion_flux: self.secretion_flux - previous.secretion_flux,
             divisions: self.divisions.saturating_sub(previous.divisions),
         }
     }
@@ -331,21 +267,10 @@ pub struct WorldStats {
     pub occupied_tile_count: usize,
     pub empty_tile_count: usize,
     pub occupancy_fraction: f64,
-    pub molecule_count: usize,
-    pub tile_molecule_count: usize,
-    pub cell_molecule_count: usize,
-    pub free_molecule_record_count: usize,
-    pub active_molecule_record_count: usize,
-    pub molecule_arena_len: usize,
-    pub molecule_arena_high_water_mark: usize,
-    pub molecule_slots_reused: u64,
-    pub molecule_slots_newly_allocated: u64,
-    pub total_atom_count: u64,
-    pub tile_atom_count: u64,
-    pub cell_atom_count: u64,
-    pub average_molecules_per_tile: f64,
-    pub average_internal_molecules_per_live_cell: f64,
-    pub average_atoms_per_live_cell: f64,
+    pub extracellular_element_amounts: [f64; ELEMENT_COUNT],
+    pub intracellular_element_amounts: [f64; ELEMENT_COUNT],
+    pub system_element_amounts: [f64; ELEMENT_COUNT],
+    pub total_element_amount: f64,
     pub average_enval: f32,
     pub min_enval: f32,
     pub max_enval: f32,
@@ -356,7 +281,6 @@ pub struct WorldStats {
     pub positive_enval_tile_count: usize,
     pub negative_enval_tile_count: usize,
     pub near_zero_enval_tile_count: usize,
-    pub element_counts: [u64; ELEMENT_COUNT],
     pub cell_count: usize,
     pub live_cell_count: usize,
     pub cell_record_count: usize,
@@ -402,14 +326,22 @@ pub struct WorldStats {
 }
 
 impl WorldStats {
-    pub fn element_count(&self, element: Element) -> u64 {
-        self.element_counts[element.index()]
+    pub fn extracellular_element_amount(&self, element: Element) -> f64 {
+        self.extracellular_element_amounts[element.index()]
+    }
+
+    pub fn intracellular_element_amount(&self, element: Element) -> f64 {
+        self.intracellular_element_amounts[element.index()]
+    }
+
+    pub fn system_element_amount(&self, element: Element) -> f64 {
+        self.system_element_amounts[element.index()]
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StepProfile {
-    pub molecule_diffusion: Duration,
+    pub element_field_diffusion: Duration,
     pub cell_step: Duration,
     pub predation: Duration,
     pub enval_diffusion: Duration,
@@ -419,7 +351,7 @@ pub struct StepProfile {
 
 impl StepProfile {
     pub fn add_assign(&mut self, other: Self) {
-        self.molecule_diffusion += other.molecule_diffusion;
+        self.element_field_diffusion += other.element_field_diffusion;
         self.cell_step += other.cell_step;
         self.predation += other.predation;
         self.enval_diffusion += other.enval_diffusion;

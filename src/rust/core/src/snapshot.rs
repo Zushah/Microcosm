@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn snapshot_version_matches_microcosm_release() {
-        assert_eq!(SNAPSHOT_VERSION, "0.12.1");
+        assert_eq!(SNAPSHOT_VERSION, "0.13.0");
     }
 
     #[test]

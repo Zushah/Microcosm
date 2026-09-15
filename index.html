@@ -140,7 +140,6 @@ https://www.github.com/Zushah/Microcosm
                                         <option value="repro_threshold">Reproduction threshold</option>
                                         <option value="decay_time">Decay time</option>
                                         <option value="mutation_rate">Mutation rate</option>
-                                        <option value="default_secretion_prob">Default secretion probability</option>
                                         <option value="desired_element_reserve">Desired reserve</option>
                                         <option value="maintenance_cost_per_sec">Maintenance cost / sec</option>
                                         <option value="enval_stress_factor">Enval stress factor</option>
@@ -169,16 +168,18 @@ https://www.github.com/Zushah/Microcosm
                                 <label class="field">
                                     <span>Enzyme type</span>
                                     <select id="enzymeEditType">
-                                        <option value="anabolase">Anabolase</option>
-                                        <option value="catabolase">Catabolase</option>
-                                        <option value="transmutase">Transmutase</option>
+                                        <option value="metabolic">Metabolic</option>
                                         <option value="defensase">Defensase</option>
                                         <option value="attackase">Attackase</option>
                                     </select>
                                 </label>
                                 <label class="field">
-                                    <span>Specificity</span>
-                                    <input id="enzymeEditSpecificity" type="text" value="ABC" placeholder="ABC or ALL">
+                                    <span>Reactants A-F</span>
+                                    <input id="enzymeEditReactants" type="text" value="0, 0, 0, 1, 0, 0" placeholder="six nonnegative values">
+                                </label>
+                                <label class="field">
+                                    <span>Products A-F</span>
+                                    <input id="enzymeEditProducts" type="text" value="1, 0, 0, 0, 0, 0" placeholder="six nonnegative values">
                                 </label>
                                 <label class="field">
                                     <span>Enzyme field</span>
@@ -186,12 +187,10 @@ https://www.github.com/Zushah/Microcosm
                                         <option value="">No scalar field</option>
                                         <option value="enval_sigma">Enval σ</option>
                                         <option value="enval_throughput">Enval throughput</option>
-                                        <option value="secretion_prob">Secretion probability</option>
+                                        <option value="rate">Rate</option>
+                                        <option value="energy_harvest_fraction">Energy harvest fraction</option>
+                                        <option value="secretion_fraction">Secretion fraction</option>
                                         <option value="combat_level">Combat level</option>
-                                        <option value="bond_multiplier">Bond multiplier</option>
-                                        <option value="bond_cost_fraction">Bond cost fraction</option>
-                                        <option value="bond_harvest_fraction">Bond harvest fraction</option>
-                                        <option value="downhill_harvest_fraction">Downhill harvest fraction</option>
                                         <option value="enval_energy_fraction">Enval energy fraction</option>
                                         <option value="enval_release_fraction">Enval release fraction</option>
                                         <option value="enval_pump">Enval pump</option>
@@ -210,17 +209,17 @@ https://www.github.com/Zushah/Microcosm
                         </section>
                         <section class="wideInspectorSection">
                             <div class="subsectionHeader">
-                                <h3>Internal molecules</h3>
-                                <button id="copyMoleculesButton" class="inlineButton" type="button">Copy molecule JSON</button>
+                                <h3>Internal elements</h3>
+                                <button id="copyElementsButton" class="inlineButton" type="button">Copy element JSON</button>
                             </div>
-                            <div id="moleculeInspector" class="inspectorPane richPane scrollPane"></div>
+                            <div id="elementInspector" class="inspectorPane richPane scrollPane"></div>
                         </section>
                         <section class="wideInspectorSection">
                             <div class="subsectionHeader">
-                                <h3>Recent reactions</h3>
-                                <button id="copyReactionsButton" class="inlineButton" type="button">Copy reaction JSON</button>
+                                <h3>Recent metabolic fluxes</h3>
+                                <button id="copyFluxesButton" class="inlineButton" type="button">Copy flux JSON</button>
                             </div>
-                            <div id="reactionInspector" class="inspectorPane richPane"></div>
+                            <div id="fluxInspector" class="inspectorPane richPane"></div>
                         </section>
                         <section>
                             <div class="subsectionHeader">

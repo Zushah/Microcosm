@@ -1,4 +1,4 @@
-const TILE_DISPLAY_MODES = Object.freeze(["enval", "occupancy", "mass", "molecules", "element-a", "element-b", "element-c", "element-d", "element-e", "element-f"]);
+const TILE_DISPLAY_MODES = Object.freeze(["enval", "occupancy", "mass", "total-elements", "element-a", "element-b", "element-c", "element-d", "element-e", "element-f"]);
 
 const sameTile = (a, b) => a === b || Boolean(a && b && a.x === b.x && a.y === b.y);
 

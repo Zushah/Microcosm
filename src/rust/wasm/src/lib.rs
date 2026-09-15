@@ -2,8 +2,8 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, GenomePatch, LineageId, MoleculeSeedingConfig, RenderBrushPreview,
-    RenderBuffers, RenderDisplayMode, RenderVisualState, VERSION, World, WorldStats,
+    CellId, Config, ElementFieldConfig, GenomePatch, LineageId, RenderBrushPreview, RenderBuffers,
+    RenderDisplayMode, RenderVisualState, VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,11 +17,9 @@ pub const STATUS_WORLD_ERROR: u32 = 4;
 pub const STATUS_LOCK_ERROR: u32 = 5;
 pub const STATUS_ALLOC_ERROR: u32 = 6;
 
-const DEFAULT_CELL_MOLECULE_LIMIT: usize = 64;
-const DEFAULT_CELL_REACTION_LIMIT: usize = 32;
+const DEFAULT_CELL_FLUX_LIMIT: usize = 32;
 const DEFAULT_LINEAGE_LIMIT: usize = 64;
-const MAX_CELL_MOLECULE_LIMIT: usize = 256;
-const MAX_CELL_REACTION_LIMIT: usize = 128;
+const MAX_CELL_FLUX_LIMIT: usize = 128;
 const MAX_LINEAGE_LIMIT: usize = 512;
 const VISUAL_HAS_SELECTED_LINEAGE: u32 = 1 << 0;
 const VISUAL_HAS_SELECTED_CELL: u32 = 1 << 1;
@@ -40,18 +38,25 @@ pub struct WasmStats {
     pub occupied_tile_count: u32,
     pub empty_tile_count: u32,
     pub occupancy_fraction: f64,
-    pub molecule_count: u32,
-    pub tile_molecule_count: u32,
-    pub cell_molecule_count: u32,
-    pub free_molecule_record_count: u32,
-    pub active_molecule_record_count: u32,
-    pub molecule_arena_len: u32,
-    pub molecule_arena_high_water_mark: u32,
-    pub molecule_slots_reused: u64,
-    pub molecule_slots_newly_allocated: u64,
-    pub total_atom_count: u64,
-    pub tile_atom_count: u64,
-    pub cell_atom_count: u64,
+    pub extracellular_a: f64,
+    pub extracellular_b: f64,
+    pub extracellular_c: f64,
+    pub extracellular_d: f64,
+    pub extracellular_e: f64,
+    pub extracellular_f: f64,
+    pub intracellular_a: f64,
+    pub intracellular_b: f64,
+    pub intracellular_c: f64,
+    pub intracellular_d: f64,
+    pub intracellular_e: f64,
+    pub intracellular_f: f64,
+    pub system_a: f64,
+    pub system_b: f64,
+    pub system_c: f64,
+    pub system_d: f64,
+    pub system_e: f64,
+    pub system_f: f64,
+    pub total_element_amount: f64,
     pub live_cell_count: u32,
     pub cell_record_count: u32,
     pub dead_cell_count: u32,
@@ -77,9 +82,7 @@ pub struct WasmStats {
     pub max_enzyme_count: u32,
     pub cells_at_enzyme_cap: u32,
     pub fraction_cells_at_enzyme_cap: f64,
-    pub enzyme_anabolase_count: u64,
-    pub enzyme_catabolase_count: u64,
-    pub enzyme_transmutase_count: u64,
+    pub enzyme_metabolic_count: u64,
     pub enzyme_defensase_count: u64,
     pub enzyme_attackase_count: u64,
     pub average_attack_total: f64,
@@ -94,11 +97,13 @@ pub struct WasmStats {
     pub enval_p50: f32,
     pub enval_p95: f32,
     pub reaction_attempts: u64,
-    pub reaction_gates_passed: u64,
     pub reaction_successes: u64,
-    pub molecule_uptakes: u64,
-    pub molecule_outputs: u64,
+    pub executed_metabolic_flux: f64,
+    pub uptake_flux: f64,
+    pub secretion_flux: f64,
     pub divisions: u64,
+    pub element_field_diffusion_tiles: u64,
+    pub element_uptake_events: u64,
     pub cell_steps: u64,
     pub enzyme_entries_seen: u64,
     pub metabolic_enzyme_attempts: u64,
@@ -116,20 +121,25 @@ impl From<&WorldStats> for WasmStats {
             occupied_tile_count: clamp_usize_to_u32(stats.occupied_tile_count),
             empty_tile_count: clamp_usize_to_u32(stats.empty_tile_count),
             occupancy_fraction: stats.occupancy_fraction,
-            molecule_count: clamp_usize_to_u32(stats.molecule_count),
-            tile_molecule_count: clamp_usize_to_u32(stats.tile_molecule_count),
-            cell_molecule_count: clamp_usize_to_u32(stats.cell_molecule_count),
-            free_molecule_record_count: clamp_usize_to_u32(stats.free_molecule_record_count),
-            active_molecule_record_count: clamp_usize_to_u32(stats.active_molecule_record_count),
-            molecule_arena_len: clamp_usize_to_u32(stats.molecule_arena_len),
-            molecule_arena_high_water_mark: clamp_usize_to_u32(
-                stats.molecule_arena_high_water_mark,
-            ),
-            molecule_slots_reused: stats.molecule_slots_reused,
-            molecule_slots_newly_allocated: stats.molecule_slots_newly_allocated,
-            total_atom_count: stats.total_atom_count,
-            tile_atom_count: stats.tile_atom_count,
-            cell_atom_count: stats.cell_atom_count,
+            extracellular_a: stats.extracellular_element_amounts[0],
+            extracellular_b: stats.extracellular_element_amounts[1],
+            extracellular_c: stats.extracellular_element_amounts[2],
+            extracellular_d: stats.extracellular_element_amounts[3],
+            extracellular_e: stats.extracellular_element_amounts[4],
+            extracellular_f: stats.extracellular_element_amounts[5],
+            intracellular_a: stats.intracellular_element_amounts[0],
+            intracellular_b: stats.intracellular_element_amounts[1],
+            intracellular_c: stats.intracellular_element_amounts[2],
+            intracellular_d: stats.intracellular_element_amounts[3],
+            intracellular_e: stats.intracellular_element_amounts[4],
+            intracellular_f: stats.intracellular_element_amounts[5],
+            system_a: stats.system_element_amounts[0],
+            system_b: stats.system_element_amounts[1],
+            system_c: stats.system_element_amounts[2],
+            system_d: stats.system_element_amounts[3],
+            system_e: stats.system_element_amounts[4],
+            system_f: stats.system_element_amounts[5],
+            total_element_amount: stats.total_element_amount,
             live_cell_count: clamp_usize_to_u32(stats.live_cell_count),
             cell_record_count: clamp_usize_to_u32(stats.cell_record_count),
             dead_cell_count: clamp_usize_to_u32(stats.dead_cell_count),
@@ -155,9 +165,7 @@ impl From<&WorldStats> for WasmStats {
             max_enzyme_count: clamp_usize_to_u32(stats.max_enzyme_count),
             cells_at_enzyme_cap: clamp_usize_to_u32(stats.cells_at_enzyme_cap),
             fraction_cells_at_enzyme_cap: stats.fraction_cells_at_enzyme_cap,
-            enzyme_anabolase_count: stats.enzyme_type_totals.anabolase,
-            enzyme_catabolase_count: stats.enzyme_type_totals.catabolase,
-            enzyme_transmutase_count: stats.enzyme_type_totals.transmutase,
+            enzyme_metabolic_count: stats.enzyme_type_totals.metabolic,
             enzyme_defensase_count: stats.enzyme_type_totals.defensase,
             enzyme_attackase_count: stats.enzyme_type_totals.attackase,
             average_attack_total: stats.average_attack_total,
@@ -172,11 +180,13 @@ impl From<&WorldStats> for WasmStats {
             enval_p50: stats.enval_p50,
             enval_p95: stats.enval_p95,
             reaction_attempts: stats.reaction_counters.total_attempts(),
-            reaction_gates_passed: stats.reaction_counters.gates_passed_by_type.total(),
             reaction_successes: stats.reaction_counters.total_successes(),
-            molecule_uptakes: stats.reaction_counters.molecule_uptakes,
-            molecule_outputs: stats.reaction_counters.molecule_outputs,
+            executed_metabolic_flux: stats.reaction_counters.executed_metabolic_flux,
+            uptake_flux: stats.reaction_counters.uptake_flux,
+            secretion_flux: stats.reaction_counters.secretion_flux,
             divisions: stats.reaction_counters.divisions,
+            element_field_diffusion_tiles: stats.operation_counters.element_field_diffusion_tiles,
+            element_uptake_events: stats.operation_counters.element_uptake_events,
             cell_steps: stats.operation_counters.cell_steps,
             enzyme_entries_seen: stats.operation_counters.enzyme_entries_seen,
             metabolic_enzyme_attempts: stats.operation_counters.metabolic_enzyme_attempts,
@@ -192,9 +202,8 @@ struct WasmInitConfig {
     height: Option<usize>,
     initial_cells: Option<usize>,
     dt_seconds: Option<f64>,
-    molecule_diffusion_wheel_size: Option<usize>,
     enval_diffusion_alpha: Option<f32>,
-    molecule_seeding: Option<MoleculeSeedingConfig>,
+    element_fields: Option<ElementFieldConfig>,
     predation_enabled: Option<bool>,
 }
 
@@ -216,14 +225,11 @@ impl WasmInitConfig {
         if let Some(dt_seconds) = self.dt_seconds {
             config.dt_seconds = dt_seconds;
         }
-        if let Some(size) = self.molecule_diffusion_wheel_size {
-            config.molecule_diffusion_wheel_size = size;
-        }
         if let Some(alpha) = self.enval_diffusion_alpha {
             config.enval_diffusion_alpha = alpha;
         }
-        if let Some(seeding) = self.molecule_seeding {
-            config.molecule_seeding = seeding;
+        if let Some(element_fields) = self.element_fields {
+            config.element_fields = element_fields;
         }
         if let Some(enabled) = self.predation_enabled {
             config.predation_enabled = enabled;
@@ -714,17 +720,16 @@ pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
                     "enval": info.enval,
                     "cell_id": info.cell.map(|cell_id| cell_id.index()),
                     "occupied": info.cell.is_some(),
-                    "molecule_count": info.molecule_count,
-                    "mass_count": info.mass_count,
-                    "element_counts": {
-                        "A": info.element_counts[0],
-                        "B": info.element_counts[1],
-                        "C": info.element_counts[2],
-                        "D": info.element_counts[3],
-                        "E": info.element_counts[4],
-                        "F": info.element_counts[5]
+                    "element_concentrations": {
+                        "A": info.element_concentrations[0],
+                        "B": info.element_concentrations[1],
+                        "C": info.element_concentrations[2],
+                        "D": info.element_concentrations[3],
+                        "E": info.element_concentrations[4],
+                        "F": info.element_concentrations[5]
                     },
-                    "element_mask": info.element_mask
+                    "total_element_concentration": info.total_element_concentration,
+                    "mass_density": info.mass_density
                 }),
             )
         }
@@ -757,7 +762,7 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "energy": info.energy,
                     "lineage_id": info.lineage_id.raw(),
                     "enzyme_count": info.enzyme_count,
-                    "internal_atom_count": info.internal_atom_count,
+                    "total_internal_elements": info.total_internal_elements,
                     "combat_attack_total": info.combat_attack_total,
                     "combat_defense_total": info.combat_defense_total,
                     "age_seconds": info.age_seconds,
@@ -773,32 +778,18 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn microcosm_inspect_cell_detail(
-    handle: u32,
-    cell_id: u32,
-    molecule_limit: u32,
-    reaction_limit: u32,
-) -> u32 {
+pub extern "C" fn microcosm_inspect_cell_detail(handle: u32, cell_id: u32, flux_limit: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
             let Some(instance) = runtime.instance(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
-            let molecule_limit = clamp_query_limit(
-                molecule_limit,
-                DEFAULT_CELL_MOLECULE_LIMIT,
-                MAX_CELL_MOLECULE_LIMIT,
-            );
-            let reaction_limit = clamp_query_limit(
-                reaction_limit,
-                DEFAULT_CELL_REACTION_LIMIT,
-                MAX_CELL_REACTION_LIMIT,
-            );
-            let Some(info) = instance.world.inspect_cell_detail(
-                CellId(cell_id as usize),
-                molecule_limit,
-                reaction_limit,
-            ) else {
+            let flux_limit =
+                clamp_query_limit(flux_limit, DEFAULT_CELL_FLUX_LIMIT, MAX_CELL_FLUX_LIMIT);
+            let Some(info) = instance
+                .world
+                .inspect_cell_detail(CellId(cell_id as usize), flux_limit)
+            else {
                 return set_runtime_error(
                     &mut runtime,
                     STATUS_WORLD_ERROR,
@@ -819,38 +810,32 @@ pub extern "C" fn microcosm_inspect_cell_detail(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn microcosm_inspect_cell_molecules(
-    handle: u32,
-    cell_id: u32,
-    molecule_limit: u32,
-) -> u32 {
+pub extern "C" fn microcosm_inspect_cell_elements(handle: u32, cell_id: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
             let Some(instance) = runtime.instance(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
-            let molecule_limit = clamp_query_limit(
-                molecule_limit,
-                DEFAULT_CELL_MOLECULE_LIMIT,
-                MAX_CELL_MOLECULE_LIMIT,
-            );
-            let Some(info) = instance
-                .world
-                .inspect_cell_molecules(CellId(cell_id as usize), molecule_limit)
-            else {
+            let Some(info) = instance.world.inspect_cell(CellId(cell_id as usize)) else {
                 return set_runtime_error(
                     &mut runtime,
                     STATUS_WORLD_ERROR,
                     format!("no active cell with id {cell_id}"),
                 );
             };
+            let internal_elements = instance
+                .world
+                .cell(CellId(cell_id as usize))
+                .map(|cell| *cell.internal_elements.as_array())
+                .unwrap_or_default();
             set_serialized_query_result(
                 &mut runtime,
                 json!({
-                    "schema": "microcosm.cell_molecules.v1",
-                    "kind": "cell_molecules",
+                    "schema": "microcosm.cell_elements.v1",
+                    "kind": "cell_elements",
                     "cell_id": cell_id,
-                    "internal": info
+                    "internal_elements": internal_elements,
+                    "total_internal_elements": info.total_internal_elements
                 }),
             )
         }
@@ -859,24 +844,17 @@ pub extern "C" fn microcosm_inspect_cell_molecules(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn microcosm_inspect_cell_reactions(
-    handle: u32,
-    cell_id: u32,
-    reaction_limit: u32,
-) -> u32 {
+pub extern "C" fn microcosm_inspect_cell_fluxes(handle: u32, cell_id: u32, flux_limit: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
             let Some(instance) = runtime.instance(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
-            let reaction_limit = clamp_query_limit(
-                reaction_limit,
-                DEFAULT_CELL_REACTION_LIMIT,
-                MAX_CELL_REACTION_LIMIT,
-            );
+            let flux_limit =
+                clamp_query_limit(flux_limit, DEFAULT_CELL_FLUX_LIMIT, MAX_CELL_FLUX_LIMIT);
             let Some(info) = instance
                 .world
-                .inspect_cell_reactions(CellId(cell_id as usize), reaction_limit)
+                .inspect_cell_fluxes(CellId(cell_id as usize), flux_limit)
             else {
                 return set_runtime_error(
                     &mut runtime,
@@ -887,10 +865,10 @@ pub extern "C" fn microcosm_inspect_cell_reactions(
             set_serialized_query_result(
                 &mut runtime,
                 json!({
-                    "schema": "microcosm.cell_reactions.v1",
-                    "kind": "cell_reactions",
+                    "schema": "microcosm.cell_fluxes.v1",
+                    "kind": "cell_fluxes",
                     "cell_id": cell_id,
-                    "recent_reactions": info
+                    "recent_fluxes": info
                 }),
             )
         }
@@ -1170,9 +1148,26 @@ macro_rules! ptr_fn {
 
 ptr_fn!(microcosm_tile_enval_ptr, tile_enval, f32);
 ptr_fn!(microcosm_tile_occupancy_ptr, tile_occupancy, u32);
-ptr_fn!(microcosm_tile_mass_ptr, tile_mass, u32);
-ptr_fn!(microcosm_tile_molecule_count_ptr, tile_molecule_count, u32);
-ptr_fn!(microcosm_tile_element_mask_ptr, tile_element_mask, u32);
+ptr_fn!(microcosm_tile_mass_density_ptr, tile_mass_density, f32);
+ptr_fn!(microcosm_tile_total_elements_ptr, tile_total_elements, f32);
+ptr_fn!(
+    microcosm_tile_element_concentrations_ptr,
+    tile_element_concentrations,
+    f32
+);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_tile_element_concentrations_len(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(runtime) => runtime
+            .instance(handle)
+            .map(|instance| {
+                clamp_usize_to_u32(instance.render_buffers.tile_element_concentrations.len())
+            })
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
 ptr_fn!(microcosm_lattice_rgba_ptr, lattice_rgba, f32);
 
 #[unsafe(no_mangle)]
@@ -1327,11 +1322,11 @@ mod tests {
     fn stats_size_and_versions_are_exposed() {
         assert_eq!(
             exported_string(microcosm_version_ptr(), microcosm_version_len()),
-            "0.12.1"
+            "0.13.0"
         );
         assert_eq!(
             exported_string(microcosm_abi_version_ptr(), microcosm_abi_version_len()),
-            "0.12.1"
+            "0.13.0"
         );
         assert_eq!(microcosm_stats_size(), std::mem::size_of::<WasmStats>());
     }
@@ -1364,7 +1359,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2, 3), STATUS_OK);
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 3), STATUS_OK);
         let detail = query_json();
         assert_eq!(detail["schema"], "microcosm.cell_detail.v1");
         assert_eq!(detail["cell_detail"]["cell"]["cell_id"], 0);
@@ -1375,41 +1370,33 @@ mod tests {
                 .len()
                 >= 1
         );
-        assert_eq!(detail["cell_detail"]["internal"]["limit"], 2);
         assert!(
-            detail["cell_detail"]["internal"]["molecules"]
+            detail["cell_detail"]["internal_elements"]
                 .as_array()
                 .unwrap()
                 .len()
-                <= 2
+                == 6
         );
-        assert_eq!(detail["cell_detail"]["recent_reactions"]["available"], true);
-        assert_eq!(
-            detail["cell_detail"]["recent_reactions"]["reason"],
-            "recorded"
-        );
+        assert_eq!(detail["cell_detail"]["recent_fluxes"]["available"], true);
+        assert_eq!(detail["cell_detail"]["recent_fluxes"]["reason"], "recorded");
         assert!(
-            detail["cell_detail"]["recent_reactions"]["reactions"]
+            detail["cell_detail"]["recent_fluxes"]["fluxes"]
                 .as_array()
                 .is_some()
         );
 
-        assert_eq!(microcosm_inspect_cell_molecules(handle, 0, 1), STATUS_OK);
-        let molecules = query_json();
-        assert_eq!(molecules["schema"], "microcosm.cell_molecules.v1");
-        assert_eq!(molecules["internal"]["limit"], 1);
+        assert_eq!(microcosm_inspect_cell_elements(handle, 0), STATUS_OK);
+        let elements = query_json();
+        assert_eq!(elements["schema"], "microcosm.cell_elements.v1");
+        assert_eq!(elements["internal_elements"].as_array().unwrap().len(), 6);
 
-        assert_eq!(microcosm_inspect_cell_reactions(handle, 0, 4), STATUS_OK);
-        let reactions = query_json();
-        assert_eq!(reactions["schema"], "microcosm.cell_reactions.v1");
-        assert_eq!(reactions["recent_reactions"]["available"], true);
-        assert_eq!(reactions["recent_reactions"]["reason"], "recorded");
-        assert_eq!(reactions["recent_reactions"]["limit"], 4);
-        assert!(
-            reactions["recent_reactions"]["reactions"]
-                .as_array()
-                .is_some()
-        );
+        assert_eq!(microcosm_inspect_cell_fluxes(handle, 0, 4), STATUS_OK);
+        let fluxes = query_json();
+        assert_eq!(fluxes["schema"], "microcosm.cell_fluxes.v1");
+        assert_eq!(fluxes["recent_fluxes"]["available"], true);
+        assert_eq!(fluxes["recent_fluxes"]["reason"], "recorded");
+        assert_eq!(fluxes["recent_fluxes"]["limit"], 4);
+        assert!(fluxes["recent_fluxes"]["fluxes"].as_array().is_some());
 
         let lineage = detail["cell_detail"]["cell"]["lineage_id"]
             .as_u64()
@@ -1431,7 +1418,7 @@ mod tests {
         );
 
         assert_eq!(
-            microcosm_inspect_cell_detail(handle, u32::MAX, 2, 2),
+            microcosm_inspect_cell_detail(handle, u32::MAX, 2),
             STATUS_WORLD_ERROR
         );
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
@@ -1443,7 +1430,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v1","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v2","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1461,7 +1448,7 @@ mod tests {
                 .any(|field| field.as_str() == Some("optimal_enval"))
         );
 
-        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2, 2), STATUS_OK);
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2), STATUS_OK);
         let detail = query_json();
         assert_eq!(detail["cell_detail"]["genome"]["optimal_enval"], 0.125);
         assert!(
@@ -1472,7 +1459,7 @@ mod tests {
                 .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase"))
         );
 
-        let invalid = br#"{"schema":"microcosm.genome_patch.v1","genome":{"mutation_rate":2.0}}"#;
+        let invalid = br#"{"schema":"microcosm.genome_patch.v2","genome":{"mutation_rate":2.0}}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, invalid.as_ptr(), invalid.len()),
             STATUS_WORLD_ERROR
@@ -1486,7 +1473,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v1","genome":{"decay_time":2222.0}}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v2","genome":{"decay_time":2222.0}}"#;
         assert_eq!(
             microcosm_apply_genome_brush(handle, 0, 0, 8, 6, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1510,11 +1497,9 @@ mod tests {
         assert_eq!(stats.tile_count, 48);
         assert_eq!(stats.live_cell_count, 4);
         assert_eq!(stats.occupied_tile_count, 4);
-        assert!(stats.molecule_count >= 48);
-        assert_eq!(stats.active_molecule_record_count, stats.molecule_count);
-        assert!(stats.molecule_arena_len >= stats.active_molecule_record_count);
-        assert!(stats.molecule_arena_high_water_mark >= stats.molecule_arena_len);
-        assert!(stats.enzyme_anabolase_count >= 4);
+        assert!(stats.extracellular_a >= 48.0);
+        assert!(stats.total_element_amount > stats.extracellular_a);
+        assert!(stats.enzyme_metabolic_count >= 4);
         assert!(stats.average_cell_energy.is_finite());
         assert!(stats.enval_std_dev.is_finite());
 
