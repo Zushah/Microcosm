@@ -1,0 +1,55 @@
+name: Website
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v7
+      -
+        name: Build website
+        run: |
+          mkdir -p build/rust
+          cp index.html build/
+          cp style.css build/
+          cp main.js build/
+          cp -R assets build/
+          cp -R wasmgpu build/
+          cp rust/microcosm.wasm build/rust/
+      -
+        name: Upload website
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./build/
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      -
+        name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v5

@@ -3,7 +3,8 @@
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
 ## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-09-15) 2026-09-15
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Relocate source files
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Rework deployment workflow
+- [`039b0fe`](https://github.com/Zushah/Microcosm/commit/039b0fe) Relocate source files
 - [`18e067c`](https://github.com/Zushah/Microcosm/commit/18e067c) Replace molecular chemistry with continuous elemental fields
 
 ## 16. [`v0.12.1`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-02&until=2026-09-02) 2026-09-02
