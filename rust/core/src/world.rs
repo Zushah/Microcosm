@@ -12,8 +12,12 @@ use crate::config::{Config, ConfigError};
 use crate::genome::{
     Enzyme, EnzymeType, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
-use crate::render_buffers::{EMPTY_CELL_ID, RenderBuffers, RenderVisualState};
+use crate::render_buffers::{RenderBuffers, RenderVisualState};
 use crate::rng::Rng;
+use crate::spatial::{
+    BilinearStencil, DEFAULT_CELL_RADIUS, Position, SpatialIndex, minimum_image_displacement,
+    toroidal_distance_squared,
+};
 use crate::stats::{
     ENZYME_COUNT_HISTOGRAM_LEN, EnzymeTypeCounts, OperationCounters, ReactionCounters, StepProfile,
     WorldStats,
@@ -25,6 +29,11 @@ const LOCAL_ENVAL_WINDOW_AREA: usize = LOCAL_ENVAL_WINDOW_DIAMETER * LOCAL_ENVAL
 const MOORE_WITH_CENTER_DX: [isize; 9] = [-1, -1, -1, 0, 0, 1, 1, 1, 0];
 const MOORE_WITH_CENTER_DY: [isize; 9] = [-1, 0, 1, -1, 1, -1, 0, 1, 0];
 const ELEMENT_UPTAKE_RATE_PER_SECOND: f32 = 4.0;
+const FOUNDER_PLACEMENT_ATTEMPTS: usize = 64;
+const DIVISION_PLACEMENT_ATTEMPTS: usize = 32;
+const OVERLAP_RELAXATION_PASSES: usize = 2;
+const GEOMETRY_TOLERANCE: f32 = 1.0e-5;
+const PREDATION_INTERACTION_DISTANCE: f32 = std::f32::consts::SQRT_2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TileId(pub usize);
@@ -47,11 +56,6 @@ pub struct NeighborIndices {
     pub down_right: TileId,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct Tile {
-    cell: Option<CellId>,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineageCounters {
     pub births: u64,
@@ -65,7 +69,7 @@ pub struct TileInspection {
     pub x: usize,
     pub y: usize,
     pub enval: f32,
-    pub cell: Option<CellId>,
+    pub cell_center_count: u32,
     pub element_concentrations: [f32; ELEMENT_COUNT],
     pub total_element_concentration: f32,
     pub mass_density: f32,
@@ -74,9 +78,9 @@ pub struct TileInspection {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CellInspection {
     pub cell_id: CellId,
-    pub tile_id: TileId,
-    pub x: usize,
-    pub y: usize,
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
     pub energy: f64,
     pub lineage_id: LineageId,
     pub enzyme_count: usize,
@@ -220,9 +224,14 @@ pub struct World {
     enval_next: Vec<f32>,
     element_fields: Vec<ElementAmounts>,
     element_fields_next: Vec<ElementAmounts>,
-    tiles: Vec<Tile>,
     cells: Vec<Cell>,
     active_cells: Vec<CellId>,
+    #[serde(skip, default)]
+    cell_phase_scratch: Vec<CellId>,
+    #[serde(skip, default)]
+    mechanics_corrections: Vec<Position>,
+    #[serde(skip, default)]
+    tile_cell_counts: Vec<u32>,
     lineage_counters: BTreeMap<LineageId, LineageCounters>,
     birth_count: u64,
     death_count: u64,
@@ -235,9 +244,7 @@ pub struct World {
     operation_counters: OperationCounters,
     neighbors: Vec<NeighborIndices>,
     #[serde(skip, default)]
-    predation_pairs: Vec<(TileId, TileId)>,
-    #[serde(skip, default)]
-    predation_occupied_tiles: Vec<TileId>,
+    spatial_index: SpatialIndex,
 }
 
 impl World {
@@ -248,7 +255,6 @@ impl World {
         let base_enval = rng.range(-1.0, 1.0);
         let enval_sum = f64::from(base_enval) * tile_count as f64;
         let neighbors = build_neighbors(config.width, config.height);
-        let predation_pairs = build_predation_pairs(&neighbors);
 
         let world = Self {
             width: config.width,
@@ -263,9 +269,11 @@ impl World {
             enval_next: vec![base_enval; tile_count],
             element_fields: vec![config.element_fields.initial_amounts; tile_count],
             element_fields_next: vec![config.element_fields.initial_amounts; tile_count],
-            tiles: vec![Tile::default(); tile_count],
             cells: Vec::new(),
             active_cells: Vec::new(),
+            cell_phase_scratch: Vec::new(),
+            mechanics_corrections: Vec::new(),
+            tile_cell_counts: vec![0; tile_count],
             lineage_counters: BTreeMap::new(),
             birth_count: 0,
             death_count: 0,
@@ -277,8 +285,7 @@ impl World {
             reaction_counters: ReactionCounters::default(),
             operation_counters: OperationCounters::default(),
             neighbors,
-            predation_pairs,
-            predation_occupied_tiles: Vec::new(),
+            spatial_index: SpatialIndex::new(config.width, config.height),
             rng,
             config,
         };
@@ -489,12 +496,35 @@ impl World {
         Ok(())
     }
 
-    pub fn tile_cell(&self, tile_id: TileId) -> Option<CellId> {
-        self.tiles.get(tile_id.index()).and_then(|tile| tile.cell)
-    }
-
     pub fn cell(&self, cell_id: CellId) -> Option<&Cell> {
         self.cells.get(cell_id.index())
+    }
+
+    pub fn pick_cell(&self, position: Position) -> Option<CellId> {
+        let position = position.wrapped(self.width as f32, self.height as f32)?;
+        self.spatial_index
+            .query_radius(position, DEFAULT_CELL_RADIUS + GEOMETRY_TOLERANCE)
+            .into_iter()
+            .filter_map(|cell_id| {
+                let cell = self.cells.get(cell_id.index())?;
+                if cell.state != CellState::Active {
+                    return None;
+                }
+                let distance_squared = toroidal_distance_squared(
+                    position,
+                    cell.position,
+                    self.width as f32,
+                    self.height as f32,
+                );
+                (distance_squared <= (cell.radius + GEOMETRY_TOLERANCE).powi(2))
+                    .then_some((cell_id, distance_squared))
+            })
+            .min_by(|(left_id, left_distance), (right_id, right_distance)| {
+                left_distance
+                    .total_cmp(right_distance)
+                    .then_with(|| left_id.index().cmp(&right_id.index()))
+            })
+            .map(|(cell_id, _)| cell_id)
     }
 
     pub fn local_enval_average(&self, tile_id: TileId, radius: usize) -> Option<f32> {
@@ -514,6 +544,45 @@ impl World {
             }
         }
         (sum / f64::from(count)) as f32
+    }
+
+    pub fn sample_enval_at(&self, position: Position) -> Option<f32> {
+        let stencil = BilinearStencil::new(position, self.width, self.height)?;
+        let mut value = 0.0_f64;
+        for sample in stencil.samples {
+            value +=
+                f64::from(self.enval[self.index_xy(sample.x, sample.y)]) * f64::from(sample.weight);
+        }
+        Some(value as f32)
+    }
+
+    pub fn sample_element_fields_at(&self, position: Position) -> Option<ElementAmounts> {
+        let stencil = BilinearStencil::new(position, self.width, self.height)?;
+        let mut result = ElementAmounts::ZERO;
+        for element in ELEMENT_ORDER {
+            let mut value = 0.0_f64;
+            for sample in stencil.samples {
+                value += f64::from(self.element_fields[self.index_xy(sample.x, sample.y)][element])
+                    * f64::from(sample.weight);
+            }
+            result[element] = value as f32;
+        }
+        Some(result)
+    }
+
+    pub fn local_enval_average_at(&self, position: Position, radius: usize) -> Option<f32> {
+        position.wrapped(self.width as f32, self.height as f32)?;
+        let radius = radius as isize;
+        let mut sum = 0.0_f64;
+        let mut count = 0_u32;
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                let sample_position = Position::new(position.x + dx as f32, position.y + dy as f32);
+                sum += f64::from(self.sample_enval_at(sample_position)?);
+                count += 1;
+            }
+        }
+        Some((sum / f64::from(count)) as f32)
     }
 
     pub fn default_local_enval_average(&self, tile_id: TileId) -> Option<f32> {
@@ -547,6 +616,38 @@ impl World {
         self.local_enval_average(tile_id, LOCAL_ENVAL_RADIUS)
     }
 
+    fn deposit_elements_at(
+        &mut self,
+        position: Position,
+        amounts: ElementAmounts,
+    ) -> Result<(), WorldError> {
+        let stencil = BilinearStencil::new(position, self.width, self.height)
+            .ok_or(WorldError::InvalidCellPosition(position))?;
+        for sample in stencil.samples {
+            let index = self.index_xy(sample.x, sample.y);
+            for element in ELEMENT_ORDER {
+                self.element_fields[index][element] += amounts[element] * sample.weight;
+            }
+        }
+        Ok(())
+    }
+
+    fn adjust_enval_at(&mut self, position: Position, delta: f32) -> Result<(), WorldError> {
+        if !delta.is_finite() || delta == 0.0 {
+            return Ok(());
+        }
+        let stencil = BilinearStencil::new(position, self.width, self.height)
+            .ok_or(WorldError::NonFiniteEnvalInput(delta))?;
+        for sample in stencil.samples {
+            if sample.weight == 0.0 {
+                continue;
+            }
+            let tile_id = TileId(self.index_xy(sample.x, sample.y));
+            self.adjust_tile_enval(tile_id, delta * sample.weight)?;
+        }
+        Ok(())
+    }
+
     pub fn spawn_founder_cells(&mut self, count: usize) -> Result<usize, WorldError> {
         let mut spawned = 0;
         for _ in 0..count {
@@ -558,39 +659,57 @@ impl World {
     }
 
     pub fn spawn_random_cell(&mut self) -> Result<Option<CellId>, WorldError> {
-        let Some(tile_id) = self.random_empty_tile(50) else {
+        let Some(position) = self.random_non_overlapping_position(FOUNDER_PLACEMENT_ATTEMPTS)
+        else {
             return Ok(None);
         };
         let genome = Genome::random_founder(&mut self.rng, self.avg_enval);
-        self.spawn_cell_with_genome_at(tile_id, genome).map(Some)
+        self.spawn_cell_with_genome_at_position(position, genome)
+            .map(Some)
     }
 
     pub fn spawn_cell_with_genome_at(
         &mut self,
         tile_id: TileId,
-        mut genome: Genome,
+        genome: Genome,
     ) -> Result<CellId, WorldError> {
         if tile_id.index() >= self.tile_count {
             return Err(WorldError::InvalidTile(tile_id));
         }
-        if self.tiles[tile_id.index()].cell.is_some() {
-            return Err(WorldError::OccupiedTile(tile_id));
+        let (x, y) = self
+            .tile_xy(tile_id)
+            .ok_or(WorldError::InvalidTile(tile_id))?;
+        self.spawn_cell_with_genome_at_position(Position::new(x as f32, y as f32), genome)
+    }
+
+    pub fn spawn_cell_with_genome_at_position(
+        &mut self,
+        position: Position,
+        mut genome: Genome,
+    ) -> Result<CellId, WorldError> {
+        let position = position
+            .wrapped(self.width as f32, self.height as f32)
+            .ok_or(WorldError::InvalidCellPosition(position))?;
+        if !self.position_is_clear(position, DEFAULT_CELL_RADIUS, None) {
+            return Err(WorldError::OverlappingCellPosition(position));
         }
         genome.enforce_enzyme_count_bounds(&mut self.rng);
         let cell_id = CellId(self.cells.len());
-        let mut cell = Cell::new(genome, tile_id, self.sim_time_seconds);
+        let mut cell = Cell::new(genome, position, self.sim_time_seconds);
         cell.active_slot = Some(self.active_cells.len());
-        self.tiles[tile_id.index()].cell = Some(cell_id);
         self.active_cells.push(cell_id);
         self.record_lineage_birth(cell.lineage_id);
         self.birth_count = self.birth_count.saturating_add(1);
         self.cells.push(cell);
+        assert!(self.spatial_index.insert(cell_id, position));
+        self.increment_tile_cell_count(position);
         Ok(cell_id)
     }
 
     pub fn step(&mut self) {
         self.diffuse_element_fields();
         self.step_cells();
+        self.resolve_overlaps();
         self.resolve_predation();
         self.diffuse_enval();
         self.advance_time();
@@ -615,6 +734,10 @@ impl World {
         let cell_step = start.elapsed();
 
         let start = Instant::now();
+        self.resolve_overlaps();
+        let cell_mechanics = start.elapsed();
+
+        let start = Instant::now();
         self.resolve_predation();
         let predation = start.elapsed();
 
@@ -627,6 +750,7 @@ impl World {
         StepProfile {
             element_field_diffusion,
             cell_step,
+            cell_mechanics,
             predation,
             enval_diffusion,
             total: total_start.elapsed(),
@@ -787,7 +911,11 @@ impl World {
         }
         let total_element_amount = system_element_amounts.iter().sum();
 
-        let occupied_tile_count = self.tiles.iter().filter(|tile| tile.cell.is_some()).count();
+        let occupied_tile_count = self
+            .tile_cell_counts
+            .iter()
+            .filter(|count| **count > 0)
+            .count();
         let empty_tile_count = self.tile_count.saturating_sub(occupied_tile_count);
         let occupancy_fraction = if self.tile_count > 0 {
             occupied_tile_count as f64 / self.tile_count as f64
@@ -1004,11 +1132,87 @@ impl World {
 
     pub fn rebuild_derived_caches(&mut self) {
         self.neighbors = build_neighbors(self.width, self.height);
-        self.predation_pairs = build_predation_pairs(&self.neighbors);
-        self.predation_occupied_tiles.clear();
+        self.cell_phase_scratch.clear();
+        self.mechanics_corrections.clear();
         for cell in &mut self.cells {
             cell.refresh_combat_totals();
         }
+        self.rebuild_spatial_index();
+    }
+
+    fn rebuild_spatial_index(&mut self) {
+        if !self
+            .spatial_index
+            .matches_dimensions(self.width, self.height)
+        {
+            self.spatial_index = SpatialIndex::new(self.width, self.height);
+        }
+        let cells = &self.cells;
+        self.spatial_index
+            .rebuild(self.active_cells.iter().copied().filter_map(|cell_id| {
+                cells
+                    .get(cell_id.index())
+                    .filter(|cell| cell.state == CellState::Active)
+                    .map(|cell| (cell_id, cell.position))
+            }));
+        self.tile_cell_counts.resize(self.tile_count, 0);
+        self.tile_cell_counts.fill(0);
+        for cell_id in self.active_cells.iter().copied() {
+            let Some(cell) = self.cells.get(cell_id.index()) else {
+                continue;
+            };
+            if cell.state != CellState::Active {
+                continue;
+            }
+            let Some(position) = cell.position.wrapped(self.width as f32, self.height as f32)
+            else {
+                continue;
+            };
+            let tile_index =
+                position.x.floor() as usize * self.height + position.y.floor() as usize;
+            self.tile_cell_counts[tile_index] = self.tile_cell_counts[tile_index].saturating_add(1);
+        }
+    }
+
+    fn center_tile_id(&self, position: Position) -> Option<TileId> {
+        let position = position.wrapped(self.width as f32, self.height as f32)?;
+        Some(TileId(self.index_xy(
+            position.x.floor() as usize,
+            position.y.floor() as usize,
+        )))
+    }
+
+    fn increment_tile_cell_count(&mut self, position: Position) {
+        let tile_id = self
+            .center_tile_id(position)
+            .expect("active cell position must map to a field tile");
+        self.tile_cell_counts[tile_id.index()] =
+            self.tile_cell_counts[tile_id.index()].saturating_add(1);
+    }
+
+    fn decrement_tile_cell_count(&mut self, position: Position) {
+        let tile_id = self
+            .center_tile_id(position)
+            .expect("active cell position must map to a field tile");
+        let count = &mut self.tile_cell_counts[tile_id.index()];
+        assert!(*count > 0, "derived tile cell count underflow");
+        *count -= 1;
+    }
+
+    fn update_cell_position(&mut self, cell_id: CellId, position: Position) {
+        let old_position = self.cells[cell_id.index()].position;
+        let old_tile = self
+            .center_tile_id(old_position)
+            .expect("active cell position must map to a field tile");
+        let new_tile = self
+            .center_tile_id(position)
+            .expect("updated cell position must map to a field tile");
+        if old_tile != new_tile {
+            self.decrement_tile_cell_count(old_position);
+            self.increment_tile_cell_count(position);
+        }
+        assert!(self.spatial_index.update_position(cell_id, position));
+        self.cells[cell_id.index()].position = position;
     }
 
     pub fn build_render_buffers(&self) -> RenderBuffers {
@@ -1034,15 +1238,26 @@ impl World {
         buffers.render_epoch = (self.tick_count & u64::from(u32::MAX)) as u32;
 
         buffers.tile_enval.reserve(self.tile_count);
-        buffers.tile_occupancy.reserve(self.tile_count);
+        buffers.tile_cell_count.reserve(self.tile_count);
         buffers.tile_mass_density.reserve(self.tile_count);
         buffers.tile_total_elements.reserve(self.tile_count);
         buffers
             .tile_element_concentrations
             .reserve(self.tile_count.saturating_mul(ELEMENT_COUNT));
         buffers.cell_id.reserve(self.active_cells.len());
-        buffers.cell_x.reserve(self.active_cells.len());
-        buffers.cell_y.reserve(self.active_cells.len());
+        buffers
+            .cell_point_data
+            .reserve(self.active_cells.len().saturating_mul(4));
+        buffers
+            .cell_rotation_data
+            .reserve(self.active_cells.len().saturating_mul(4));
+        buffers
+            .cell_scale_data
+            .reserve(self.active_cells.len().saturating_mul(4));
+        buffers
+            .cell_rgba
+            .reserve(self.active_cells.len().saturating_mul(4));
+        buffers.cell_radius.reserve(self.active_cells.len());
         buffers.cell_energy.reserve(self.active_cells.len());
         buffers.cell_lineage.reserve(self.active_cells.len());
         buffers.cell_flags.reserve(self.active_cells.len());
@@ -1053,13 +1268,11 @@ impl World {
 
         buffers.tile_enval.extend_from_slice(&self.enval);
 
+        buffers
+            .tile_cell_count
+            .extend_from_slice(&self.tile_cell_counts);
+
         for tile_index in 0..self.tile_count {
-            let tile = &self.tiles[tile_index];
-            buffers.tile_occupancy.push(
-                tile.cell
-                    .map(|cell_id| cell_id.index().min(u32::MAX as usize) as u32)
-                    .unwrap_or(EMPTY_CELL_ID),
-            );
             let amounts = self.element_fields[tile_index];
             buffers.tile_mass_density.push(amounts.mass() as f32);
             buffers.tile_total_elements.push(amounts.total() as f32);
@@ -1075,17 +1288,25 @@ impl World {
             if cell.state != CellState::Active {
                 continue;
             }
-            let Some(tile_id) = cell.tile_id else {
-                continue;
-            };
-            let Some((x, y)) = self.tile_xy(tile_id) else {
-                continue;
-            };
             buffers
                 .cell_id
                 .push(cell_id.index().min(u32::MAX as usize) as u32);
-            buffers.cell_x.push(x.min(u32::MAX as usize) as u32);
-            buffers.cell_y.push(y.min(u32::MAX as usize) as u32);
+            buffers.cell_point_data.extend_from_slice(&[
+                cell.position.x + 0.5 - self.width as f32 * 0.5,
+                self.height as f32 * 0.5 - cell.position.y - 0.5,
+                0.5,
+                0.0,
+            ]);
+            buffers
+                .cell_rotation_data
+                .extend_from_slice(&[0.0, 0.0, 0.0, 1.0]);
+            buffers.cell_scale_data.extend_from_slice(&[
+                cell.radius,
+                cell.radius,
+                cell.radius,
+                0.0,
+            ]);
+            buffers.cell_radius.push(cell.radius);
             buffers.cell_energy.push(cell.energy as f32);
             buffers
                 .cell_lineage
@@ -1114,7 +1335,7 @@ impl World {
             x,
             y,
             enval: self.enval[tile_id.index()],
-            cell: self.tiles[tile_id.index()].cell,
+            cell_center_count: self.tile_cell_counts[tile_id.index()],
             element_concentrations: *amounts.as_array(),
             total_element_concentration: amounts.total() as f32,
             mass_density: amounts.mass() as f32,
@@ -1131,13 +1352,11 @@ impl World {
         if cell.state != CellState::Active {
             return None;
         }
-        let tile_id = cell.tile_id?;
-        let (x, y) = self.tile_xy(tile_id)?;
         Some(CellInspection {
             cell_id,
-            tile_id,
-            x,
-            y,
+            x: cell.position.x,
+            y: cell.position.y,
+            radius: cell.radius,
             energy: cell.energy,
             lineage_id: cell.lineage_id,
             enzyme_count: cell.genome.enzymes.len(),
@@ -1146,7 +1365,9 @@ impl World {
             combat_defense_total: cell.combat_defense_total,
             age_seconds: (self.sim_time_seconds - cell.birth_sim_time).max(0.0),
             optimal_enval: cell.genome.optimal_enval,
-            local_enval_average: self.default_local_enval_average(tile_id).unwrap_or(0.0),
+            local_enval_average: self
+                .local_enval_average_at(cell.position, LOCAL_ENVAL_RADIUS)
+                .unwrap_or(0.0),
             repro_threshold: cell.genome.repro_threshold,
             decay_time: cell.genome.decay_time,
         })
@@ -1252,23 +1473,25 @@ impl World {
         let height = brush_height.min(self.height).max(1);
         let start_x = center_x as isize - (width as isize / 2);
         let start_y = center_y as isize - (height as isize / 2);
-        let mut cells = Vec::new();
+        let mut covered_tiles = vec![false; self.tile_count];
         for dx in 0..width {
             for dy in 0..height {
                 let tile_id = self.wrapped_tile_id(start_x + dx as isize, start_y + dy as isize);
-                let Some(cell_id) = self.tiles[tile_id.index()].cell else {
-                    continue;
-                };
-                if self
-                    .cells
-                    .get(cell_id.index())
-                    .map(|cell| cell.state == CellState::Active)
-                    .unwrap_or(false)
-                {
-                    cells.push(cell_id);
-                }
+                covered_tiles[tile_id.index()] = true;
             }
         }
+        let cells = self
+            .active_cells
+            .iter()
+            .copied()
+            .filter(|cell_id| {
+                self.cells
+                    .get(cell_id.index())
+                    .filter(|cell| cell.state == CellState::Active)
+                    .and_then(|cell| self.center_tile_id(cell.position))
+                    .is_some_and(|tile_id| covered_tiles[tile_id.index()])
+            })
+            .collect::<Vec<_>>();
 
         let mut changed = BTreeSet::new();
         for cell_id in cells.iter().copied() {
@@ -1417,30 +1640,15 @@ impl World {
     }
 
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
-        if self.tiles.len() != self.tile_count
-            || self.neighbors.len() != self.tile_count
+        if self.neighbors.len() != self.tile_count
             || self.enval.len() != self.tile_count
             || self.enval_next.len() != self.tile_count
             || self.element_fields.len() != self.tile_count
             || self.element_fields_next.len() != self.tile_count
+            || self.tile_cell_counts.len() != self.tile_count
         {
             return Err(InvariantError::MismatchedWorldArrayLengths);
         }
-
-        let mut seen_predation_pairs = HashSet::new();
-        for (left, right) in self.predation_pairs.iter().copied() {
-            if left.index() >= self.tile_count || right.index() >= self.tile_count || left == right
-            {
-                return Err(InvariantError::InvalidPredationPair { left, right });
-            }
-            let a = left.index().min(right.index());
-            let b = left.index().max(right.index());
-            if !seen_predation_pairs.insert((a, b)) {
-                return Err(InvariantError::DuplicatePredationPair { left, right });
-            }
-        }
-
-        let mut seen_cells = vec![false; self.cells.len()];
 
         for tile_index in 0..self.tile_count {
             if !self.enval[tile_index].is_finite() {
@@ -1473,35 +1681,12 @@ impl World {
                     });
                 }
             }
-
-            if let Some(cell_id) = self.tiles[tile_index].cell {
-                if cell_id.index() >= self.cells.len() {
-                    return Err(InvariantError::InvalidCellId {
-                        tile: TileId(tile_index),
-                        cell: cell_id,
-                    });
-                }
-                if std::mem::replace(&mut seen_cells[cell_id.index()], true) {
-                    return Err(InvariantError::DuplicateCellOccupancy(cell_id));
-                }
-                let cell = &self.cells[cell_id.index()];
-                if cell.state != CellState::Active {
-                    return Err(InvariantError::DeadCellOnTile(cell_id));
-                }
-                if cell.tile_id != Some(TileId(tile_index)) {
-                    return Err(InvariantError::WrongCellTile {
-                        cell: cell_id,
-                        expected_tile: TileId(tile_index),
-                        actual_tile: cell.tile_id,
-                    });
-                }
-            }
         }
 
         for (cell_index, cell) in self.cells.iter().enumerate() {
             let cell_id = CellId(cell_index);
             if cell.state == CellState::Dead {
-                if cell.tile_id.is_some() || cell.internal_elements != ElementAmounts::ZERO {
+                if cell.internal_elements != ElementAmounts::ZERO {
                     return Err(InvariantError::DeadCellOwnsState(cell_id));
                 }
                 continue;
@@ -1509,8 +1694,16 @@ impl World {
             if !cell.energy.is_finite() || cell.energy < 0.0 {
                 return Err(InvariantError::NonFiniteCellEnergy(cell_id));
             }
-            if !seen_cells[cell_index] {
-                return Err(InvariantError::LiveCellNotOnTile(cell_id));
+            if !cell.position.is_finite()
+                || cell.radius != DEFAULT_CELL_RADIUS
+                || cell.radius <= 0.0
+                || cell.position.wrapped(self.width as f32, self.height as f32)
+                    != Some(cell.position)
+            {
+                return Err(InvariantError::InvalidCellGeometry(cell_id));
+            }
+            if self.spatial_index.position(cell_id) != Some(cell.position) {
+                return Err(InvariantError::SpatialIndexMismatch(cell_id));
             }
             if cell.genome.enzymes.len() < MIN_CELL_ENZYMES
                 || cell.genome.enzymes.len() > MAX_CELL_ENZYMES
@@ -1540,6 +1733,7 @@ impl World {
         }
 
         let mut active_seen = HashSet::new();
+        let mut expected_tile_cell_counts = vec![0_u32; self.tile_count];
         for (slot, cell_id) in self.active_cells.iter().copied().enumerate() {
             if cell_id.index() >= self.cells.len() {
                 return Err(InvariantError::InvalidActiveCell(cell_id));
@@ -1556,6 +1750,30 @@ impl World {
                     cell: cell_id,
                     expected_slot: slot,
                     actual_slot: cell.active_slot,
+                });
+            }
+            let tile_id = self
+                .center_tile_id(cell.position)
+                .ok_or(InvariantError::InvalidCellGeometry(cell_id))?;
+            expected_tile_cell_counts[tile_id.index()] =
+                expected_tile_cell_counts[tile_id.index()].saturating_add(1);
+        }
+        if self.spatial_index.len() != self.active_cells.len() {
+            return Err(InvariantError::SpatialIndexCountMismatch {
+                expected: self.active_cells.len(),
+                actual: self.spatial_index.len(),
+            });
+        }
+        for (tile_index, (expected, actual)) in expected_tile_cell_counts
+            .iter()
+            .zip(&self.tile_cell_counts)
+            .enumerate()
+        {
+            if expected != actual {
+                return Err(InvariantError::TileCellCountMismatch {
+                    tile: TileId(tile_index),
+                    expected: *expected,
+                    actual: *actual,
                 });
             }
         }
@@ -1601,10 +1819,11 @@ impl World {
     }
 
     fn step_cells(&mut self) {
-        for tile_index in 0..self.tile_count {
-            let Some(cell_id) = self.tiles[tile_index].cell else {
-                continue;
-            };
+        self.cell_phase_scratch.clear();
+        self.cell_phase_scratch
+            .extend_from_slice(&self.active_cells);
+        for phase_index in 0..self.cell_phase_scratch.len() {
+            let cell_id = self.cell_phase_scratch[phase_index];
             if cell_id.index() >= self.cells.len()
                 || self.cells[cell_id.index()].state != CellState::Active
             {
@@ -1615,10 +1834,10 @@ impl World {
     }
 
     fn step_cell(&mut self, cell_id: CellId) {
-        let Some(tile_id) = self
+        let Some(position) = self
             .cells
             .get(cell_id.index())
-            .and_then(|cell| cell.tile_id)
+            .and_then(|cell| (cell.state == CellState::Active).then_some(cell.position))
         else {
             return;
         };
@@ -1627,7 +1846,9 @@ impl World {
             .operation_counters
             .local_enval_average_calls
             .saturating_add(1);
-        let mut local_enval = self.default_local_enval_average(tile_id).unwrap_or(0.0);
+        let mut local_enval = self
+            .local_enval_average_at(position, LOCAL_ENVAL_RADIUS)
+            .unwrap_or(0.0);
         let mut positive_energy_gain = 0.0_f64;
         let enzyme_count = self.cells[cell_id.index()].genome.enzymes.len();
         let genome_context = GenomeReactionContext::from(&self.cells[cell_id.index()].genome);
@@ -1660,7 +1881,7 @@ impl World {
                 .attempts_by_type
                 .increment(EnzymeType::Metabolic);
             let env = ReactionEnv {
-                tile_enval: self.enval[tile_id.index()],
+                tile_enval: self.sample_enval_at(position).unwrap_or(0.0),
                 local_enval,
                 average_enval: self.avg_enval,
             };
@@ -1692,8 +1913,9 @@ impl World {
                 };
                 self.cells[cell_id.index()].internal_elements[element] =
                     remaining + outcome.retained_products[element];
-                self.element_fields[tile_id.index()][element] += outcome.secreted_products[element];
             }
+            self.deposit_elements_at(position, outcome.secreted_products)
+                .expect("active cell position must support conservative element deposition");
             let energy_after = energy_before + outcome.energy_delta;
             self.cells[cell_id.index()].energy = if energy_after < 0.0 && energy_after > -1.0e-9 {
                 0.0
@@ -1706,11 +1928,11 @@ impl World {
             }
             let mut enval_changed = false;
             if outcome.enval_input != 0.0 {
-                let _ = self.adjust_tile_enval(tile_id, -outcome.enval_input);
+                let _ = self.adjust_enval_at(position, -outcome.enval_input);
                 enval_changed = true;
             }
             if outcome.enval_output != 0.0 {
-                let _ = self.add_enval_around(tile_id, outcome.enval_output);
+                let _ = self.add_enval_around(position, outcome.enval_output);
                 enval_changed = true;
             }
             if enval_changed {
@@ -1718,7 +1940,9 @@ impl World {
                     .operation_counters
                     .local_enval_average_calls
                     .saturating_add(1);
-                local_enval = self.default_local_enval_average(tile_id).unwrap_or(0.0);
+                local_enval = self
+                    .local_enval_average_at(position, LOCAL_ENVAL_RADIUS)
+                    .unwrap_or(0.0);
             }
 
             self.operation_counters.reactions_succeeded = self
@@ -1740,15 +1964,13 @@ impl World {
             self.reaction_counters.executed_metabolic_flux += f64::from(outcome.executed_extent);
             self.reaction_counters.secretion_flux += outcome.secreted_products.total();
 
-            let (x, y) = self.tile_xy(tile_id).unwrap_or((0, 0));
             let energy_after = self.cells[cell_id.index()].energy;
             self.cells[cell_id.index()].push_flux_record(FluxRecord {
                 tick_count: self.tick_count,
                 sim_time_seconds: self.sim_time_seconds,
                 cell_id: cell_id.index(),
-                tile_id: tile_id.index(),
-                x,
-                y,
+                x: position.x,
+                y: position.y,
                 catalyst_index,
                 catalyst_type: enzyme.enzyme_type.as_str().to_owned(),
                 reactants: *enzyme.reactants.as_array(),
@@ -1788,7 +2010,7 @@ impl World {
             }
         }
 
-        let uptake = self.uptake_elements(cell_id, tile_id);
+        let uptake = self.uptake_elements(cell_id, position);
         self.reaction_counters.uptake_flux += f64::from(uptake);
 
         let optimal_enval = self.cells[cell_id.index()].genome.optimal_enval;
@@ -1806,16 +2028,19 @@ impl World {
         }
         if self.cells[cell_id.index()].energy >= self.cells[cell_id.index()].genome.repro_threshold
         {
-            self.divide_cell(cell_id, tile_id, local_enval);
+            self.divide_cell(cell_id, local_enval);
         }
     }
 
-    fn uptake_elements(&mut self, cell_id: CellId, tile_id: TileId) -> f32 {
+    fn uptake_elements(&mut self, cell_id: CellId, position: Position) -> f32 {
         let reserve = self.cells[cell_id.index()].genome.desired_element_reserve;
         let reserve_target = f64::from(reserve) * 2.0;
         let deficit =
             (reserve_target - self.cells[cell_id.index()].internal_elements.total()).max(0.0);
-        let available = self.element_fields[tile_id.index()].total();
+        let Some(accessible) = self.sample_element_fields_at(position) else {
+            return 0.0;
+        };
+        let available = accessible.total();
         let transfer_total = deficit
             .min(available)
             .min(f64::from(ELEMENT_UPTAKE_RATE_PER_SECOND) * self.config.dt_seconds);
@@ -1829,37 +2054,53 @@ impl World {
             .saturating_add(1);
 
         let mut transferred = 0.0_f64;
+        let stencil = BilinearStencil::new(position, self.width, self.height)
+            .expect("validated cell position must have a bilinear stencil");
         for element in ELEMENT_ORDER {
-            let source = self.element_fields[tile_id.index()][element];
-            let amount = transfer_total * f64::from(source) / available;
-            let amount = (amount as f32).min(source);
-            self.element_fields[tile_id.index()][element] = source - amount;
-            self.cells[cell_id.index()].internal_elements[element] += amount;
-            transferred += f64::from(amount);
+            let desired = transfer_total * f64::from(accessible[element]) / available;
+            if desired <= 0.0 || accessible[element] <= 0.0 {
+                continue;
+            }
+            let mut weighted_sources = [0.0_f64; 4];
+            for (sample_index, sample) in stencil.samples.iter().enumerate() {
+                let source = self.element_fields[self.index_xy(sample.x, sample.y)][element];
+                weighted_sources[sample_index] = f64::from(sample.weight) * f64::from(source);
+            }
+            let denominator = weighted_sources.iter().sum::<f64>();
+            if denominator <= 0.0 {
+                continue;
+            }
+            let mut element_transferred = 0.0_f32;
+            for (sample_index, sample) in stencil.samples.iter().enumerate() {
+                if weighted_sources[sample_index] <= 0.0 {
+                    continue;
+                }
+                let index = self.index_xy(sample.x, sample.y);
+                let source = self.element_fields[index][element];
+                let amount = (desired * weighted_sources[sample_index] / denominator) as f32;
+                let amount = amount.min(source);
+                self.element_fields[index][element] = source - amount;
+                element_transferred += amount;
+            }
+            self.cells[cell_id.index()].internal_elements[element] += element_transferred;
+            transferred += f64::from(element_transferred);
         }
         transferred as f32
     }
 
-    fn add_enval_around(
-        &mut self,
-        center_tile: TileId,
-        enval_delta: f32,
-    ) -> Result<(), WorldError> {
+    fn add_enval_around(&mut self, position: Position, enval_delta: f32) -> Result<(), WorldError> {
         if !enval_delta.is_finite() || enval_delta == 0.0 {
             return Ok(());
         }
         let choice = self.rng.usize(9);
-        let (x, y) = self
-            .tile_xy(center_tile)
-            .ok_or(WorldError::InvalidTile(center_tile))?;
-        let tile_id = self.wrapped_tile_id(
-            x as isize + MOORE_WITH_CENTER_DX[choice],
-            y as isize + MOORE_WITH_CENTER_DY[choice],
+        let target = Position::new(
+            position.x + MOORE_WITH_CENTER_DX[choice] as f32,
+            position.y + MOORE_WITH_CENTER_DY[choice] as f32,
         );
-        self.adjust_tile_enval(tile_id, enval_delta)
+        self.adjust_enval_at(target, enval_delta)
     }
 
-    fn divide_cell(&mut self, cell_id: CellId, tile_id: TileId, local_enval: f32) {
+    fn divide_cell(&mut self, cell_id: CellId, local_enval: f32) {
         if self.cells[cell_id.index()].state != CellState::Active {
             return;
         }
@@ -1883,17 +2124,31 @@ impl World {
             self.cells[cell_id.index()].internal_elements[element] = parent_amount - child_amount;
         }
 
-        let candidates = self.empty_tiles_within_radius_two(tile_id);
-        if candidates.is_empty() {
+        let parent_position = self.cells[cell_id.index()].position;
+        let mut child_position = None;
+        for _ in 0..DIVISION_PLACEMENT_ATTEMPTS {
+            let offset_x = self.rng.range(-2.0, 2.0);
+            let offset_y = self.rng.range(-2.0, 2.0);
+            let Some(candidate) =
+                Position::new(parent_position.x + offset_x, parent_position.y + offset_y)
+                    .wrapped(self.width as f32, self.height as f32)
+            else {
+                continue;
+            };
+            if self.position_is_clear(candidate, DEFAULT_CELL_RADIUS, None) {
+                child_position = Some(candidate);
+                break;
+            }
+        }
+        let Some(child_position) = child_position else {
             self.cells[cell_id.index()].energy += child_energy;
             for element in ELEMENT_ORDER {
                 self.cells[cell_id.index()].internal_elements[element] += child_elements[element];
             }
             return;
-        }
+        };
 
-        let dest_tile = candidates[self.rng.usize(candidates.len())];
-        let child_id = match self.spawn_cell_with_genome_at(dest_tile, child_genome) {
+        let child_id = match self.spawn_cell_with_genome_at_position(child_position, child_genome) {
             Ok(child_id) => child_id,
             Err(_) => {
                 self.cells[cell_id.index()].energy += child_energy;
@@ -1919,47 +2174,57 @@ impl World {
         }
     }
 
-    fn empty_tiles_within_radius_two(&self, center_tile: TileId) -> Vec<TileId> {
-        let (x, y) = match self.tile_xy(center_tile) {
-            Some(xy) => xy,
-            None => return Vec::new(),
-        };
-        let mut candidates = Vec::new();
-        for dx in -2..=2 {
-            for dy in -2..=2 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                let tile_id = self.wrapped_tile_id(x as isize + dx, y as isize + dy);
-                if self.tiles[tile_id.index()].cell.is_none() {
-                    candidates.push(tile_id);
-                }
-            }
-        }
-        candidates
-    }
-
-    fn random_empty_tile(&mut self, max_attempts: usize) -> Option<TileId> {
+    fn random_non_overlapping_position(&mut self, max_attempts: usize) -> Option<Position> {
         for _ in 0..max_attempts {
-            let x = self.rng.usize(self.width);
-            let y = self.rng.usize(self.height);
-            let tile_id = TileId(self.index_xy(x, y));
-            if self.tiles[tile_id.index()].cell.is_none() {
-                return Some(tile_id);
-            }
-        }
-
-        if self.tile_count == 0 {
-            return None;
-        }
-        let start = self.rng.usize(self.tile_count);
-        for offset in 0..self.tile_count {
-            let tile_id = TileId((start + offset) % self.tile_count);
-            if self.tiles[tile_id.index()].cell.is_none() {
-                return Some(tile_id);
+            let position = Position::new(
+                self.rng.range(0.0, self.width as f32),
+                self.rng.range(0.0, self.height as f32),
+            );
+            if self.position_is_clear(position, DEFAULT_CELL_RADIUS, None) {
+                return Some(position);
             }
         }
         None
+    }
+
+    fn position_is_clear(
+        &mut self,
+        position: Position,
+        radius: f32,
+        ignored_cell: Option<CellId>,
+    ) -> bool {
+        if !position.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return false;
+        }
+        let candidates = self
+            .spatial_index
+            .query_radius(position, radius + DEFAULT_CELL_RADIUS);
+        self.operation_counters.spatial_candidate_checks = self
+            .operation_counters
+            .spatial_candidate_checks
+            .saturating_add(candidates.len() as u64);
+        for other_id in candidates {
+            if Some(other_id) == ignored_cell {
+                continue;
+            }
+            let Some(other) = self.cells.get(other_id.index()) else {
+                continue;
+            };
+            if other.state != CellState::Active {
+                continue;
+            }
+            let separation = radius + other.radius;
+            if toroidal_distance_squared(
+                position,
+                other.position,
+                self.width as f32,
+                self.height as f32,
+            ) < (separation - GEOMETRY_TOLERANCE).max(0.0).powi(2)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     fn kill_cell_and_release(&mut self, cell_id: CellId) {
@@ -1968,20 +2233,13 @@ impl World {
         {
             return;
         }
-        let tile_id = self.cells[cell_id.index()].tile_id;
+        let position = self.cells[cell_id.index()].position;
         let released_elements = self.cells[cell_id.index()].internal_elements;
+        self.deposit_elements_at(position, released_elements)
+            .expect("active cell position must support conservative death release");
         self.cells[cell_id.index()].internal_elements = ElementAmounts::ZERO;
-        if let Some(tile_id) = tile_id {
-            for element in ELEMENT_ORDER {
-                self.element_fields[tile_id.index()][element] += released_elements[element];
-            }
-            if self.tiles[tile_id.index()].cell == Some(cell_id) {
-                self.tiles[tile_id.index()].cell = None;
-            }
-        }
         self.cells[cell_id.index()].energy = 0.0;
         self.cells[cell_id.index()].state = CellState::Dead;
-        self.cells[cell_id.index()].tile_id = None;
         self.cells[cell_id.index()].death_sim_time = Some(self.sim_time_seconds);
         self.remove_active_cell(cell_id);
         self.record_lineage_death(self.cells[cell_id.index()].lineage_id);
@@ -1997,6 +2255,9 @@ impl World {
         if slot >= self.active_cells.len() {
             return;
         }
+        let position = self.cells[cell_id.index()].position;
+        assert!(self.spatial_index.remove(cell_id));
+        self.decrement_tile_cell_count(position);
         let last = self.active_cells.len() - 1;
         if slot != last {
             let swapped = self.active_cells[last];
@@ -2020,91 +2281,157 @@ impl World {
         counters.population = counters.population.saturating_sub(1);
     }
 
+    fn resolve_overlaps(&mut self) {
+        if self.active_cells.len() < 2 {
+            return;
+        }
+        for _ in 0..OVERLAP_RELAXATION_PASSES {
+            let pairs = self
+                .spatial_index
+                .unique_pairs_within(DEFAULT_CELL_RADIUS * 2.0);
+            self.operation_counters.spatial_candidate_checks = self
+                .operation_counters
+                .spatial_candidate_checks
+                .saturating_add(pairs.len() as u64);
+            self.operation_counters.overlap_candidates = self
+                .operation_counters
+                .overlap_candidates
+                .saturating_add(pairs.len() as u64);
+            self.mechanics_corrections
+                .resize(self.cells.len(), Position::default());
+            self.mechanics_corrections.fill(Position::default());
+            let mut corrected = false;
+            for (cell_a, cell_b) in pairs {
+                let Some(a) = self.cells.get(cell_a.index()) else {
+                    continue;
+                };
+                let Some(b) = self.cells.get(cell_b.index()) else {
+                    continue;
+                };
+                if a.state != CellState::Active || b.state != CellState::Active {
+                    continue;
+                }
+                let displacement = minimum_image_displacement(
+                    a.position,
+                    b.position,
+                    self.width as f32,
+                    self.height as f32,
+                );
+                let distance_squared = displacement
+                    .x
+                    .mul_add(displacement.x, displacement.y * displacement.y);
+                let required_distance = a.radius + b.radius;
+                let (direction_x, direction_y, distance) =
+                    if distance_squared <= GEOMETRY_TOLERANCE * GEOMETRY_TOLERANCE {
+                        let directions = [
+                            (1.0, 0.0),
+                            (
+                                std::f32::consts::FRAC_1_SQRT_2,
+                                std::f32::consts::FRAC_1_SQRT_2,
+                            ),
+                            (0.0, 1.0),
+                            (
+                                -std::f32::consts::FRAC_1_SQRT_2,
+                                std::f32::consts::FRAC_1_SQRT_2,
+                            ),
+                            (-1.0, 0.0),
+                            (
+                                -std::f32::consts::FRAC_1_SQRT_2,
+                                -std::f32::consts::FRAC_1_SQRT_2,
+                            ),
+                            (0.0, -1.0),
+                            (
+                                std::f32::consts::FRAC_1_SQRT_2,
+                                -std::f32::consts::FRAC_1_SQRT_2,
+                            ),
+                        ];
+                        let direction = directions[(cell_a.index().wrapping_mul(31)
+                            ^ cell_b.index().wrapping_mul(17))
+                            % directions.len()];
+                        (direction.0, direction.1, 0.0)
+                    } else {
+                        let distance = distance_squared.sqrt();
+                        (
+                            displacement.x / distance,
+                            displacement.y / distance,
+                            distance,
+                        )
+                    };
+                let penetration = required_distance - distance;
+                if penetration <= GEOMETRY_TOLERANCE {
+                    continue;
+                }
+                let half = penetration * 0.5;
+                self.mechanics_corrections[cell_a.index()].x -= direction_x * half;
+                self.mechanics_corrections[cell_a.index()].y -= direction_y * half;
+                self.mechanics_corrections[cell_b.index()].x += direction_x * half;
+                self.mechanics_corrections[cell_b.index()].y += direction_y * half;
+                self.operation_counters.overlap_corrections = self
+                    .operation_counters
+                    .overlap_corrections
+                    .saturating_add(1);
+                corrected = true;
+            }
+            if !corrected {
+                break;
+            }
+            for active_index in 0..self.active_cells.len() {
+                let cell_id = self.active_cells[active_index];
+                let correction = self.mechanics_corrections[cell_id.index()];
+                let Some(position) = Position::new(
+                    self.cells[cell_id.index()].position.x + correction.x,
+                    self.cells[cell_id.index()].position.y + correction.y,
+                )
+                .wrapped(self.width as f32, self.height as f32) else {
+                    continue;
+                };
+                self.update_cell_position(cell_id, position);
+            }
+        }
+    }
+
     fn resolve_predation(&mut self) {
         if !self.config.predation_enabled || self.active_cells.len() < 2 {
             return;
         }
 
-        self.predation_occupied_tiles.clear();
-        for cell_id in self.active_cells.iter().copied() {
-            if cell_id.index() >= self.cells.len() {
+        let pairs = self
+            .spatial_index
+            .unique_pairs_within(PREDATION_INTERACTION_DISTANCE + GEOMETRY_TOLERANCE);
+        self.operation_counters.spatial_candidate_checks = self
+            .operation_counters
+            .spatial_candidate_checks
+            .saturating_add(pairs.len() as u64);
+        self.operation_counters.predation_cells_considered = self
+            .operation_counters
+            .predation_cells_considered
+            .saturating_add(self.active_cells.len() as u64);
+        self.operation_counters.predation_candidate_pairs = self
+            .operation_counters
+            .predation_candidate_pairs
+            .saturating_add(pairs.len() as u64);
+        for (cell_a, cell_b) in pairs {
+            self.operation_counters.predation_pairs_checked = self
+                .operation_counters
+                .predation_pairs_checked
+                .saturating_add(1);
+            if !self.is_active_cross_lineage_pair(cell_a, cell_b) {
                 continue;
             }
-            let cell = &self.cells[cell_id.index()];
-            if cell.state == CellState::Active {
-                if let Some(tile_id) = cell.tile_id {
-                    self.predation_occupied_tiles.push(tile_id);
-                }
-            }
-        }
-        self.predation_occupied_tiles
-            .sort_unstable_by_key(|tile| tile.index());
-
-        let needs_tiny_world_dedupe = self.width <= 2 || self.height <= 2;
-        let mut seen_pairs = HashSet::<(usize, usize)>::new();
-        for occupied_index in 0..self.predation_occupied_tiles.len() {
-            let tile_id = self.predation_occupied_tiles[occupied_index];
-            self.operation_counters.predation_occupied_tiles_considered = self
-                .operation_counters
-                .predation_occupied_tiles_considered
-                .saturating_add(1);
-            let neighbors = self.neighbors[tile_id.index()];
-            for other_tile in [
-                neighbors.right,
-                neighbors.down,
-                neighbors.down_right,
-                neighbors.up_right,
-            ] {
-                if other_tile == tile_id {
-                    continue;
-                }
-                if needs_tiny_world_dedupe {
-                    let a = tile_id.index().min(other_tile.index());
-                    let b = tile_id.index().max(other_tile.index());
-                    if !seen_pairs.insert((a, b)) {
-                        continue;
-                    }
-                }
-                self.operation_counters.predation_candidate_neighbor_pairs = self
-                    .operation_counters
-                    .predation_candidate_neighbor_pairs
-                    .saturating_add(1);
-                if self.tiles[other_tile.index()].cell.is_none() {
-                    continue;
-                }
-                self.resolve_predation_between_tiles(tile_id, other_tile);
-            }
-        }
-    }
-
-    fn resolve_predation_between_tiles(&mut self, tile_a: TileId, tile_b: TileId) {
-        let Some(cell_a) = self.tiles.get(tile_a.index()).and_then(|tile| tile.cell) else {
-            return;
-        };
-        let Some(cell_b) = self.tiles.get(tile_b.index()).and_then(|tile| tile.cell) else {
-            return;
-        };
-        self.operation_counters.predation_pairs_checked = self
-            .operation_counters
-            .predation_pairs_checked
-            .saturating_add(1);
-        if self.is_active_cross_lineage_pair(cell_a, cell_b) {
             self.operation_counters.predation_cross_lineage_pairs = self
                 .operation_counters
                 .predation_cross_lineage_pairs
                 .saturating_add(1);
-        } else {
-            return;
+            if self.cells[cell_a.index()].combat_attack_total == 0
+                && self.cells[cell_b.index()].combat_attack_total == 0
+            {
+                continue;
+            }
+            let Some(outcome) = self.resolve_predation_between_cells(cell_a, cell_b) else {
+                continue;
+            };
+            self.execute_predation_outcome(outcome);
         }
-        if self.cells[cell_a.index()].combat_attack_total == 0
-            && self.cells[cell_b.index()].combat_attack_total == 0
-        {
-            return;
-        }
-        let Some(outcome) = self.resolve_predation_between_cells(cell_a, cell_b) else {
-            return;
-        };
-        self.execute_predation_outcome(outcome);
     }
 
     fn is_active_cross_lineage_pair(&self, cell_a: CellId, cell_b: CellId) -> bool {
@@ -2214,14 +2541,8 @@ impl World {
             self.cells[predator_id.index()].internal_elements[element] += prey_elements[element];
         }
 
-        if let Some(tile_id) = self.cells[prey_id.index()].tile_id {
-            if self.tiles[tile_id.index()].cell == Some(prey_id) {
-                self.tiles[tile_id.index()].cell = None;
-            }
-        }
         self.cells[prey_id.index()].energy = 0.0;
         self.cells[prey_id.index()].state = CellState::Dead;
-        self.cells[prey_id.index()].tile_id = None;
         self.cells[prey_id.index()].death_sim_time = Some(self.sim_time_seconds);
         self.remove_active_cell(prey_id);
         self.record_lineage_death(self.cells[prey_id.index()].lineage_id);
@@ -2331,37 +2652,14 @@ fn build_neighbors(width: usize, height: usize) -> Vec<NeighborIndices> {
     neighbors
 }
 
-fn build_predation_pairs(neighbors: &[NeighborIndices]) -> Vec<(TileId, TileId)> {
-    let mut pairs = Vec::new();
-    let mut seen = HashSet::<(usize, usize)>::new();
-    for (tile_index, neighbors) in neighbors.iter().copied().enumerate() {
-        let tile_id = TileId(tile_index);
-        for other_tile in [
-            neighbors.right,
-            neighbors.down,
-            neighbors.down_right,
-            neighbors.up_right,
-        ] {
-            if other_tile == tile_id {
-                continue;
-            }
-            let a = tile_id.index().min(other_tile.index());
-            let b = tile_id.index().max(other_tile.index());
-            if seen.insert((a, b)) {
-                pairs.push((tile_id, other_tile));
-            }
-        }
-    }
-    pairs
-}
-
 #[derive(Debug)]
 pub enum WorldError {
     Config(ConfigError),
     ElementAmounts(ElementAmountsError),
     InvalidTile(TileId),
     InvalidCell(CellId),
-    OccupiedTile(TileId),
+    InvalidCellPosition(Position),
+    OverlappingCellPosition(Position),
     NonFiniteEnvalInput(f32),
     InvalidEnergyInput(f64),
     GenomePatch(String),
@@ -2374,7 +2672,16 @@ impl fmt::Display for WorldError {
             Self::ElementAmounts(err) => write!(f, "invalid element amounts: {err}"),
             Self::InvalidTile(tile) => write!(f, "invalid tile id {}", tile.index()),
             Self::InvalidCell(cell) => write!(f, "invalid cell id {}", cell.index()),
-            Self::OccupiedTile(tile) => write!(f, "tile {} is already occupied", tile.index()),
+            Self::InvalidCellPosition(position) => write!(
+                f,
+                "invalid continuous cell position ({}, {})",
+                position.x, position.y
+            ),
+            Self::OverlappingCellPosition(position) => write!(
+                f,
+                "cell position ({}, {}) overlaps an active cell",
+                position.x, position.y
+            ),
             Self::NonFiniteEnvalInput(value) => write!(f, "non-finite enval value {value}"),
             Self::InvalidEnergyInput(value) => write!(
                 f,
@@ -2411,36 +2718,27 @@ pub enum InvariantError {
         tile: TileId,
         neighbor: TileId,
     },
-    InvalidPredationPair {
-        left: TileId,
-        right: TileId,
-    },
-    DuplicatePredationPair {
-        left: TileId,
-        right: TileId,
-    },
-    InvalidCellId {
-        tile: TileId,
-        cell: CellId,
-    },
     InvalidActiveCell(CellId),
-    DuplicateCellOccupancy(CellId),
     DuplicateActiveCell(CellId),
-    DeadCellOnTile(CellId),
     DeadActiveCell(CellId),
     DeadCellOwnsState(CellId),
-    LiveCellNotOnTile(CellId),
-    WrongCellTile {
-        cell: CellId,
-        expected_tile: TileId,
-        actual_tile: Option<TileId>,
-    },
     WrongActiveCellSlot {
         cell: CellId,
         expected_slot: usize,
         actual_slot: Option<usize>,
     },
     NonFiniteCellEnergy(CellId),
+    InvalidCellGeometry(CellId),
+    SpatialIndexMismatch(CellId),
+    SpatialIndexCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    TileCellCountMismatch {
+        tile: TileId,
+        expected: u32,
+        actual: u32,
+    },
     InvalidGenomeEnzymeCount(CellId),
     InvalidCatalyst(CellId),
     CombatTotalsMismatch(CellId),
@@ -2475,29 +2773,8 @@ impl fmt::Display for InvariantError {
                 tile.index(),
                 neighbor.index()
             ),
-            Self::InvalidPredationPair { left, right } => write!(
-                f,
-                "invalid predation pair {} <-> {}",
-                left.index(),
-                right.index()
-            ),
-            Self::DuplicatePredationPair { left, right } => write!(
-                f,
-                "duplicate predation pair {} <-> {}",
-                left.index(),
-                right.index()
-            ),
-            Self::InvalidCellId { tile, cell } => write!(
-                f,
-                "tile {} references invalid cell {}",
-                tile.index(),
-                cell.index()
-            ),
             Self::InvalidActiveCell(cell) => {
                 write!(f, "active list references invalid cell {}", cell.index())
-            }
-            Self::DuplicateCellOccupancy(cell) => {
-                write!(f, "cell {} appears on more than one tile", cell.index())
             }
             Self::DuplicateActiveCell(cell) => {
                 write!(
@@ -2506,29 +2783,16 @@ impl fmt::Display for InvariantError {
                     cell.index()
                 )
             }
-            Self::DeadCellOnTile(cell) => {
-                write!(f, "dead cell {} is present on a tile", cell.index())
-            }
             Self::DeadActiveCell(cell) => {
                 write!(f, "dead cell {} is present in active list", cell.index())
             }
             Self::DeadCellOwnsState(cell) => {
-                write!(f, "dead cell {} still owns tile or elements", cell.index())
+                write!(
+                    f,
+                    "dead cell {} still owns intracellular elements",
+                    cell.index()
+                )
             }
-            Self::LiveCellNotOnTile(cell) => {
-                write!(f, "live cell {} is not present on a tile", cell.index())
-            }
-            Self::WrongCellTile {
-                cell,
-                expected_tile,
-                actual_tile,
-            } => write!(
-                f,
-                "cell {} tile mismatch: expected {}, got {:?}",
-                cell.index(),
-                expected_tile.index(),
-                actual_tile
-            ),
             Self::WrongActiveCellSlot {
                 cell,
                 expected_slot,
@@ -2543,6 +2807,29 @@ impl fmt::Display for InvariantError {
             Self::NonFiniteCellEnergy(cell) => {
                 write!(f, "cell {} has invalid energy", cell.index())
             }
+            Self::InvalidCellGeometry(cell) => write!(
+                f,
+                "cell {} has invalid or non-canonical continuous geometry",
+                cell.index()
+            ),
+            Self::SpatialIndexMismatch(cell) => write!(
+                f,
+                "cell {} is missing or misplaced in the spatial index",
+                cell.index()
+            ),
+            Self::SpatialIndexCountMismatch { expected, actual } => write!(
+                f,
+                "spatial index count mismatch: expected {expected}, got {actual}"
+            ),
+            Self::TileCellCountMismatch {
+                tile,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "tile {} cell count mismatch: expected {expected}, got {actual}",
+                tile.index()
+            ),
             Self::InvalidGenomeEnzymeCount(cell) => write!(
                 f,
                 "cell {} genome enzyme count is outside [{}, {}]",
@@ -2591,8 +2878,8 @@ impl Error for InvariantError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ELEMENT_UPTAKE_RATE_PER_SECOND, MOORE_WITH_CENTER_DX, MOORE_WITH_CENTER_DY, RenderBuffers,
-        TileId, World,
+        ELEMENT_UPTAKE_RATE_PER_SECOND, GEOMETRY_TOLERANCE, MOORE_WITH_CENTER_DX,
+        MOORE_WITH_CENTER_DY, RenderBuffers, TileId, World,
     };
     use crate::cell::{CELL_FLUX_LOG_CAPACITY, CellState};
     use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts};
@@ -2600,6 +2887,9 @@ mod tests {
     use crate::genome::{
         Enzyme, EnzymeFieldPatch, EnzymePatchOperation, Genome, GenomeFieldPatch, GenomePatch,
         LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+    };
+    use crate::spatial::{
+        DEFAULT_CELL_RADIUS, Position, minimum_image_displacement, toroidal_distance_squared,
     };
 
     fn small_config(seed: &str, width: usize, height: usize) -> Config {
@@ -2825,7 +3115,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_spawn_uses_empty_tile_and_updates_stats() {
+    fn cell_spawn_updates_stats() {
         let mut world = World::new(only_a_config("spawn", 8, 8)).unwrap();
         let spawned = world.spawn_founder_cells(4).unwrap();
         assert_eq!(spawned, 4);
@@ -2835,7 +3125,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_cell_occupancy_is_rejected() {
+    fn overlapping_cell_position_is_rejected() {
         let mut world = World::new(only_a_config("occupancy", 4, 4)).unwrap();
         let tile = world.tile_id(0, 0).unwrap();
         let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
@@ -2871,7 +3161,7 @@ mod tests {
         world.cells[cell_id.index()].internal_elements[Element::A] = 2.0;
         let field_before = world.element_fields[tile.index()][Element::A];
 
-        let transferred = world.uptake_elements(cell_id, tile);
+        let transferred = world.uptake_elements(cell_id, Position::new(1.0, 1.0));
 
         let expected_transfer = ELEMENT_UPTAKE_RATE_PER_SECOND * world.config.dt_seconds as f32;
         assert!((transferred - expected_transfer).abs() <= 1.0e-6);
@@ -2890,9 +3180,136 @@ mod tests {
         world.cells[cell_id.index()].internal_elements =
             ElementAmounts::new([4.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let field_at_target = world.element_fields[tile.index()];
-        assert_eq!(world.uptake_elements(cell_id, tile), 0.0);
+        assert_eq!(world.uptake_elements(cell_id, Position::new(1.0, 1.0)), 0.0);
         assert_eq!(world.element_fields[tile.index()], field_at_target);
         world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn fractional_field_sampling_deposition_and_seam_wrapping_are_conservative() {
+        let mut world = World::new(only_a_config("fractional-field-coupling", 4, 3)).unwrap();
+        for amounts in &mut world.element_fields {
+            *amounts = ElementAmounts::ZERO;
+        }
+        for (x, y, amount) in [(3, 2, 1.0), (0, 2, 2.0), (3, 0, 3.0), (0, 0, 4.0)] {
+            let tile = world.tile_id(x, y).unwrap();
+            world.element_fields[tile.index()][Element::A] = amount;
+        }
+        let position = Position::new(3.5, 2.5);
+        let sampled = world.sample_element_fields_at(position).unwrap();
+        assert!((sampled[Element::A] - 2.5).abs() <= 1.0e-6);
+
+        let before = world.element_field_totals()[Element::A.index()];
+        world
+            .deposit_elements_at(
+                position,
+                ElementAmounts::new([8.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        let after = world.element_field_totals()[Element::A.index()];
+        assert!((after - before - 8.0).abs() <= 1.0e-6);
+        for (x, y, initial) in [(3, 2, 1.0), (0, 2, 2.0), (3, 0, 3.0), (0, 0, 4.0)] {
+            let tile = world.tile_id(x, y).unwrap();
+            assert!(
+                (world.element_fields[tile.index()][Element::A] - (initial + 2.0)).abs() <= 1.0e-6
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_environmental_deposition_is_explicit_and_non_mutating() {
+        let mut world = World::new(only_a_config("invalid-deposition", 4, 3)).unwrap();
+        let before = world.element_fields.clone();
+        let invalid_position = Position::new(f32::NAN, 1.0);
+
+        let result = world.deposit_elements_at(
+            invalid_position,
+            ElementAmounts::new([8.0, 7.0, 6.0, 5.0, 4.0, 3.0]),
+        );
+
+        assert!(matches!(
+            result,
+            Err(super::WorldError::InvalidCellPosition(position)) if position.x.is_nan()
+        ));
+        assert_eq!(world.element_fields, before);
+    }
+
+    #[test]
+    fn fractional_uptake_is_nonnegative_and_conservative() {
+        let mut world = World::new(only_a_config("fractional-uptake", 4, 4)).unwrap();
+        for amounts in &mut world.element_fields {
+            *amounts = ElementAmounts::ZERO;
+        }
+        for (x, y, amount) in [(1, 1, 0.1), (2, 1, 0.2), (1, 2, 0.3), (2, 2, 0.4)] {
+            let tile = world.tile_id(x, y).unwrap();
+            world.element_fields[tile.index()][Element::A] = amount;
+        }
+        let tile = world.tile_id(1, 1).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        let position = Position::new(1.5, 1.5);
+        let before = world.element_field_totals()[Element::A.index()];
+
+        let transferred = world.uptake_elements(cell_id, position);
+
+        let after = world.element_field_totals()[Element::A.index()];
+        assert!(transferred > 0.0);
+        assert!((before - after - f64::from(transferred)).abs() <= 1.0e-6);
+        assert!(world.element_fields.iter().all(|amounts| {
+            ELEMENT_ORDER
+                .iter()
+                .all(|element| amounts[*element].is_finite() && amounts[*element] >= 0.0)
+        }));
+    }
+
+    #[test]
+    fn fractional_enval_sampling_average_and_scatter_preserve_locality() {
+        let mut world = World::new(only_a_config("fractional-enval", 6, 6)).unwrap();
+        world.set_all_enval(0.0).unwrap();
+        world
+            .set_tile_enval(world.tile_id(1, 1).unwrap(), 4.0)
+            .unwrap();
+        assert!((world.sample_enval_at(Position::new(1.5, 1.5)).unwrap() - 1.0).abs() <= 1.0e-6);
+
+        let position = Position::new(1.5, 1.5);
+        let manual = (-2..=2)
+            .flat_map(|dx| (-2..=2).map(move |dy| (dx, dy)))
+            .map(|(dx, dy)| {
+                world
+                    .sample_enval_at(Position::new(
+                        position.x + dx as f32,
+                        position.y + dy as f32,
+                    ))
+                    .unwrap()
+            })
+            .sum::<f32>()
+            / 25.0;
+        assert!((world.local_enval_average_at(position, 2).unwrap() - manual).abs() <= 1.0e-6);
+
+        let before_sum = world.enval_sum;
+        world.adjust_enval_at(position, 2.0).unwrap();
+        assert!((world.enval_sum - before_sum - 2.0).abs() <= 1.0e-6);
+        for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
+            assert!(world.tile_enval(world.tile_id(x, y).unwrap()).unwrap() >= 0.5);
+        }
+    }
+
+    #[test]
+    fn continuous_enval_output_uses_exactly_one_offset_rng_draw() {
+        let mut world = World::new(only_a_config("continuous-output-rng", 5, 5)).unwrap();
+        world.set_all_enval(0.0).unwrap();
+        let mut expected_rng = world.rng.clone();
+        let _ = expected_rng.usize(9);
+
+        world
+            .add_enval_around(Position::new(1.25, 3.75), 1.0)
+            .unwrap();
+
+        assert_eq!(
+            world.rng.next_f64().to_bits(),
+            expected_rng.next_f64().to_bits()
+        );
+        assert!((world.enval_sum - 1.0).abs() <= 1.0e-6);
     }
 
     #[test]
@@ -3085,9 +3502,8 @@ mod tests {
         assert_eq!(logs.fluxes.len(), 2);
         let record = &logs.fluxes[0];
         assert_eq!(record.cell_id, cell_id.index());
-        assert_eq!(record.tile_id, tile.index());
-        assert_eq!(record.x, 1);
-        assert_eq!(record.y, 1);
+        assert_eq!(record.x, 1.0);
+        assert_eq!(record.y, 1.0);
         assert_eq!(record.catalyst_index, 0);
         assert_eq!(record.catalyst_type, "metabolic");
         assert!(record.executed_extent > 0.0);
@@ -3307,6 +3723,60 @@ mod tests {
     }
 
     #[test]
+    fn genome_brush_patches_every_unique_center_in_the_same_tile() {
+        let mut world = World::new(only_a_config("genome-brush-multi-center", 5, 5)).unwrap();
+        let first_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let first = world
+            .spawn_cell_with_genome_at_position(Position::new(1.02, 1.02), first_genome)
+            .unwrap();
+        let second_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let second = world
+            .spawn_cell_with_genome_at_position(Position::new(1.75, 1.75), second_genome)
+            .unwrap();
+        let patch = GenomePatch {
+            schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
+            genome: Some(GenomeFieldPatch {
+                decay_time: Some(4444.0),
+                ..GenomeFieldPatch::default()
+            }),
+            enzymes: Vec::new(),
+        };
+
+        let result = world.apply_genome_brush(1, 1, 1, 1, &patch).unwrap();
+
+        assert_eq!(result.visited_tile_count, 1);
+        assert_eq!(result.patched_cell_count, 2);
+        assert_eq!(world.cells[first.index()].genome.decay_time, 4444.0);
+        assert_eq!(world.cells[second.index()].genome.decay_time, 4444.0);
+        assert_eq!(world.inspect_tile_xy(1, 1).unwrap().cell_center_count, 2);
+    }
+
+    #[test]
+    fn geometric_pick_uses_toroidal_containment_nearest_center_and_id_tie_break() {
+        let mut world = World::new(only_a_config("geometric-pick", 10, 8)).unwrap();
+        let first_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let first = world
+            .spawn_cell_with_genome_at_position(Position::new(1.0, 2.0), first_genome)
+            .unwrap();
+        let second_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let second = world
+            .spawn_cell_with_genome_at_position(Position::new(1.9, 2.0), second_genome)
+            .unwrap();
+
+        assert_eq!(world.pick_cell(Position::new(1.1, 2.0)), Some(first));
+        assert_eq!(world.pick_cell(Position::new(1.8, 2.0)), Some(second));
+        world.cells[second.index()].position = Position::new(1.875, 2.0);
+        world.rebuild_spatial_index();
+        assert_eq!(world.pick_cell(Position::new(1.4375, 2.0)), Some(first));
+        assert_eq!(world.pick_cell(Position::new(5.0, 5.0)), None);
+
+        world.cells[first.index()].position = Position::new(0.1, 4.0);
+        world.cells[second.index()].position = Position::new(5.0, 4.0);
+        world.rebuild_spatial_index();
+        assert_eq!(world.pick_cell(Position::new(9.9, 4.0)), Some(first));
+    }
+
+    #[test]
     fn enval_coupling_changes_field() {
         let mut world = World::new(only_a_config("enval-coupling", 4, 4)).unwrap();
         let before = world.average_enval();
@@ -3369,10 +3839,23 @@ mod tests {
             world.cells[child_id.index()].genome,
             world.cells[cell_id.index()].genome
         );
-        let child_tile = world.cells[child_id.index()].tile_id.unwrap();
-        let (child_x, child_y) = world.tile_xy(child_tile).unwrap();
-        assert!((1..=5).contains(&child_x));
-        assert!((1..=5).contains(&child_y));
+        let child_position = world.cells[child_id.index()].position;
+        let displacement = minimum_image_displacement(
+            world.cells[cell_id.index()].position,
+            child_position,
+            world.width as f32,
+            world.height as f32,
+        );
+        assert!(displacement.x.abs() <= 2.0);
+        assert!(displacement.y.abs() <= 2.0);
+        assert!(
+            toroidal_distance_squared(
+                world.cells[cell_id.index()].position,
+                child_position,
+                world.width as f32,
+                world.height as f32,
+            ) >= (DEFAULT_CELL_RADIUS * 2.0 - GEOMETRY_TOLERANCE).powi(2)
+        );
         for active_cell in world.active_cells.iter().copied() {
             assert_valid_reservoir(&world, active_cell);
         }
@@ -3538,8 +4021,8 @@ mod tests {
         let counters = world.operation_counters();
         assert_eq!(world.cells[predator.index()].state, CellState::Active);
         assert_eq!(world.cells[prey.index()].state, CellState::Dead);
-        assert_eq!(counters.predation_occupied_tiles_considered, 2);
-        assert_eq!(counters.predation_candidate_neighbor_pairs, 8);
+        assert_eq!(counters.predation_cells_considered, 2);
+        assert_eq!(counters.predation_candidate_pairs, 1);
         assert_eq!(counters.predation_pairs_checked, 1);
         assert_eq!(counters.predation_cross_lineage_pairs, 1);
         assert_eq!(counters.predation_events, 1);
@@ -3576,7 +4059,7 @@ mod tests {
         let counters = world.operation_counters();
         assert_eq!(world.cells[predator.index()].state, CellState::Active);
         assert_eq!(world.cells[prey.index()].state, CellState::Dead);
-        assert_eq!(counters.predation_candidate_neighbor_pairs, 1);
+        assert_eq!(counters.predation_candidate_pairs, 1);
         assert_eq!(counters.predation_pairs_checked, 1);
         assert_eq!(counters.predation_cross_lineage_pairs, 1);
         assert_eq!(counters.predation_events, 1);
@@ -3684,19 +4167,47 @@ mod tests {
         world.spawn_founder_cells(5).unwrap();
         let before = world.build_render_buffers();
         assert_eq!(before.tile_enval.len(), 48);
-        assert_eq!(before.tile_occupancy.len(), 48);
+        assert_eq!(before.tile_cell_count.len(), 48);
         assert_eq!(before.tile_mass_density.len(), 48);
         assert_eq!(before.tile_total_elements.len(), 48);
         assert_eq!(before.tile_element_concentrations.len(), 48 * ELEMENT_COUNT);
         assert_eq!(before.cell_count(), world.stats().live_cell_count);
+        assert_eq!(before.cell_point_data.len(), before.cell_count() * 4);
+        assert_eq!(before.cell_rotation_data.len(), before.cell_count() * 4);
+        assert_eq!(before.cell_scale_data.len(), before.cell_count() * 4);
+        assert_eq!(before.cell_rgba.len(), before.cell_count() * 4);
+        assert_eq!(before.cell_radius.len(), before.cell_count());
         assert!(before.tile_enval.iter().all(|value| value.is_finite()));
         assert!(before.cell_energy.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            before
+                .tile_cell_count
+                .iter()
+                .map(|count| *count as usize)
+                .sum::<usize>(),
+            before.cell_count()
+        );
         assert!(
             before
-                .tile_occupancy
+                .cell_radius
                 .iter()
-                .any(|value| *value != crate::EMPTY_CELL_ID)
+                .all(|radius| *radius == DEFAULT_CELL_RADIUS)
         );
+        assert!(
+            before
+                .cell_rotation_data
+                .chunks_exact(4)
+                .all(|rotation| rotation == [0.0, 0.0, 0.0, 1.0])
+        );
+        assert!(before.cell_scale_data.chunks_exact(4).all(|scale| {
+            scale
+                == [
+                    DEFAULT_CELL_RADIUS,
+                    DEFAULT_CELL_RADIUS,
+                    DEFAULT_CELL_RADIUS,
+                    0.0,
+                ]
+        }));
 
         world.step_many(5);
         let after = world.build_render_buffers();
@@ -3717,14 +4228,14 @@ mod tests {
         assert_eq!(tile_info.tile_id, tile);
         assert_eq!(tile_info.x, 2);
         assert_eq!(tile_info.y, 1);
-        assert_eq!(tile_info.cell, Some(cell_id));
+        assert_eq!(tile_info.cell_center_count, 1);
         assert!(tile_info.enval.is_finite());
 
         let cell_info = world.inspect_cell(cell_id).unwrap();
         assert_eq!(cell_info.cell_id, cell_id);
-        assert_eq!(cell_info.tile_id, tile);
-        assert_eq!(cell_info.x, 2);
-        assert_eq!(cell_info.y, 1);
+        assert_eq!(cell_info.x, 2.0);
+        assert_eq!(cell_info.y, 1.0);
+        assert_eq!(cell_info.radius, DEFAULT_CELL_RADIUS);
         assert!(cell_info.energy.is_finite());
     }
 
@@ -3761,11 +4272,23 @@ mod tests {
         let expected = world.build_render_buffers();
         let mut actual = RenderBuffers::default();
         actual.tile_enval.reserve(128);
+        actual.cell_point_data.reserve(128);
+        actual.cell_rotation_data.reserve(128);
+        actual.cell_scale_data.reserve(128);
+        actual.cell_rgba.reserve(128);
         let reserved_tile_capacity = actual.tile_enval.capacity();
+        let reserved_point_capacity = actual.cell_point_data.capacity();
+        let reserved_rotation_capacity = actual.cell_rotation_data.capacity();
+        let reserved_scale_capacity = actual.cell_scale_data.capacity();
+        let reserved_color_capacity = actual.cell_rgba.capacity();
         world.write_render_buffers(&mut actual);
 
         assert_eq!(actual, expected);
         assert!(actual.tile_enval.capacity() >= reserved_tile_capacity);
+        assert!(actual.cell_point_data.capacity() >= reserved_point_capacity);
+        assert!(actual.cell_rotation_data.capacity() >= reserved_rotation_capacity);
+        assert!(actual.cell_scale_data.capacity() >= reserved_scale_capacity);
+        assert!(actual.cell_rgba.capacity() >= reserved_color_capacity);
     }
 
     #[test]
@@ -3906,5 +4429,361 @@ mod tests {
             world.operation_counters().cell_steps
         );
         world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn continuous_founders_are_canonical_non_overlapping_and_seed_deterministic() {
+        let mut first = World::new(only_a_config("continuous-founders", 12, 9)).unwrap();
+        let mut second = World::new(only_a_config("continuous-founders", 12, 9)).unwrap();
+        assert_eq!(first.spawn_founder_cells(20).unwrap(), 20);
+        assert_eq!(second.spawn_founder_cells(20).unwrap(), 20);
+        let positions = |world: &World| {
+            world
+                .active_cells
+                .iter()
+                .map(|cell_id| world.cells[cell_id.index()].position)
+                .collect::<Vec<_>>()
+        };
+        let first_positions = positions(&first);
+        assert_eq!(first_positions, positions(&second));
+        assert!(first_positions.iter().all(|position| {
+            position.is_finite()
+                && position.x >= 0.0
+                && position.x < first.width as f32
+                && position.y >= 0.0
+                && position.y < first.height as f32
+        }));
+        for left in 0..first_positions.len() {
+            for right in left + 1..first_positions.len() {
+                assert!(
+                    toroidal_distance_squared(
+                        first_positions[left],
+                        first_positions[right],
+                        first.width as f32,
+                        first.height as f32,
+                    ) >= (DEFAULT_CELL_RADIUS * 2.0 - GEOMETRY_TOLERANCE).powi(2)
+                );
+            }
+        }
+        first.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn newborns_do_not_receive_a_cell_step_during_their_birth_phase() {
+        let mut world = World::new(only_a_config("newborn-waits", 8, 8)).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        genome.enzymes = vec![Enzyme::defensase(1)];
+        genome.initial_energy = 10.0;
+        genome.repro_threshold = 5.0;
+        genome.post_divide_mortality = 0.0;
+        genome.maintenance_cost_per_sec = 0.0;
+        genome.decay_time = 1_000_000.0;
+        genome.optimal_enval = world.avg_enval;
+        let parent = world
+            .spawn_cell_with_genome_at_position(Position::new(4.0, 4.0), genome)
+            .unwrap();
+        let before_steps = world.operation_counters.cell_steps;
+        world.step_cells();
+        assert_eq!(world.active_cells.len(), 2);
+        assert_eq!(world.operation_counters.cell_steps - before_steps, 1);
+        let child = world
+            .active_cells
+            .iter()
+            .copied()
+            .find(|cell_id| *cell_id != parent)
+            .unwrap();
+        assert_eq!(world.cells[child.index()].time_without_food, 0.0);
+        assert!(world.cells[child.index()].recent_fluxes.is_empty());
+    }
+
+    #[test]
+    fn cell_phase_snapshot_reuses_its_allocation() {
+        let mut world = World::new(only_a_config("cell-phase-scratch", 8, 8)).unwrap();
+        for position in [
+            Position::new(1.0, 1.0),
+            Position::new(3.0, 1.0),
+            Position::new(1.0, 3.0),
+            Position::new(3.0, 3.0),
+        ] {
+            let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+            genome.enzymes = vec![Enzyme::defensase(1)];
+            genome.initial_energy = 10.0;
+            genome.repro_threshold = 1_000_000.0;
+            genome.maintenance_cost_per_sec = 0.0;
+            genome.decay_time = 1_000_000.0;
+            genome.optimal_enval = world.avg_enval;
+            world
+                .spawn_cell_with_genome_at_position(position, genome)
+                .unwrap();
+        }
+
+        world.step_cells();
+        let scratch_ptr = world.cell_phase_scratch.as_ptr();
+        let scratch_capacity = world.cell_phase_scratch.capacity();
+        world.step_cells();
+
+        assert_eq!(world.cell_phase_scratch.as_ptr(), scratch_ptr);
+        assert_eq!(world.cell_phase_scratch.capacity(), scratch_capacity);
+        assert_eq!(world.cell_phase_scratch, world.active_cells);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn failed_continuous_division_rolls_back_energy_and_elements() {
+        let mut world = World::new(only_a_config("division-rollback", 1, 1)).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        genome.maintenance_cost_per_sec = 0.0;
+        genome.post_divide_mortality = 0.0;
+        let parent = world
+            .spawn_cell_with_genome_at_position(Position::new(0.5, 0.5), genome)
+            .unwrap();
+        world.cells[parent.index()].energy = 20.0;
+        world.cells[parent.index()].internal_elements =
+            ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let energy_before = world.cells[parent.index()].energy;
+        let elements_before = world.cells[parent.index()].internal_elements;
+        world.divide_cell(parent, world.avg_enval);
+        assert_eq!(world.active_cells, vec![parent]);
+        assert!((world.cells[parent.index()].energy - energy_before).abs() <= 1.0e-12);
+        for element in ELEMENT_ORDER {
+            assert!(
+                (world.cells[parent.index()].internal_elements[element] - elements_before[element])
+                    .abs()
+                    <= 1.0e-6
+            );
+        }
+        assert_eq!(world.reaction_counters.divisions, 0);
+    }
+
+    #[test]
+    fn continuous_division_wraps_across_seams_and_retains_post_divide_mortality() {
+        let mut saw_wrapped_child = false;
+        for attempt in 0..64 {
+            let mut world =
+                World::new(only_a_config(&format!("division-seam-{attempt}"), 8, 8)).unwrap();
+            let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+            genome.enzymes = vec![Enzyme::defensase(1)];
+            genome.initial_energy = 20.0;
+            genome.repro_threshold = 1.0;
+            genome.mutation_rate = 0.0;
+            genome.post_divide_mortality = 1.0;
+            genome.maintenance_cost_per_sec = 0.0;
+            genome.decay_time = 1_000_000.0;
+            let parent = world
+                .spawn_cell_with_genome_at_position(Position::new(0.05, 0.05), genome)
+                .unwrap();
+
+            world.divide_cell(parent, world.avg_enval);
+            if world.reaction_counters.divisions == 0 {
+                continue;
+            }
+
+            let child = world
+                .active_cells
+                .iter()
+                .copied()
+                .find(|id| *id != parent)
+                .unwrap();
+            let child_position = world.cells[child.index()].position;
+            assert_eq!(world.cells[parent.index()].state, CellState::Dead);
+            assert_eq!(world.cells[child.index()].state, CellState::Active);
+            assert_eq!(world.stats().live_cell_count, 1);
+            assert_eq!(world.stats().deaths, 1);
+            assert!(child_position.x >= 0.0 && child_position.x < world.width as f32);
+            assert!(child_position.y >= 0.0 && child_position.y < world.height as f32);
+            world.check_invariants().unwrap();
+
+            if child_position.x > world.width as f32 - 2.0
+                || child_position.y > world.height as f32 - 2.0
+            {
+                saw_wrapped_child = true;
+                break;
+            }
+        }
+        assert!(saw_wrapped_child);
+    }
+
+    #[test]
+    fn fractional_position_death_release_is_conservative() {
+        let mut world = World::new(only_a_config("fractional-death", 5, 5)).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let position = Position::new(1.25, 2.75);
+        let cell_id = world
+            .spawn_cell_with_genome_at_position(position, genome)
+            .unwrap();
+        assert_eq!(world.pick_cell(position), Some(cell_id));
+        world.cells[cell_id.index()].internal_elements =
+            ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let before = world.element_field_totals();
+        world.kill_cell_and_release(cell_id);
+        assert_eq!(world.pick_cell(position), None);
+        assert_eq!(world.spatial_index.len(), 0);
+        let after = world.element_field_totals();
+        for element in ELEMENT_ORDER {
+            assert!(
+                (after[element.index()] - before[element.index()] - (element.index() + 1) as f64)
+                    .abs()
+                    <= 1.0e-5
+            );
+        }
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn failed_death_deposition_preserves_the_intracellular_reservoir() {
+        let mut world = World::new(only_a_config("invalid-death-release", 5, 5)).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let cell_id = world
+            .spawn_cell_with_genome_at_position(Position::new(1.25, 2.75), genome)
+            .unwrap();
+        let reservoir = ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        world.cells[cell_id.index()].internal_elements = reservoir;
+        world.cells[cell_id.index()].position = Position::new(f32::NAN, 2.75);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.kill_cell_and_release(cell_id);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(world.cells[cell_id.index()].internal_elements, reservoir);
+        assert_eq!(world.cells[cell_id.index()].state, CellState::Active);
+    }
+
+    #[test]
+    fn spatial_and_tile_caches_update_incrementally_for_cell_lifecycle() {
+        let mut world = World::new(only_a_config("incremental-derived-caches", 6, 6)).unwrap();
+        let first_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let first = world
+            .spawn_cell_with_genome_at_position(Position::new(1.02, 1.02), first_genome)
+            .unwrap();
+        let second_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let second = world
+            .spawn_cell_with_genome_at_position(Position::new(1.75, 1.75), second_genome)
+            .unwrap();
+
+        assert_eq!(world.inspect_tile_xy(1, 1).unwrap().cell_center_count, 2);
+        assert_eq!(world.stats().occupied_tile_count, 1);
+
+        world.update_cell_position(second, Position::new(3.25, 3.25));
+        assert_eq!(world.inspect_tile_xy(1, 1).unwrap().cell_center_count, 1);
+        assert_eq!(world.inspect_tile_xy(3, 3).unwrap().cell_center_count, 1);
+        assert_eq!(world.stats().occupied_tile_count, 2);
+
+        world.kill_cell_and_release(first);
+        assert_eq!(world.inspect_tile_xy(1, 1).unwrap().cell_center_count, 0);
+        assert_eq!(world.inspect_tile_xy(3, 3).unwrap().cell_center_count, 1);
+        assert_eq!(world.stats().occupied_tile_count, 1);
+        assert_eq!(
+            world
+                .spatial_index
+                .query_radius(Position::new(3.25, 3.25), 0.01),
+            vec![second]
+        );
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn continuous_predation_honors_range_outside_and_toroidal_seam() {
+        let make_pair = |seed: &str, prey_position: Position| {
+            let mut world = World::new(only_a_config(seed, 10, 8)).unwrap();
+            let predator_genome = combat_genome(&mut world, 1, 10, 0, 5.0);
+            let prey_genome = combat_genome(&mut world, 2, 0, 0, 5.0);
+            let predator = world
+                .spawn_cell_with_genome_at_position(Position::new(0.2, 2.0), predator_genome)
+                .unwrap();
+            let prey = world
+                .spawn_cell_with_genome_at_position(prey_position, prey_genome)
+                .unwrap();
+            (world, predator, prey)
+        };
+        let (mut inside, _, inside_prey) = make_pair("predation-inside", Position::new(1.60, 2.0));
+        inside.resolve_predation();
+        assert_eq!(inside.cells[inside_prey.index()].state, CellState::Dead);
+        let (mut outside, _, outside_prey) =
+            make_pair("predation-outside", Position::new(1.63, 2.0));
+        outside.resolve_predation();
+        assert_eq!(outside.cells[outside_prey.index()].state, CellState::Active);
+        let (mut seam, _, seam_prey) = make_pair("predation-seam", Position::new(9.0, 2.0));
+        seam.resolve_predation();
+        assert_eq!(seam.cells[seam_prey.index()].state, CellState::Dead);
+    }
+
+    #[test]
+    fn overlap_mechanics_are_symmetric_wrapped_and_do_not_consume_rng() {
+        let mut world = World::new(only_a_config("overlap-mechanics", 10, 8)).unwrap();
+        let first_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let first = world
+            .spawn_cell_with_genome_at_position(Position::new(0.1, 2.0), first_genome)
+            .unwrap();
+        let second_genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let second = world
+            .spawn_cell_with_genome_at_position(Position::new(1.1, 2.0), second_genome)
+            .unwrap();
+        world.cells[second.index()].position = Position::new(9.8, 2.0);
+        world.rebuild_spatial_index();
+        let before = toroidal_distance_squared(
+            world.cells[first.index()].position,
+            world.cells[second.index()].position,
+            world.width as f32,
+            world.height as f32,
+        );
+        let first_before = world.cells[first.index()].position;
+        let second_before = world.cells[second.index()].position;
+        let mut expected_rng = world.rng.clone();
+        world.resolve_overlaps();
+        let first_movement = minimum_image_displacement(
+            first_before,
+            world.cells[first.index()].position,
+            world.width as f32,
+            world.height as f32,
+        );
+        let second_movement = minimum_image_displacement(
+            second_before,
+            world.cells[second.index()].position,
+            world.width as f32,
+            world.height as f32,
+        );
+        let after = toroidal_distance_squared(
+            world.cells[first.index()].position,
+            world.cells[second.index()].position,
+            world.width as f32,
+            world.height as f32,
+        );
+        assert!(after > before);
+        assert!((first_movement.x + second_movement.x).abs() <= 1.0e-6);
+        assert!((first_movement.y + second_movement.y).abs() <= 1.0e-6);
+        for cell_id in [first, second] {
+            let position = world.cells[cell_id.index()].position;
+            assert!(position.x >= 0.0 && position.x < world.width as f32);
+            assert!(position.y >= 0.0 && position.y < world.height as f32);
+        }
+        assert_eq!(
+            world.rng.next_f64().to_bits(),
+            expected_rng.next_f64().to_bits()
+        );
+        world.cells[first.index()].position = Position::new(4.0, 4.0);
+        world.cells[second.index()].position = Position::new(4.0, 4.0);
+        world.rebuild_spatial_index();
+        let mut replay = world.clone();
+        world.resolve_overlaps();
+        replay.resolve_overlaps();
+        assert_eq!(
+            world.cells[first.index()].position,
+            replay.cells[first.index()].position
+        );
+        assert_eq!(
+            world.cells[second.index()].position,
+            replay.cells[second.index()].position
+        );
+        assert!(
+            toroidal_distance_squared(
+                world.cells[first.index()].position,
+                world.cells[second.index()].position,
+                world.width as f32,
+                world.height as f32,
+            ) > 0.0
+        );
+        world.check_invariants().unwrap();
+        replay.check_invariants().unwrap();
     }
 }

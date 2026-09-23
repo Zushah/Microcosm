@@ -2,8 +2,8 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, ElementFieldConfig, GenomePatch, LineageId, RenderBrushPreview, RenderBuffers,
-    RenderDisplayMode, RenderVisualState, VERSION, World, WorldStats,
+    CellId, Config, ElementFieldConfig, GenomePatch, LineageId, Position, RenderBrushPreview,
+    RenderBuffers, RenderDisplayMode, RenderVisualState, VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -107,6 +107,11 @@ pub struct WasmStats {
     pub cell_steps: u64,
     pub enzyme_entries_seen: u64,
     pub metabolic_enzyme_attempts: u64,
+    pub predation_cells_considered: u64,
+    pub predation_candidate_pairs: u64,
+    pub spatial_candidate_checks: u64,
+    pub overlap_candidates: u64,
+    pub overlap_corrections: u64,
     pub render_epoch: u32,
 }
 
@@ -190,6 +195,11 @@ impl From<&WorldStats> for WasmStats {
             cell_steps: stats.operation_counters.cell_steps,
             enzyme_entries_seen: stats.operation_counters.enzyme_entries_seen,
             metabolic_enzyme_attempts: stats.operation_counters.metabolic_enzyme_attempts,
+            predation_cells_considered: stats.operation_counters.predation_cells_considered,
+            predation_candidate_pairs: stats.operation_counters.predation_candidate_pairs,
+            spatial_candidate_checks: stats.operation_counters.spatial_candidate_checks,
+            overlap_candidates: stats.operation_counters.overlap_candidates,
+            overlap_corrections: stats.operation_counters.overlap_corrections,
             render_epoch: (stats.tick_count & u64::from(u32::MAX)) as u32,
         }
     }
@@ -718,8 +728,7 @@ pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
                     "x": info.x,
                     "y": info.y,
                     "enval": info.enval,
-                    "cell_id": info.cell.map(|cell_id| cell_id.index()),
-                    "occupied": info.cell.is_some(),
+                    "cell_center_count": info.cell_center_count,
                     "element_concentrations": {
                         "A": info.element_concentrations[0],
                         "B": info.element_concentrations[1],
@@ -756,9 +765,9 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                 json!({
                     "kind": "cell",
                     "cell_id": info.cell_id.index(),
-                    "tile_id": info.tile_id.index(),
                     "x": info.x,
                     "y": info.y,
+                    "radius": info.radius,
                     "energy": info.energy,
                     "lineage_id": info.lineage_id.raw(),
                     "enzyme_count": info.enzyme_count,
@@ -770,6 +779,39 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "local_enval_average": info.local_enval_average,
                     "repro_threshold": info.repro_threshold,
                     "decay_time": info.decay_time
+                }),
+            )
+        }
+        Err(err) => err,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_pick_cell(handle: u32, x: f32, y: f32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            if !x.is_finite() || !y.is_finite() {
+                return set_runtime_error(
+                    &mut runtime,
+                    STATUS_CONFIG_ERROR,
+                    format!("cell pick position must be finite, got ({x}, {y})"),
+                );
+            }
+            let cell_id = instance
+                .world
+                .pick_cell(Position::new(x, y))
+                .map(CellId::index);
+            set_query_result(
+                &mut runtime,
+                json!({
+                    "schema": "microcosm.cell_pick.v1",
+                    "kind": "cell_pick",
+                    "x": x,
+                    "y": y,
+                    "cell_id": cell_id
                 }),
             )
         }
@@ -1147,7 +1189,7 @@ macro_rules! ptr_fn {
 }
 
 ptr_fn!(microcosm_tile_enval_ptr, tile_enval, f32);
-ptr_fn!(microcosm_tile_occupancy_ptr, tile_occupancy, u32);
+ptr_fn!(microcosm_tile_cell_count_ptr, tile_cell_count, u32);
 ptr_fn!(microcosm_tile_mass_density_ptr, tile_mass_density, f32);
 ptr_fn!(microcosm_tile_total_elements_ptr, tile_total_elements, f32);
 ptr_fn!(
@@ -1182,8 +1224,55 @@ pub extern "C" fn microcosm_lattice_rgba_len(handle: u32) -> u32 {
 }
 
 ptr_fn!(microcosm_cell_id_ptr, cell_id, u32);
-ptr_fn!(microcosm_cell_x_ptr, cell_x, u32);
-ptr_fn!(microcosm_cell_y_ptr, cell_y, u32);
+ptr_fn!(microcosm_cell_point_data_ptr, cell_point_data, f32);
+ptr_fn!(microcosm_cell_rotation_data_ptr, cell_rotation_data, f32);
+ptr_fn!(microcosm_cell_scale_data_ptr, cell_scale_data, f32);
+ptr_fn!(microcosm_cell_rgba_ptr, cell_rgba, f32);
+ptr_fn!(microcosm_cell_radius_ptr, cell_radius, f32);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_cell_point_data_len(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(runtime) => runtime
+            .instance(handle)
+            .map(|instance| clamp_usize_to_u32(instance.render_buffers.cell_point_data.len()))
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_cell_rotation_data_len(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(runtime) => runtime
+            .instance(handle)
+            .map(|instance| clamp_usize_to_u32(instance.render_buffers.cell_rotation_data.len()))
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_cell_scale_data_len(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(runtime) => runtime
+            .instance(handle)
+            .map(|instance| clamp_usize_to_u32(instance.render_buffers.cell_scale_data.len()))
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_cell_rgba_len(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(runtime) => runtime
+            .instance(handle)
+            .map(|instance| clamp_usize_to_u32(instance.render_buffers.cell_rgba.len()))
+            .unwrap_or(0),
+        Err(_) => 0,
+    }
+}
 ptr_fn!(microcosm_cell_energy_ptr, cell_energy, f32);
 ptr_fn!(microcosm_cell_lineage_ptr, cell_lineage, u32);
 ptr_fn!(microcosm_cell_flags_ptr, cell_flags, u32);
@@ -1237,8 +1326,18 @@ mod tests {
         assert_eq!(microcosm_cell_count(handle), 4);
         assert!(!microcosm_stats_ptr(handle).is_null());
         assert!(!microcosm_tile_enval_ptr(handle).is_null());
+        assert!(!microcosm_tile_cell_count_ptr(handle).is_null());
         assert!(!microcosm_lattice_rgba_ptr(handle).is_null());
         assert_eq!(microcosm_lattice_rgba_len(handle), 48 * 4);
+        assert_eq!(microcosm_cell_point_data_len(handle), 4 * 4);
+        assert_eq!(microcosm_cell_rotation_data_len(handle), 4 * 4);
+        assert_eq!(microcosm_cell_scale_data_len(handle), 4 * 4);
+        assert_eq!(microcosm_cell_rgba_len(handle), 4 * 4);
+        assert!(!microcosm_cell_point_data_ptr(handle).is_null());
+        assert!(!microcosm_cell_rotation_data_ptr(handle).is_null());
+        assert!(!microcosm_cell_scale_data_ptr(handle).is_null());
+        assert!(!microcosm_cell_rgba_ptr(handle).is_null());
+        assert!(!microcosm_cell_radius_ptr(handle).is_null());
         assert_eq!(
             microcosm_set_render_visual_state(
                 handle,
@@ -1257,16 +1356,17 @@ mod tests {
             ),
             STATUS_OK
         );
-        let lattice_rgba = unsafe {
+        let cell_rgba = unsafe {
             std::slice::from_raw_parts(
-                microcosm_lattice_rgba_ptr(handle),
-                microcosm_lattice_rgba_len(handle) as usize,
+                microcosm_cell_rgba_ptr(handle),
+                microcosm_cell_rgba_len(handle) as usize,
             )
         };
         assert!(
-            lattice_rgba
-                .chunks_exact(4)
-                .any(|color| color == [1.0, 0.93, 0.30, 1.0])
+            cell_rgba.chunks_exact(4).any(|color| color[0] == 1.0
+                && color[1] > 0.8
+                && color[2] < 0.1
+                && color[3] == 1.0)
         );
         assert_eq!(microcosm_step(handle, 5), STATUS_OK);
         assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
@@ -1349,7 +1449,18 @@ mod tests {
             STATUS_OK
         );
         assert_eq!(microcosm_inspect_cell(handle, 0), STATUS_OK);
-        assert!(microcosm_query_result_len() > 0);
+        let cell = query_json();
+        assert!(cell["radius"].as_f64().unwrap() > 0.0);
+        assert!(cell.get("tile_id").is_none());
+        assert_eq!(
+            microcosm_pick_cell(
+                handle,
+                cell["x"].as_f64().unwrap() as f32,
+                cell["y"].as_f64().unwrap() as f32,
+            ),
+            STATUS_OK
+        );
+        assert_eq!(query_json()["cell_id"], 0);
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 

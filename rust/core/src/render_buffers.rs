@@ -1,5 +1,3 @@
-pub const EMPTY_CELL_ID: u32 = u32::MAX;
-
 const TILE_NEUTRAL_RGB255: [f64; 3] = [246.0, 246.0, 246.0];
 const TILE_ELEMENT_RGB255: [[f64; 3]; 6] = [
     [66.0, 179.0, 89.0],
@@ -83,7 +81,7 @@ pub struct RenderBuffers {
     pub render_epoch: u32,
 
     pub tile_enval: Vec<f32>,
-    pub tile_occupancy: Vec<u32>,
+    pub tile_cell_count: Vec<u32>,
     pub tile_mass_density: Vec<f32>,
     pub tile_total_elements: Vec<f32>,
     /// Packed by tile, then element: `[tile0_A, ..., tile0_F, tile1_A, ...]`.
@@ -92,8 +90,15 @@ pub struct RenderBuffers {
     pub lattice_rgba: Vec<f32>,
 
     pub cell_id: Vec<u32>,
-    pub cell_x: Vec<u32>,
-    pub cell_y: Vec<u32>,
+    /// Packed glyph positions in scene space: `[x, y, z, _]`.
+    pub cell_point_data: Vec<f32>,
+    /// Packed identity quaternions: `[qx, qy, qz, qw]`.
+    pub cell_rotation_data: Vec<f32>,
+    /// Packed ellipsoid scales in world units: `[rx, ry, rz, _]`.
+    pub cell_scale_data: Vec<f32>,
+    /// Packed linear RGBA colors aligned with `cell_point_data`.
+    pub cell_rgba: Vec<f32>,
+    pub cell_radius: Vec<f32>,
     pub cell_energy: Vec<f32>,
     pub cell_lineage: Vec<u32>,
     pub cell_flags: Vec<u32>,
@@ -119,14 +124,17 @@ impl RenderBuffers {
         self.sim_time_seconds = 0.0;
         self.render_epoch = 0;
         self.tile_enval.clear();
-        self.tile_occupancy.clear();
+        self.tile_cell_count.clear();
         self.tile_mass_density.clear();
         self.tile_total_elements.clear();
         self.tile_element_concentrations.clear();
         self.lattice_rgba.clear();
         self.cell_id.clear();
-        self.cell_x.clear();
-        self.cell_y.clear();
+        self.cell_point_data.clear();
+        self.cell_rotation_data.clear();
+        self.cell_scale_data.clear();
+        self.cell_rgba.clear();
+        self.cell_radius.clear();
         self.cell_energy.clear();
         self.cell_lineage.clear();
         self.cell_flags.clear();
@@ -149,7 +157,7 @@ impl RenderBuffers {
         let height = self.height as usize;
 
         debug_assert_eq!(tile_count, width.saturating_mul(height));
-        debug_assert_eq!(self.tile_occupancy.len(), tile_count);
+        debug_assert_eq!(self.tile_cell_count.len(), tile_count);
         debug_assert_eq!(self.tile_mass_density.len(), tile_count);
         debug_assert_eq!(self.tile_total_elements.len(), tile_count);
         debug_assert_eq!(
@@ -187,19 +195,10 @@ impl RenderBuffers {
             }
         }
 
-        debug_assert_eq!(self.cell_x.len(), self.cell_count());
-        debug_assert_eq!(self.cell_y.len(), self.cell_count());
+        self.cell_rgba.clear();
+        self.cell_rgba.reserve(self.cell_count().saturating_mul(4));
         debug_assert_eq!(self.cell_lineage.len(), self.cell_count());
         for cell_index in 0..self.cell_count() {
-            let x = self.cell_x[cell_index] as usize;
-            let y = self.cell_y[cell_index] as usize;
-            if x >= width || y >= height {
-                continue;
-            }
-            let tile_index = x * height + y;
-            if tile_index >= tile_count {
-                continue;
-            }
             let id = self.cell_id[cell_index];
             let lineage = self.cell_lineage[cell_index];
             let cell_color = if visual.selected_cell == Some(id) {
@@ -215,18 +214,12 @@ impl RenderBuffers {
             } else {
                 0.20
             };
-            let offset = tile_index * 4;
-            if alpha >= 1.0 {
-                self.lattice_rgba[offset..offset + 3].copy_from_slice(&cell_color);
-            } else {
-                for (component, cell_component) in cell_color.iter().copied().enumerate() {
-                    let tile_linear = srgb_to_linear(self.lattice_rgba[offset + component]);
-                    let cell_linear = srgb_to_linear(cell_component);
-                    self.lattice_rgba[offset + component] =
-                        linear_to_srgb(tile_linear + (cell_linear - tile_linear) * alpha);
-                }
-            }
-            self.lattice_rgba[offset + 3] = 1.0;
+            self.cell_rgba.extend_from_slice(&[
+                srgb_to_linear(cell_color[0]),
+                srgb_to_linear(cell_color[1]),
+                srgb_to_linear(cell_color[2]),
+                alpha,
+            ]);
         }
     }
 
@@ -235,11 +228,7 @@ impl RenderBuffers {
             RenderDisplayMode::Enval => enval_rgb01(self.tile_enval[index]),
             RenderDisplayMode::Occupancy => blend_rgb01(
                 [46.0, 57.0, 72.0],
-                if self.tile_occupancy[index] != EMPTY_CELL_ID {
-                    0.92
-                } else {
-                    0.0
-                },
+                1.0 - (-(self.tile_cell_count[index] as f64)).exp(),
             ),
             RenderDisplayMode::Mass => blend_rgb01(
                 [86.0, 154.0, 112.0],
@@ -365,31 +354,21 @@ fn srgb_to_linear(value: f32) -> f32 {
     }
 }
 
-fn linear_to_srgb(value: f32) -> f32 {
-    if value <= 0.0031308 {
-        value * 12.92
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn lattice_rgba_retains_native_y_fastest_order_and_composites_cells() {
+    fn lattice_rgba_retains_native_y_fastest_order_and_cells_are_separate() {
         let mut buffers = RenderBuffers {
             width: 2,
             height: 3,
             tile_enval: vec![0.0; 6],
-            tile_occupancy: vec![EMPTY_CELL_ID; 6],
+            tile_cell_count: vec![0; 6],
             tile_mass_density: vec![0.0; 6],
             tile_total_elements: vec![0.0; 6],
             tile_element_concentrations: vec![0.0; 36],
             cell_id: vec![17],
-            cell_x: vec![1],
-            cell_y: vec![2],
             cell_lineage: vec![9],
             ..RenderBuffers::default()
         };
@@ -399,12 +378,14 @@ mod tests {
         });
 
         assert_eq!(buffers.lattice_rgba.len(), 24);
-        let selected_offset = 5 * 4;
-        assert_eq!(
-            &buffers.lattice_rgba[selected_offset..selected_offset + 4],
-            &[1.0, 0.93, 0.30, 1.0]
+        assert_eq!(buffers.cell_rgba.len(), 4);
+        assert_eq!(buffers.cell_rgba[3], 1.0);
+        assert!(
+            buffers
+                .lattice_rgba
+                .chunks_exact(4)
+                .all(|color| color != [1.0, 0.93, 0.30, 1.0])
         );
-        assert_ne!(&buffers.lattice_rgba[0..4], &[1.0, 0.93, 0.30, 1.0]);
     }
 
     #[test]
@@ -429,7 +410,7 @@ mod tests {
             width: 2,
             height: 1,
             tile_enval: vec![0.0; 2],
-            tile_occupancy: vec![EMPTY_CELL_ID; 2],
+            tile_cell_count: vec![0; 2],
             tile_mass_density: vec![0.0; 2],
             tile_total_elements: vec![0.1, 2.0],
             tile_element_concentrations: concentrations,

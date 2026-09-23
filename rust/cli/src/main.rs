@@ -1436,6 +1436,7 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
     let measured_ms = duration_ms(profile.step.total);
     let element_ms = duration_ms(profile.step.element_field_diffusion);
     let cell_ms = duration_ms(profile.step.cell_step);
+    let mechanics_ms = duration_ms(profile.step.cell_mechanics);
     let predation_ms = duration_ms(profile.step.predation);
     let enval_ms = duration_ms(profile.step.enval_diffusion);
     let pct = |part_ms: f64| -> f64 {
@@ -1459,6 +1460,7 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
                 "p95_step_ms": p95,
                 "element_field_diffusion_ms_per_step": element_ms / steps,
                 "cells_ms_per_step": cell_ms / steps,
+                "cell_mechanics_ms_per_step": mechanics_ms / steps,
                 "predation_ms_per_step": predation_ms / steps,
                 "enval_ms_per_step": enval_ms / steps,
                 "cell_steps": counters.cell_steps,
@@ -1468,9 +1470,12 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
                 "reactions_succeeded": counters.reactions_succeeded,
                 "reactions_per_sec": counters.reactions_succeeded as f64 / wall_seconds,
                 "predation_pairs_checked": counters.predation_pairs_checked,
-                "predation_occupied_tiles_considered": counters.predation_occupied_tiles_considered,
-                "predation_candidate_neighbor_pairs": counters.predation_candidate_neighbor_pairs,
+                "predation_cells_considered": counters.predation_cells_considered,
+                "predation_candidate_pairs": counters.predation_candidate_pairs,
                 "predation_cross_lineage_pairs": counters.predation_cross_lineage_pairs,
+                "spatial_candidate_checks": counters.spatial_candidate_checks,
+                "overlap_candidates": counters.overlap_candidates,
+                "overlap_corrections": counters.overlap_corrections,
                 "combat_enzyme_skips": counters.combat_enzyme_skips,
                 "element_field_diffusion_tiles": counters.element_field_diffusion_tiles,
                 "element_uptake_events": counters.element_uptake_events,
@@ -1482,7 +1487,7 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         return;
     }
     println!(
-        "profile wall_ms={:.3} avg_step_ms={:.6} min_step_ms={:.6} max_step_ms={:.6} p50_step_ms={:.6} p95_step_ms={:.6} element_field_ms={:.6} cells_ms={:.6} predation_ms={:.6} enval_ms={:.6} measured_total_ms={:.6} element_field_pct={:.2} cells_pct={:.2} predation_pct={:.2} enval_pct={:.2} stats_output_ms={:.6} invariants_ms={:.6} snapshot_io_ms={:.6} csv_flush_ms={:.6} cell_steps={} cell_steps_per_sec={:.3} enzyme_entries={} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reactions={} reactions_per_sec={:.3} element_field_tiles={} uptake_events={} divisions={} deaths={} predation_pairs={} predation_occupied_tiles={} predation_candidates={} predation_cross_lineage={} predation_events={} consumed={} combat_enzyme_skips={} enval_avg_calls={} enzyme_list_clones={} genome_clones={}",
+        "profile wall_ms={:.3} avg_step_ms={:.6} min_step_ms={:.6} max_step_ms={:.6} p50_step_ms={:.6} p95_step_ms={:.6} element_field_ms={:.6} cells_ms={:.6} mechanics_ms={:.6} predation_ms={:.6} enval_ms={:.6} measured_total_ms={:.6} element_field_pct={:.2} cells_pct={:.2} mechanics_pct={:.2} predation_pct={:.2} enval_pct={:.2} stats_output_ms={:.6} invariants_ms={:.6} snapshot_io_ms={:.6} csv_flush_ms={:.6} cell_steps={} cell_steps_per_sec={:.3} enzyme_entries={} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reactions={} reactions_per_sec={:.3} element_field_tiles={} uptake_events={} divisions={} deaths={} predation_pairs={} predation_cells={} predation_candidates={} predation_cross_lineage={} predation_events={} consumed={} spatial_candidates={} overlap_candidates={} overlap_corrections={} combat_enzyme_skips={} enval_avg_calls={} enzyme_list_clones={} genome_clones={}",
         duration_ms(wall),
         measured_ms / steps,
         profile.min_step.map(duration_ms).unwrap_or(0.0),
@@ -1491,11 +1496,13 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         p95,
         element_ms / steps,
         cell_ms / steps,
+        mechanics_ms / steps,
         predation_ms / steps,
         enval_ms / steps,
         measured_ms / steps,
         pct(element_ms),
         pct(cell_ms),
+        pct(mechanics_ms),
         pct(predation_ms),
         pct(enval_ms),
         duration_ms(profile.stats_output),
@@ -1514,11 +1521,14 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         counters.cell_divisions,
         counters.cell_deaths,
         counters.predation_pairs_checked,
-        counters.predation_occupied_tiles_considered,
-        counters.predation_candidate_neighbor_pairs,
+        counters.predation_cells_considered,
+        counters.predation_candidate_pairs,
         counters.predation_cross_lineage_pairs,
         counters.predation_events,
         counters.predation_cells_consumed,
+        counters.spatial_candidate_checks,
+        counters.overlap_candidates,
+        counters.overlap_corrections,
         counters.combat_enzyme_skips,
         counters.local_enval_average_calls,
         counters.enzyme_list_clones,

@@ -139,21 +139,21 @@ export class MicrocosmInteraction {
 
     refreshSelection() {
         if (!this.runtime || !this.runtime.ready) return;
-        try {
-            if (this.selectedTile) {
-                this.selectedTileInfo = this.runtime.inspectTile(this.selectedTile.x, this.selectedTile.y);
-                if (this.selectedTileInfo && this.selectedTileInfo.cell_id != null) {
-                    this.selectedCellId = Number(this.selectedTileInfo.cell_id) >>> 0;
-                    this.selectedCellInfo = this.runtime.inspectCell(this.selectedCellId);
-                } else { this.selectedCellId = null; this.selectedCellInfo = null; }
-            }
-            if (this.hoverTile) this.hoverTileInfo = this.runtime.inspectTile(this.hoverTile.x, this.hoverTile.y);
-        } catch (error) { if (this.selectedCellId !== null) { this.selectedCellId = null; this.selectedCellInfo = null; } }
+        if (this.selectedTile) this.selectedTileInfo = this.safeInspectTile(this.selectedTile);
+        if (this.hoverTile) this.hoverTileInfo = this.safeInspectTile(this.hoverTile);
+        if (this.selectedCellId !== null) {
+            try { this.selectedCellInfo = this.runtime.inspectCell(this.selectedCellId); }
+            catch { this.selectedCellId = null; this.selectedCellInfo = null; }
+        }
         this.syncRendererState();
     }
 
     tileFromEvent(event) {
         return this.renderer.tileFromClient(event.clientX, event.clientY);
+    }
+
+    positionFromEvent(event) {
+        return this.renderer.simulationFromClient(event.clientX, event.clientY);
     }
 
     inspectTile(tile) {
@@ -187,6 +187,7 @@ export class MicrocosmInteraction {
                 startClientX: event.clientX,
                 startClientY: event.clientY,
                 startTile: tile ? { x: tile.x, y: tile.y } : null,
+                startPosition: this.positionFromEvent(event),
                 moved: false
             } : null;
             return;
@@ -203,7 +204,7 @@ export class MicrocosmInteraction {
         if (event.button === 2) {
             event.preventDefault();
             this.pendingLeftClick = null;
-            this.selectLineageFromTile(tile);
+            this.selectLineageFromTile(tile, this.positionFromEvent(event));
         }
     }
 
@@ -250,23 +251,25 @@ export class MicrocosmInteraction {
         this.pendingLeftClick = null;
         if (pending.moved || this.mode !== "explore") return;
         const tile = this.tileFromEvent(event) || pending.startTile;
-        this.selectTile(tile);
+        const position = this.positionFromEvent(event) || pending.startPosition;
+        this.selectTile(tile, position);
     }
 
-    selectTile(tile) {
+    selectTile(tile, position = null) {
         if (!tile) return;
         this.selectedTile = { x: tile.x, y: tile.y };
         this.selectedTileInfo = this.safeInspectTile(tile);
-        const cellId = this.selectedTileInfo && this.selectedTileInfo.cell_id != null ? Number(this.selectedTileInfo.cell_id) >>> 0 : null;
+        const pick = position ? this.safePickCell(position) : null;
+        const cellId = pick && pick.cell_id != null ? Number(pick.cell_id) >>> 0 : null;
         this.selectedCellId = cellId;
         this.selectedCellInfo = cellId === null ? null : this.safeInspectCell(cellId);
         this.syncRendererState();
         this.notifyChange();
     }
 
-    selectLineageFromTile(tile) {
+    selectLineageFromTile(tile, position = null) {
         if (!tile) { this.selectedLineageId = null; this.syncRendererState(); this.notifyChange(); return; }
-        this.selectTile(tile);
+        this.selectTile(tile, position);
         if (this.selectedCellInfo && this.selectedCellInfo.lineage_id != null) this.selectedLineageId = Number(this.selectedCellInfo.lineage_id) >>> 0;
         else this.selectedLineageId = null;
         this.syncRendererState();
@@ -316,6 +319,11 @@ export class MicrocosmInteraction {
     safeInspectCell(cellId) {
         try { return this.inspectCell(cellId); }
         catch (error) { return { kind: "cell-error", cell_id: cellId, error: error.message }; }
+    }
+
+    safePickCell(position) {
+        try { return this.runtime.pickCell(position.x, position.y); }
+        catch (error) { return { kind: "cell-pick-error", cell_id: null, error: error.message }; }
     }
 
     syncRendererState() {

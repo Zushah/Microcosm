@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chem::{ELEMENT_COUNT, ElementAmounts};
 use crate::genome::{Genome, LineageId};
-use crate::world::TileId;
+use crate::spatial::{DEFAULT_CELL_RADIUS, Position};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CellId(pub usize);
@@ -26,9 +26,8 @@ pub struct FluxRecord {
     pub tick_count: u64,
     pub sim_time_seconds: f64,
     pub cell_id: usize,
-    pub tile_id: usize,
-    pub x: usize,
-    pub y: usize,
+    pub x: f32,
+    pub y: f32,
     pub catalyst_index: usize,
     pub catalyst_type: String,
     pub reactants: [f32; ELEMENT_COUNT],
@@ -51,7 +50,8 @@ pub struct FluxRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
     pub state: CellState,
-    pub tile_id: Option<TileId>,
+    pub position: Position,
+    pub radius: f32,
     pub energy: f64,
     pub genome: Genome,
     pub lineage_id: LineageId,
@@ -68,7 +68,7 @@ pub struct Cell {
 }
 
 impl Cell {
-    pub fn new(genome: Genome, tile_id: TileId, birth_sim_time: f64) -> Self {
+    pub fn new(genome: Genome, position: Position, birth_sim_time: f64) -> Self {
         let energy = genome.initial_energy;
         let lineage_id = genome.lineage_id;
         let maintenance_cost_per_sec = genome.maintenance_cost_per_sec;
@@ -76,7 +76,8 @@ impl Cell {
         let combat_defense_total = genome.defense_total();
         Self {
             state: CellState::Active,
-            tile_id: Some(tile_id),
+            position,
+            radius: DEFAULT_CELL_RADIUS,
             energy,
             genome,
             lineage_id,

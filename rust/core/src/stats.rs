@@ -96,8 +96,8 @@ pub struct OperationCounters {
     pub cell_divisions: u64,
     pub cell_deaths: u64,
     pub predation_pairs_checked: u64,
-    pub predation_occupied_tiles_considered: u64,
-    pub predation_candidate_neighbor_pairs: u64,
+    pub predation_cells_considered: u64,
+    pub predation_candidate_pairs: u64,
     pub predation_cross_lineage_pairs: u64,
     pub predation_events: u64,
     pub predation_cells_consumed: u64,
@@ -105,6 +105,9 @@ pub struct OperationCounters {
     pub combat_enzyme_skips: u64,
     pub enzyme_list_clones: u64,
     pub genome_clones: u64,
+    pub spatial_candidate_checks: u64,
+    pub overlap_candidates: u64,
+    pub overlap_corrections: u64,
 }
 
 impl OperationCounters {
@@ -131,12 +134,12 @@ impl OperationCounters {
             predation_pairs_checked: self
                 .predation_pairs_checked
                 .saturating_sub(previous.predation_pairs_checked),
-            predation_occupied_tiles_considered: self
-                .predation_occupied_tiles_considered
-                .saturating_sub(previous.predation_occupied_tiles_considered),
-            predation_candidate_neighbor_pairs: self
-                .predation_candidate_neighbor_pairs
-                .saturating_sub(previous.predation_candidate_neighbor_pairs),
+            predation_cells_considered: self
+                .predation_cells_considered
+                .saturating_sub(previous.predation_cells_considered),
+            predation_candidate_pairs: self
+                .predation_candidate_pairs
+                .saturating_sub(previous.predation_candidate_pairs),
             predation_cross_lineage_pairs: self
                 .predation_cross_lineage_pairs
                 .saturating_sub(previous.predation_cross_lineage_pairs),
@@ -156,6 +159,15 @@ impl OperationCounters {
                 .enzyme_list_clones
                 .saturating_sub(previous.enzyme_list_clones),
             genome_clones: self.genome_clones.saturating_sub(previous.genome_clones),
+            spatial_candidate_checks: self
+                .spatial_candidate_checks
+                .saturating_sub(previous.spatial_candidate_checks),
+            overlap_candidates: self
+                .overlap_candidates
+                .saturating_sub(previous.overlap_candidates),
+            overlap_corrections: self
+                .overlap_corrections
+                .saturating_sub(previous.overlap_corrections),
         }
     }
 
@@ -181,12 +193,12 @@ impl OperationCounters {
         self.predation_pairs_checked = self
             .predation_pairs_checked
             .saturating_add(other.predation_pairs_checked);
-        self.predation_occupied_tiles_considered = self
-            .predation_occupied_tiles_considered
-            .saturating_add(other.predation_occupied_tiles_considered);
-        self.predation_candidate_neighbor_pairs = self
-            .predation_candidate_neighbor_pairs
-            .saturating_add(other.predation_candidate_neighbor_pairs);
+        self.predation_cells_considered = self
+            .predation_cells_considered
+            .saturating_add(other.predation_cells_considered);
+        self.predation_candidate_pairs = self
+            .predation_candidate_pairs
+            .saturating_add(other.predation_candidate_pairs);
         self.predation_cross_lineage_pairs = self
             .predation_cross_lineage_pairs
             .saturating_add(other.predation_cross_lineage_pairs);
@@ -204,6 +216,15 @@ impl OperationCounters {
             .enzyme_list_clones
             .saturating_add(other.enzyme_list_clones);
         self.genome_clones = self.genome_clones.saturating_add(other.genome_clones);
+        self.spatial_candidate_checks = self
+            .spatial_candidate_checks
+            .saturating_add(other.spatial_candidate_checks);
+        self.overlap_candidates = self
+            .overlap_candidates
+            .saturating_add(other.overlap_candidates);
+        self.overlap_corrections = self
+            .overlap_corrections
+            .saturating_add(other.overlap_corrections);
     }
 }
 
@@ -343,6 +364,7 @@ impl WorldStats {
 pub struct StepProfile {
     pub element_field_diffusion: Duration,
     pub cell_step: Duration,
+    pub cell_mechanics: Duration,
     pub predation: Duration,
     pub enval_diffusion: Duration,
     pub total: Duration,
@@ -353,6 +375,7 @@ impl StepProfile {
     pub fn add_assign(&mut self, other: Self) {
         self.element_field_diffusion += other.element_field_diffusion;
         self.cell_step += other.cell_step;
+        self.cell_mechanics += other.cell_mechanics;
         self.predation += other.predation;
         self.enval_diffusion += other.enval_diffusion;
         self.total += other.total;

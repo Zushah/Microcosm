@@ -22,7 +22,7 @@ const STATUS_LABELS = Object.freeze({
 
 const TILE_VIEW_DEFINITIONS = Object.freeze([
     { key: "tileEnval", ptr: "microcosm_tile_enval_ptr", length: "microcosm_tile_count", dtype: "f32", name: "microcosm.tile_enval" },
-    { key: "tileOccupancy", ptr: "microcosm_tile_occupancy_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_occupancy" },
+    { key: "tileCellCount", ptr: "microcosm_tile_cell_count_ptr", length: "microcosm_tile_count", dtype: "u32", name: "microcosm.tile_cell_count" },
     { key: "tileMassDensity", ptr: "microcosm_tile_mass_density_ptr", length: "microcosm_tile_count", dtype: "f32", name: "microcosm.tile_mass_density" },
     { key: "tileTotalElements", ptr: "microcosm_tile_total_elements_ptr", length: "microcosm_tile_count", dtype: "f32", name: "microcosm.tile_total_elements" },
     { key: "tileElementConcentrations", ptr: "microcosm_tile_element_concentrations_ptr", length: "microcosm_tile_element_concentrations_len", dtype: "f32", name: "microcosm.tile_element_concentrations" }
@@ -32,8 +32,11 @@ const LATTICE_VIEW_DEFINITION = Object.freeze({ key: "latticeRgba", ptr: "microc
 
 const CELL_VIEW_DEFINITIONS = Object.freeze([
     { key: "cellId", ptr: "microcosm_cell_id_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_id" },
-    { key: "cellX", ptr: "microcosm_cell_x_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_x" },
-    { key: "cellY", ptr: "microcosm_cell_y_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_y" },
+    { key: "cellPointData", ptr: "microcosm_cell_point_data_ptr", length: "microcosm_cell_point_data_len", dtype: "f32", name: "microcosm.cell_point_data" },
+    { key: "cellRotationData", ptr: "microcosm_cell_rotation_data_ptr", length: "microcosm_cell_rotation_data_len", dtype: "f32", name: "microcosm.cell_rotation_data" },
+    { key: "cellScaleData", ptr: "microcosm_cell_scale_data_ptr", length: "microcosm_cell_scale_data_len", dtype: "f32", name: "microcosm.cell_scale_data" },
+    { key: "cellRgba", ptr: "microcosm_cell_rgba_ptr", length: "microcosm_cell_rgba_len", dtype: "f32", name: "microcosm.cell_rgba" },
+    { key: "cellRadius", ptr: "microcosm_cell_radius_ptr", length: "microcosm_cell_count", dtype: "f32", name: "microcosm.cell_radius" },
     { key: "cellEnergy", ptr: "microcosm_cell_energy_ptr", length: "microcosm_cell_count", dtype: "f32", name: "microcosm.cell_energy" },
     { key: "cellLineage", ptr: "microcosm_cell_lineage_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_lineage" },
     { key: "cellFlags", ptr: "microcosm_cell_flags_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_flags" },
@@ -143,6 +146,11 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["cell_steps", "u64"],
     ["enzyme_entries_seen", "u64"],
     ["metabolic_enzyme_attempts", "u64"],
+    ["predation_cells_considered", "u64"],
+    ["predation_candidate_pairs", "u64"],
+    ["spatial_candidate_checks", "u64"],
+    ["overlap_candidates", "u64"],
+    ["overlap_corrections", "u64"],
     ["render_epoch", "u32"]
 ]);
 
@@ -322,6 +330,7 @@ export class MicrocosmRuntime {
         ));
         this.assertStatus(status, "microcosm_set_render_visual_state");
         this._views.latticeRgba?.refresh();
+        this._views.cellRgba?.refresh();
         return this._views.latticeRgba;
     }
 
@@ -378,6 +387,16 @@ export class MicrocosmRuntime {
         const status = readUintStatus(this._functions.inspectCell(this._handle, id));
         this.assertStatus(status, "microcosm_inspect_cell");
         return this.readQueryResult("microcosm.inspect_cell");
+    }
+
+    pickCell(x, y) {
+        this.assertReady();
+        const positionX = Number(x);
+        const positionY = Number(y);
+        if (!Number.isFinite(positionX) || !Number.isFinite(positionY)) throw new Error("Cell pick coordinates must be finite.");
+        const status = readUintStatus(this._functions.pickCell(this._handle, positionX, positionY));
+        this.assertStatus(status, "microcosm_pick_cell");
+        return this.readQueryResult("microcosm.pick_cell");
     }
 
     inspectCellDetail(cellId, options = {}) {
@@ -490,6 +509,8 @@ export class MicrocosmRuntime {
                 ? expectedTileCount * 4
                 : definition.key === "tileElementConcentrations"
                     ? expectedTileCount * 6
+                    : definition.key === "cellPointData" || definition.key === "cellRotationData" || definition.key === "cellScaleData" || definition.key === "cellRgba"
+                        ? expectedCellCount * 4
                     : definition.length === "microcosm_tile_count"
                         ? expectedTileCount
                         : expectedCellCount;
@@ -533,6 +554,7 @@ export class MicrocosmRuntime {
             queryResultLen: get("microcosm_query_result_len"),
             inspectTile: get("microcosm_inspect_tile"),
             inspectCell: get("microcosm_inspect_cell"),
+            pickCell: get("microcosm_pick_cell"),
             inspectCellDetail: get("microcosm_inspect_cell_detail"),
             inspectCellElements: get("microcosm_inspect_cell_elements"),
             inspectCellFluxes: get("microcosm_inspect_cell_fluxes"),

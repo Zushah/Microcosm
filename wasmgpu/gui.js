@@ -405,7 +405,10 @@ export class MicrocosmGUI {
             ["Deaths", stats.deaths],
             ["Average cell energy", stats.average_cell_energy],
             ["Average enval", stats.average_enval],
-            ["Metabolic flux", stats.executed_metabolic_flux]
+            ["Metabolic flux", stats.executed_metabolic_flux],
+            ["Spatial candidates", stats.spatial_candidate_checks],
+            ["Overlap candidates", stats.overlap_candidates],
+            ["Overlap corrections", stats.overlap_corrections]
         ];
         if (this.elements.diagnostics) this.elements.diagnostics.innerHTML = diagnostics.map(([label, value]) => `
             <div class="datum">
@@ -512,7 +515,7 @@ export class MicrocosmGUI {
             this.elements.hoverInspector.innerHTML = tile ? detailRows([
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Enval", tile.enval],
-                ["Cell", tile.cell_id ?? "—"],
+                ["Cell centers", tile.cell_center_count],
                 ["Total elements", tile.total_element_concentration],
                 ["Mass density", tile.mass_density]
             ]) : payloadMessage("Move over the canvas to probe a tile.");
@@ -523,7 +526,7 @@ export class MicrocosmGUI {
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Tile id", tile.tile_id],
                 ["Enval", tile.enval],
-                ["Occupied cell", tile.cell_id ?? "—"],
+                ["Cell center count", tile.cell_center_count],
                 ["Total elements", tile.total_element_concentration],
                 ["Mass density", tile.mass_density],
                 ["Concentrations", elementCountsText(tile.element_concentrations)]
@@ -533,7 +536,8 @@ export class MicrocosmGUI {
             const cell = this.cellDetailPayload()?.cell || interaction.selectedCellInfo;
             this.elements.cellInspector.innerHTML = cell ? detailRows([
                 ["Cell id", cell.cell_id],
-                ["Tile", `${cell.x}, ${cell.y}`],
+                ["Position", `${displayValue(cell.x)}, ${displayValue(cell.y)}`],
+                ["Radius", cell.radius],
                 ["Lineage", cell.lineage_id],
                 ["Energy", cell.energy],
                 ["Age", `${displayValue(cell.age_seconds)}s`],
@@ -596,7 +600,8 @@ export class MicrocosmGUI {
         this.elements.cellDetailInspector.innerHTML = detailRows([
             ["Cell id", cell.cell_id],
             ["State", detail.state],
-            ["Tile", `${cell.x}, ${cell.y}`],
+            ["Position", `${displayValue(cell.x)}, ${displayValue(cell.y)}`],
+            ["Radius", cell.radius],
             ["Lineage", cell.lineage_id],
             ["Energy", cell.energy],
             ["Age", `${displayValue(cell.age_seconds)}s`],
@@ -767,13 +772,16 @@ export class MicrocosmGUI {
         if (!this.elements.samples) return;
         this.elements.samples.innerHTML = `
             <div><strong>tileEnval[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileEnval && runtime.views.tileEnval.array()))}</div>
-            <div><strong>tileOccupancy[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileOccupancy && runtime.views.tileOccupancy.array()))}</div>
+            <div><strong>tileCellCount[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileCellCount && runtime.views.tileCellCount.array()))}</div>
             <div><strong>tileTotalElements[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileTotalElements && runtime.views.tileTotalElements.array()))}</div>
             <div><strong>tileElementConcentrations[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.tileElementConcentrations && runtime.views.tileElementConcentrations.array()))}</div>
             <div><strong>latticeRgba[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.latticeRgba && runtime.views.latticeRgba.array()))}</div>
             <div><strong>cellId[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellId && runtime.views.cellId.array()))}</div>
-            <div><strong>cellX[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellX && runtime.views.cellX.array()))}</div>
-            <div><strong>cellY[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellY && runtime.views.cellY.array()))}</div>
+            <div><strong>cellPointData[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellPointData && runtime.views.cellPointData.array()))}</div>
+            <div><strong>cellRotationData[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellRotationData && runtime.views.cellRotationData.array()))}</div>
+            <div><strong>cellScaleData[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellScaleData && runtime.views.cellScaleData.array()))}</div>
+            <div><strong>cellRgba[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellRgba && runtime.views.cellRgba.array()))}</div>
+            <div><strong>cellRadius[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellRadius && runtime.views.cellRadius.array()))}</div>
             <div><strong>cellEnergy[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellEnergy && runtime.views.cellEnergy.array()))}</div>
             <div><strong>cellLineage[0..]</strong>: ${escapeHtml(formatArraySample(runtime.views.cellLineage && runtime.views.cellLineage.array()))}</div>
         `;

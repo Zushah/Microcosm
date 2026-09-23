@@ -32,6 +32,11 @@ export class MicrocosmRenderer {
         this._controls = null;
         this._lattice = null;
         this._latticeDataView = null;
+        this._cells = null;
+        this._cellPointDataView = null;
+        this._cellRotationDataView = null;
+        this._cellScaleDataView = null;
+        this._cellRgbaView = null;
         this._displayMode = options.displayMode || "enval";
         this._selectedLineage = null;
         this._selectedTile = null;
@@ -200,6 +205,19 @@ export class MicrocosmRenderer {
         return tile ? { ...tile, worldX: world.x, worldY: world.y, canvasX: world.canvasX, canvasY: world.canvasY } : null;
     }
 
+    simulationFromClient(clientX, clientY) {
+        const world = this.canvasToWorld(clientX, clientY);
+        if (!world || this._width <= 0 || this._height <= 0) return null;
+        return {
+            x: world.x + this._width * 0.5 - 0.5,
+            y: this._height * 0.5 - world.y - 0.5,
+            worldX: world.x,
+            worldY: world.y,
+            canvasX: world.canvasX,
+            canvasY: world.canvasY
+        };
+    }
+
     tileIndex(x, y) {
         if (this._height <= 0) return -1;
         return (Number(x) | 0) * this._height + (Number(y) | 0);
@@ -222,20 +240,27 @@ export class MicrocosmRenderer {
         this._height = height;
         this._tileCount = tileCount;
         this._cellCount = cellCount;
-
         if (this._visualStateDirty) {
             runtime.setRenderVisualState(this.visualState());
             this._visualStateDirty = false;
         }
-
         const dataView = runtime.views.latticeRgba;
         if (!dataView || dataView.dtype !== "f32" || dataView.length !== tileCount * 4) throw new Error(`Microcosm lattice RGBA view must contain ${tileCount * 4} f32 values.`);
-        if (!this._lattice || dimensionsChanged || dataView !== this._latticeDataView) {
-            this.createLattice(dataView);
-        } else {
-            this._lattice.refreshFromWasm({ keepCPUData: false });
-        }
-
+        if (!this._lattice || dimensionsChanged || dataView !== this._latticeDataView) this.createLattice(dataView);
+        else this._lattice.refreshFromWasm({ keepCPUData: false });
+        const pointDataView = runtime.views.cellPointData;
+        const rotationDataView = runtime.views.cellRotationData;
+        const scaleDataView = runtime.views.cellScaleData;
+        const rgbaView = runtime.views.cellRgba;
+        const radiusView = runtime.views.cellRadius;
+        if (!pointDataView || pointDataView.dtype !== "f32" || pointDataView.length !== cellCount * 4) throw new Error(`Microcosm cell point view must contain ${cellCount * 4} f32 values.`);
+        if (!rotationDataView || rotationDataView.dtype !== "f32" || rotationDataView.length !== cellCount * 4) throw new Error(`Microcosm cell rotation view must contain ${cellCount * 4} f32 values.`);
+        if (!scaleDataView || scaleDataView.dtype !== "f32" || scaleDataView.length !== cellCount * 4) throw new Error(`Microcosm cell scale view must contain ${cellCount * 4} f32 values.`);
+        if (!rgbaView || rgbaView.dtype !== "f32" || rgbaView.length !== cellCount * 4) throw new Error(`Microcosm cell RGBA view must contain ${cellCount * 4} f32 values.`);
+        if (!radiusView || radiusView.dtype !== "f32" || radiusView.length !== cellCount) throw new Error(`Microcosm cell radius view must contain ${cellCount} f32 values.`);
+        if (!this._cells || dimensionsChanged || pointDataView !== this._cellPointDataView || rotationDataView !== this._cellRotationDataView || scaleDataView !== this._cellScaleDataView || rgbaView !== this._cellRgbaView) {
+            this.createCells(pointDataView, rotationDataView, scaleDataView, rgbaView, cellCount);
+        } else this._cells.refreshFromWasm({ instanceCount: cellCount, keepCPUData: false });
         if (dimensionsChanged || !this._viewInitialized) this.fitView({ saveState: true });
     }
 
@@ -265,6 +290,47 @@ export class MicrocosmRenderer {
         });
         this._lattice.transform.setRotationFromEuler(0, 0, -Math.PI * 0.5);
         this._scene.add(this._lattice);
+    }
+
+    createCells(pointDataView, rotationDataView, scaleDataView, rgbaView, instanceCount) {
+        if (this._cells) {
+            this._scene.remove(this._cells);
+            this._cells.clearWasmSources();
+            this._cells.destroy();
+        }
+        this._cellPointDataView = pointDataView;
+        this._cellRotationDataView = rotationDataView;
+        this._cellScaleDataView = scaleDataView;
+        this._cellRgbaView = rgbaView;
+        this._cells = this._wgpu.createGlyphField({
+            shape: "ellipsoid",
+            wasmPositions: pointDataView,
+            wasmRotations: rotationDataView,
+            wasmScales: scaleDataView,
+            wasmAttributes: rgbaView,
+            instanceCount,
+            boundsMin: [-this._width * 0.5 - 1, -this._height * 0.5 - 1, 0],
+            boundsMax: [this._width * 0.5 + 1, this._height * 0.5 + 1, 1],
+            opacity: 1,
+            colorMode: "rgba",
+            lit: false,
+            blendMode: "transparent",
+            depthWrite: false,
+            depthTest: true,
+            keepCPUData: false,
+            name: "microcosm.cells",
+            scaleTransform: {
+                componentCount: 4,
+                componentIndex: 3,
+                stride: 4,
+                offset: 0,
+                mode: "linear",
+                clampMode: "none",
+                domainMin: 0,
+                domainMax: 1
+            }
+        });
+        this._scene.add(this._cells);
     }
 
     measureCanvas() {
@@ -353,6 +419,16 @@ export class MicrocosmRenderer {
         }
         this._lattice = null;
         this._latticeDataView = null;
+        if (this._cells) {
+            this._scene?.remove?.(this._cells);
+            this._cells.clearWasmSources();
+            this._cells.destroy();
+        }
+        this._cells = null;
+        this._cellPointDataView = null;
+        this._cellRotationDataView = null;
+        this._cellScaleDataView = null;
+        this._cellRgbaView = null;
         this._wgpu?.destroy?.();
         this._destroyed = true;
     }

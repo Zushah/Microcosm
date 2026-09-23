@@ -6,6 +6,7 @@ pub mod genome;
 pub mod render_buffers;
 pub mod rng;
 pub mod snapshot;
+pub mod spatial;
 pub mod stats;
 pub mod world;
 
@@ -22,12 +23,14 @@ pub use genome::{
     Genome, GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId, MAX_CELL_ENZYMES,
     MIN_CELL_ENZYMES, PredationEnzymeTransferStats,
 };
-pub use render_buffers::{
-    EMPTY_CELL_ID, RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState,
-};
+pub use render_buffers::{RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState};
 pub use rng::Rng;
 pub use snapshot::{
     SNAPSHOT_EXTENSION, SNAPSHOT_VERSION, SnapshotError, load_from_path, save_to_path,
+};
+pub use spatial::{
+    BilinearSample, BilinearStencil, DEFAULT_CELL_RADIUS, Position, SpatialIndex,
+    minimum_image_delta, minimum_image_displacement, toroidal_distance, toroidal_distance_squared,
 };
 pub use stats::{
     ENZYME_COUNT_HISTOGRAM_LEN, EnzymeTypeAmounts, EnzymeTypeCounts, OperationCounters,

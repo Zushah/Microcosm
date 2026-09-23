@@ -134,6 +134,29 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_roundtrip_preserves_continuous_geometry_and_rebuilds_picking_index() {
+        let world = small_world("snapshot-continuous-geometry");
+        let before = (0..4)
+            .map(|index| {
+                let cell = world.cell(crate::CellId(index)).unwrap();
+                (cell.position, cell.radius)
+            })
+            .collect::<Vec<_>>();
+
+        let bytes = to_bytes(&world).unwrap();
+        let loaded = from_bytes(&bytes).unwrap();
+
+        for (index, (position, radius)) in before.into_iter().enumerate() {
+            let cell_id = crate::CellId(index);
+            let loaded_cell = loaded.cell(cell_id).unwrap();
+            assert_eq!(loaded_cell.position, position);
+            assert_eq!(loaded_cell.radius, radius);
+            assert_eq!(loaded.pick_cell(position), Some(cell_id));
+        }
+        loaded.check_invariants().unwrap();
+    }
+
+    #[test]
     fn snapshot_resume_matches_uninterrupted_run() {
         let mut uninterrupted = small_world("snapshot-resume");
         for _ in 0..50 {
