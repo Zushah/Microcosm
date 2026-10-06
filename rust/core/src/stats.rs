@@ -238,6 +238,7 @@ pub struct ReactionCounters {
     pub enval_output_by_type: EnzymeTypeAmounts,
     pub executed_metabolic_flux: f64,
     pub uptake_flux: f64,
+    pub leak_flux: f64,
     pub secretion_flux: f64,
     pub divisions: u64,
 }
@@ -264,6 +265,7 @@ impl ReactionCounters {
             executed_metabolic_flux: self.executed_metabolic_flux
                 - previous.executed_metabolic_flux,
             uptake_flux: self.uptake_flux - previous.uptake_flux,
+            leak_flux: self.leak_flux - previous.leak_flux,
             secretion_flux: self.secretion_flux - previous.secretion_flux,
             divisions: self.divisions.saturating_sub(previous.divisions),
         }
@@ -275,6 +277,89 @@ impl ReactionCounters {
 
     pub fn total_successes(self) -> u64 {
         self.successes_by_type.total()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EnergyLedger {
+    pub founder_energy: f64,
+    pub injected_energy: f64,
+    pub extracted_energy: f64,
+    pub chemical_harvest: f64,
+    pub chemical_cost: f64,
+    pub enval_harvest: f64,
+    pub pump_cost: f64,
+    pub maintenance: f64,
+    pub death_loss: f64,
+    pub predation_transfer: f64,
+}
+
+impl EnergyLedger {
+    pub fn expected_cell_energy(&self) -> f64 {
+        self.founder_energy + self.injected_energy + self.chemical_harvest + self.enval_harvest
+            - self.extracted_energy
+            - self.chemical_cost
+            - self.pump_cost
+            - self.maintenance
+            - self.death_loss
+    }
+
+    pub fn magnitude(&self) -> f64 {
+        self.founder_energy
+            + self.injected_energy
+            + self.extracted_energy
+            + self.chemical_harvest
+            + self.chemical_cost
+            + self.enval_harvest
+            + self.pump_cost
+            + self.maintenance
+            + self.death_loss
+    }
+
+    pub fn closure_tolerance(&self) -> f64 {
+        1.0e-9 * self.magnitude() + 1.0e-6
+    }
+
+    pub fn terms(&self) -> [(&'static str, f64); 10] {
+        [
+            ("founder_energy", self.founder_energy),
+            ("injected_energy", self.injected_energy),
+            ("extracted_energy", self.extracted_energy),
+            ("chemical_harvest", self.chemical_harvest),
+            ("chemical_cost", self.chemical_cost),
+            ("enval_harvest", self.enval_harvest),
+            ("pump_cost", self.pump_cost),
+            ("maintenance", self.maintenance),
+            ("death_loss", self.death_loss),
+            ("predation_transfer", self.predation_transfer),
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EnvalLedger {
+    pub initial_total: f64,
+    pub source_inflow: f64,
+    pub cell_uptake: f64,
+    pub cell_emission: f64,
+    pub recharge: f64,
+    pub edits: f64,
+    pub recharge_amount: f64,
+    pub recharge_energy: f64,
+}
+
+impl EnvalLedger {
+    pub fn net_change(&self) -> f64 {
+        self.source_inflow + self.cell_uptake + self.cell_emission + self.recharge + self.edits
+    }
+}
+
+pub fn renewable_coverage(energy: &EnergyLedger, enval: &EnvalLedger) -> f64 {
+    let denominator = energy.enval_harvest + energy.chemical_harvest;
+    if denominator > 0.0 {
+        (energy.enval_harvest + enval.recharge_energy) / denominator
+    } else {
+        0.0
     }
 }
 
@@ -304,8 +389,6 @@ pub struct WorldStats {
     pub near_zero_enval_tile_count: usize,
     pub cell_count: usize,
     pub live_cell_count: usize,
-    pub cell_record_count: usize,
-    pub dead_cell_count: usize,
     pub births: u64,
     pub deaths: u64,
     pub predation_events: u64,
@@ -328,7 +411,6 @@ pub struct WorldStats {
     pub total_cell_energy: f64,
     pub average_cell_age: f64,
     pub max_cell_age: f64,
-    pub average_time_without_food: f64,
     pub average_enzyme_count: f64,
     pub min_enzyme_count: usize,
     pub max_enzyme_count: usize,
@@ -344,6 +426,10 @@ pub struct WorldStats {
     pub enzyme_type_totals: EnzymeTypeCounts,
     pub reaction_counters: ReactionCounters,
     pub operation_counters: OperationCounters,
+    pub energy_ledger: EnergyLedger,
+    pub enval_ledger: EnvalLedger,
+    pub energy_ledger_residual: f64,
+    pub renewable_coverage: f64,
 }
 
 impl WorldStats {

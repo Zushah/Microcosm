@@ -91,11 +91,6 @@ pub const ELEMENT_PROPERTIES: [ElementProperties; ELEMENT_COUNT] = [
     },
 ];
 
-/// A compact, fixed-size vector of continuous A-F quantities.
-///
-/// This type deliberately does not clamp values: callers must preserve their
-/// accounting invariants, while [`ElementAmounts::validate_nonnegative`] can
-/// be used at configuration and runtime boundaries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct ElementAmounts([f32; ELEMENT_COUNT]);

@@ -19,7 +19,7 @@ const LINEAGE_REFRESH_INTERVAL_MS = 2500;
 const LINEAGE_LIST_REFRESH_INTERVAL_MS = 5000;
 const CELL_FLUX_LIMIT = 24;
 const LINEAGE_LIST_LIMIT = 32;
-const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v2";
+const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v3";
 const COMBAT_ENZYME_TYPES = new Set(["attackase", "defensase"]);
 const INTEGER_GENOME_FIELDS = new Set();
 const INTEGER_ENZYME_FIELDS = new Set(["combat_level"]);
@@ -405,17 +405,27 @@ export class MicrocosmGUI {
             ["Deaths", stats.deaths],
             ["Average cell energy", stats.average_cell_energy],
             ["Average enval", stats.average_enval],
-            ["Metabolic flux", stats.executed_metabolic_flux],
-            ["Spatial candidates", stats.spatial_candidate_checks],
-            ["Overlap candidates", stats.overlap_candidates],
-            ["Overlap corrections", stats.overlap_corrections]
+            ["Metabolic flux", stats.executed_metabolic_flux]
         ];
-        if (this.elements.diagnostics) this.elements.diagnostics.innerHTML = diagnostics.map(([label, value]) => `
+        const energyBudget = [
+            ["Enval harvest", stats.energy_enval_harvest],
+            ["Chemical harvest", stats.energy_chemical_harvest],
+            ["Recharge energy", stats.recharge_energy],
+            ["Renewable coverage", stats.renewable_coverage],
+            ["Chemical cost", stats.energy_chemical_cost],
+            ["Pump cost", stats.energy_pump_cost],
+            ["Maintenance + upkeep", stats.energy_maintenance],
+            ["Founder energy", stats.energy_founder]
+        ];
+        const datum = ([label, value]) => `
             <div class="datum">
                 <span>${escapeHtml(label)}</span>
                 <strong>${escapeHtml(displayValue(value))}</strong>
             </div>
-        `).join("");
+        `;
+        if (this.elements.diagnostics) this.elements.diagnostics.innerHTML = diagnostics.map(datum).join("")
+            + `<div class="smallNote" style="grid-column: 1 / -1;">Energy budget (cumulative)</div>`
+            + energyBudget.map(datum).join("");
         if (this.elements.renderStats) {
             const rows = [
                 ["Display mode", renderStats.displayMode || "—"],
@@ -515,6 +525,7 @@ export class MicrocosmGUI {
             this.elements.hoverInspector.innerHTML = tile ? detailRows([
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Enval", tile.enval],
+                ["Enval source", tile.enval_source_target ?? "—"],
                 ["Cell centers", tile.cell_center_count],
                 ["Total elements", tile.total_element_concentration],
                 ["Mass density", tile.mass_density]
@@ -526,6 +537,7 @@ export class MicrocosmGUI {
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Tile id", tile.tile_id],
                 ["Enval", tile.enval],
+                ["Enval source target", tile.enval_source_target ?? "—"],
                 ["Cell center count", tile.cell_center_count],
                 ["Total elements", tile.total_element_concentration],
                 ["Mass density", tile.mass_density],
@@ -547,8 +559,7 @@ export class MicrocosmGUI {
                 ["Internal elements", cell.total_internal_elements],
                 ["Attack", cell.combat_attack_total],
                 ["Defense", cell.combat_defense_total],
-                ["Repro threshold", cell.repro_threshold],
-                ["Decay time", cell.decay_time]
+                ["Repro threshold", cell.repro_threshold]
             ]) : (this._detail.cellError ? payloadMessage(`Selected cell detail unavailable: ${this._detail.cellError}`, "smallNote errorText") : payloadMessage("No active cell selected."));
         }
         if (this.elements.lineageInspector) {
@@ -599,7 +610,6 @@ export class MicrocosmGUI {
         const cell = detail.cell || {};
         this.elements.cellDetailInspector.innerHTML = detailRows([
             ["Cell id", cell.cell_id],
-            ["State", detail.state],
             ["Position", `${displayValue(cell.x)}, ${displayValue(cell.y)}`],
             ["Radius", cell.radius],
             ["Lineage", cell.lineage_id],
@@ -607,15 +617,13 @@ export class MicrocosmGUI {
             ["Age", `${displayValue(cell.age_seconds)}s`],
             ["Optimal enval", cell.optimal_enval],
             ["Local enval average", cell.local_enval_average],
-            ["Time without food", detail.time_without_food],
             ["Maintenance / sec", detail.maintenance_cost_per_sec],
-            ["Death sim time", detail.death_sim_time ?? "—"],
+            ["Catalyst upkeep / sec", detail.catalyst_upkeep_per_sec],
             ["Enzyme count", cell.enzyme_count],
             ["Internal elements", cell.total_internal_elements],
             ["Attack total", cell.combat_attack_total],
             ["Defense total", cell.combat_defense_total],
-            ["Reproduction threshold", cell.repro_threshold],
-            ["Decay time", cell.decay_time]
+            ["Reproduction threshold", cell.repro_threshold]
         ]);
     }
 
@@ -630,9 +638,6 @@ export class MicrocosmGUI {
             ["Mutation rate", genome.mutation_rate],
             ["Reproduction threshold", genome.repro_threshold],
             ["Initial energy", genome.initial_energy],
-            ["Decay time", genome.decay_time],
-            ["Desired reserve", genome.desired_element_reserve],
-            ["Enval stress factor", genome.enval_stress_factor],
             ["Enval mutation floor", genome.enval_mutation_floor],
             ["Maintenance / sec", genome.maintenance_cost_per_sec],
             ["Post-divide mortality", genome.post_divide_mortality]
@@ -647,6 +652,7 @@ export class MicrocosmGUI {
             { label: "Reactants A-F", value: (enzyme) => enzyme.is_metabolic ? elementCountsText(enzyme.reactants) : "—" },
             { label: "Products A-F", value: (enzyme) => enzyme.is_metabolic ? elementCountsText(enzyme.products) : "—" },
             { label: "Rate", value: (enzyme) => enzyme.is_metabolic ? enzyme.rate : "—" },
+            { label: "K½", value: (enzyme) => enzyme.is_metabolic ? enzyme.half_saturation : "—" },
             { label: "σ", value: (enzyme) => enzyme.enval_sigma },
             { label: "Throughput", value: (enzyme) => enzyme.enval_throughput },
             { label: "Harvest", value: (enzyme) => enzyme.is_metabolic ? enzyme.energy_harvest_fraction : "—" },

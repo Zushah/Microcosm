@@ -5,21 +5,33 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
 use microcosmcore::{
-    Config, SNAPSHOT_EXTENSION, StepProfile, World, WorldStats, load_from_path, save_to_path,
+    Config, ELEMENT_COUNT, SNAPSHOT_EXTENSION, StepProfile, World, WorldStats, load_from_path,
+    renewable_coverage, save_to_path,
 };
 
 const CSV_EXTENSION: &str = "csv";
 const DEFAULT_OUTPUT_DIR: &str = "out";
+const VIABILITY_DEFAULT_SEEDS: [&str; 5] = ["42", "1", "2", "3", "7"];
+const VIABILITY_DEFAULT_STEPS: u64 = 60_000;
+const VIABILITY_SAMPLE_EVERY: u64 = 100;
+const VIABILITY_INVARIANTS_EVERY: u64 = 5_000;
+const VIABILITY_PROGRESS_EVERY: u64 = 5_000;
+const VIABILITY_MIN_LIVE_AFTER_TICK: u64 = 1_000;
+const VIABILITY_POPULATION_CAP: usize = 60_000;
+const VIABILITY_MIN_RENEWABLE_COVERAGE: f64 = 0.25;
 
 #[derive(Debug, Clone)]
 enum Command {
     Run(RunOptions),
     Bench(BenchOptions),
     Inspect(InspectOptions),
+    Viability(ViabilityOptions),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +70,7 @@ struct RunOptions {
     stats_mode: StatsMode,
     json: bool,
     predation_override: Option<bool>,
+    until_cells: Option<usize>,
 }
 
 impl Default for RunOptions {
@@ -79,6 +92,7 @@ impl Default for RunOptions {
             stats_mode: StatsMode::Compact,
             json: false,
             predation_override: None,
+            until_cells: None,
         }
     }
 }
@@ -120,6 +134,63 @@ impl Default for BenchOptions {
 #[derive(Debug, Clone)]
 struct InspectOptions {
     snapshot: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ViabilityOptions {
+    config: Config,
+    seeds: Vec<String>,
+    steps: u64,
+    jobs: usize,
+    json: bool,
+    quiet: bool,
+}
+
+impl Default for ViabilityOptions {
+    fn default() -> Self {
+        Self {
+            config: Config::default(),
+            seeds: VIABILITY_DEFAULT_SEEDS
+                .iter()
+                .map(|seed| (*seed).to_owned())
+                .collect(),
+            steps: VIABILITY_DEFAULT_STEPS,
+            jobs: std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1),
+            json: false,
+            quiet: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ViabilityResult {
+    seed: String,
+    passed: bool,
+    failures: Vec<String>,
+    final_tick: u64,
+    extinction_tick: Option<u64>,
+    min_live_after_warmup: Option<usize>,
+    peak_live: usize,
+    peak_tick: u64,
+    final_live: usize,
+    enval_harvest: f64,
+    chemical_harvest: f64,
+    recharge_energy: f64,
+    renewable_coverage: f64,
+    max_ledger_residual: f64,
+    initial_totals: [f64; ELEMENT_COUNT],
+    final_totals: [f64; ELEMENT_COUNT],
+    wall_seconds: f64,
+}
+
+impl ViabilityResult {
+    fn relative_total_drift(&self) -> f64 {
+        let initial = self.initial_totals.iter().sum::<f64>();
+        let final_total = self.final_totals.iter().sum::<f64>();
+        (final_total - initial).abs() / initial.abs().max(1.0e-12)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -189,6 +260,7 @@ struct StatsInterval {
     reaction_successes: u64,
     executed_metabolic_flux: f64,
     uptake_flux: f64,
+    leak_flux: f64,
     secretion_flux: f64,
     cell_steps: u64,
     enzyme_attempts: u64,
@@ -233,6 +305,7 @@ impl StatsInterval {
             reaction_successes,
             executed_metabolic_flux: reactions.executed_metabolic_flux,
             uptake_flux: reactions.uptake_flux,
+            leak_flux: reactions.leak_flux,
             secretion_flux: reactions.secretion_flux,
             cell_steps: operations.cell_steps,
             enzyme_attempts: operations.metabolic_enzyme_attempts,
@@ -249,6 +322,7 @@ fn main() -> ExitCode {
         Ok(Some(Command::Run(options))) => run_command(options),
         Ok(Some(Command::Bench(options))) => bench_command(options),
         Ok(Some(Command::Inspect(options))) => inspect_command(options),
+        Ok(Some(Command::Viability(options))) => viability_command(options),
         Ok(None) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");
@@ -311,6 +385,7 @@ fn run_command(options: RunOptions) -> ExitCode {
         eprintln!("failed to emit stats: {err}");
         return ExitCode::from(1);
     }
+    let mut completed_steps = options.steps;
     for step_index in 1..=options.steps {
         if options.profile {
             profile.add_step(world.step_profiled());
@@ -348,9 +423,26 @@ fn run_command(options: RunOptions) -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+
+        if options
+            .until_cells
+            .is_some_and(|target| world.cell_count() >= target)
+        {
+            if !options.quiet {
+                println!(
+                    "until_cells reached tick={} cells={}",
+                    world.tick_count(),
+                    world.cell_count()
+                );
+            }
+            completed_steps = step_index;
+            break;
+        }
     }
 
-    if options.steps > 0 && (options.stats_every == 0 || options.steps % options.stats_every != 0) {
+    if completed_steps > 0
+        && (options.stats_every == 0 || completed_steps % options.stats_every != 0)
+    {
         if let Err(err) = emit_world_stats_profiled(
             &world,
             &mut csv,
@@ -398,7 +490,7 @@ fn run_command(options: RunOptions) -> ExitCode {
 
     if options.profile {
         print_profile_summary(
-            options.steps,
+            completed_steps,
             wall_start.elapsed(),
             profile,
             options.profile_json || options.json,
@@ -519,6 +611,255 @@ fn bench_command(options: BenchOptions) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn viability_command(options: ViabilityOptions) -> ExitCode {
+    if options.seeds.is_empty() {
+        eprintln!("viability requires at least one seed");
+        return ExitCode::from(2);
+    }
+    let mut probe = options.config.clone();
+    probe.seed = options.seeds[0].clone();
+    if let Err(err) = probe.validate() {
+        eprintln!("invalid viability config: {err}");
+        return ExitCode::from(2);
+    }
+
+    let jobs = options.jobs.clamp(1, options.seeds.len());
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(vec![None; options.seeds.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(seed) = options.seeds.get(index) else {
+                        break;
+                    };
+                    let mut config = options.config.clone();
+                    config.seed = seed.clone();
+                    let result = run_viability_world(config, options.steps, options.quiet);
+                    results.lock().expect("viability results lock")[index] = Some(result);
+                }
+            });
+        }
+    });
+    let results = results
+        .into_inner()
+        .expect("viability results lock")
+        .into_iter()
+        .map(|result| result.expect("every viability seed produces a result"))
+        .collect::<Vec<_>>();
+
+    if options.json {
+        print_viability_json(&results, options.steps);
+    } else {
+        print_viability_table(&results, options.steps);
+    }
+    if results.iter().all(|result| result.passed) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResult {
+    let wall_start = Instant::now();
+    let mut result = ViabilityResult {
+        seed: config.seed.clone(),
+        ..ViabilityResult::default()
+    };
+    let founders = config.initial_founder_count;
+    let mut world = match World::new(config) {
+        Ok(world) => world,
+        Err(err) => {
+            result
+                .failures
+                .push(format!("world creation failed: {err}"));
+            return result;
+        }
+    };
+    if let Err(err) = world.spawn_founder_cells(founders) {
+        result.failures.push(format!("founder spawn failed: {err}"));
+        return result;
+    }
+    result.initial_totals = world.compact_stats().system_element_amounts;
+    result.peak_live = world.cell_count();
+
+    let mut honest = true;
+    for tick in 1..=steps {
+        world.step();
+        let sample = tick % VIABILITY_SAMPLE_EVERY == 0 || tick == steps;
+        let check_invariants = tick % VIABILITY_INVARIANTS_EVERY == 0 || tick == steps;
+        if !sample && !check_invariants {
+            continue;
+        }
+        let live = world.cell_count();
+        result.final_tick = tick;
+        result.final_live = live;
+        if live > result.peak_live {
+            result.peak_live = live;
+            result.peak_tick = tick;
+        }
+        if tick >= VIABILITY_MIN_LIVE_AFTER_TICK {
+            result.min_live_after_warmup = Some(
+                result
+                    .min_live_after_warmup
+                    .map_or(live, |min| min.min(live)),
+            );
+        }
+        let residual = world.energy_ledger_residual().abs();
+        result.max_ledger_residual = result.max_ledger_residual.max(residual);
+        if residual > world.energy_ledger().closure_tolerance() && honest {
+            honest = false;
+            result.failures.push(format!(
+                "energy ledger residual {residual:.3e} exceeds tolerance at tick {tick}"
+            ));
+        }
+        if check_invariants {
+            if let Err(err) = world.check_invariants() {
+                result
+                    .failures
+                    .push(format!("invariant failure at tick {tick}: {err}"));
+                break;
+            }
+        }
+        if live == 0 {
+            result.extinction_tick = Some(tick);
+            result.failures.push(format!("extinct at tick {tick}"));
+            break;
+        }
+        if live > VIABILITY_POPULATION_CAP {
+            result.failures.push(format!(
+                "population {live} exceeds cap {VIABILITY_POPULATION_CAP} at tick {tick}"
+            ));
+            break;
+        }
+        if !quiet && tick % VIABILITY_PROGRESS_EVERY == 0 {
+            let coverage = renewable_coverage(&world.energy_ledger(), &world.enval_ledger());
+            eprintln!(
+                "viability seed={} tick={} cells={} peak={} coverage={:.3} wall={:.1}s",
+                result.seed,
+                tick,
+                live,
+                result.peak_live,
+                coverage,
+                wall_start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    let energy = world.energy_ledger();
+    let enval = world.enval_ledger();
+    result.enval_harvest = energy.enval_harvest;
+    result.chemical_harvest = energy.chemical_harvest;
+    result.recharge_energy = enval.recharge_energy;
+    result.renewable_coverage = renewable_coverage(&energy, &enval);
+    result.final_totals = world.compact_stats().system_element_amounts;
+    if result.extinction_tick.is_none()
+        && result.final_tick == steps
+        && result.renewable_coverage < VIABILITY_MIN_RENEWABLE_COVERAGE
+    {
+        result.failures.push(format!(
+            "renewable coverage {:.3} is below {VIABILITY_MIN_RENEWABLE_COVERAGE}",
+            result.renewable_coverage
+        ));
+    }
+    result.passed = result.failures.is_empty() && result.final_tick == steps;
+    result.wall_seconds = wall_start.elapsed().as_secs_f64();
+    result
+}
+
+fn print_viability_table(results: &[ViabilityResult], steps: u64) {
+    println!(
+        "{:<6} {:<4} {:>9} {:>8} {:>15} {:>7} {:>11} {:>11} {:>11} {:>8} {:>10} {:>14} {:>8}",
+        "seed",
+        "pass",
+        "extinct",
+        "min_live",
+        "peak@tick",
+        "final",
+        "enval_harv",
+        "chem_harv",
+        "recharge_E",
+        "coverage",
+        "max_resid",
+        "AF_total_drift",
+        "wall_s"
+    );
+    for result in results {
+        println!(
+            "{:<6} {:<4} {:>9} {:>8} {:>15} {:>7} {:>11.1} {:>11.1} {:>11.1} {:>8.3} {:>10.2e} {:>14.2e} {:>8.1}",
+            result.seed,
+            if result.passed { "yes" } else { "NO" },
+            result
+                .extinction_tick
+                .map_or_else(|| "-".to_owned(), |tick| tick.to_string()),
+            result
+                .min_live_after_warmup
+                .map_or_else(|| "-".to_owned(), |live| live.to_string()),
+            format!("{}@{}", result.peak_live, result.peak_tick),
+            result.final_live,
+            result.enval_harvest,
+            result.chemical_harvest,
+            result.recharge_energy,
+            result.renewable_coverage,
+            result.max_ledger_residual,
+            result.relative_total_drift(),
+            result.wall_seconds,
+        );
+        for failure in &result.failures {
+            println!("       - {failure}");
+        }
+    }
+    let passed = results.iter().filter(|result| result.passed).count();
+    println!(
+        "viability {} {}/{} seeds passed over {} ticks",
+        if passed == results.len() {
+            "PASS"
+        } else {
+            "FAIL"
+        },
+        passed,
+        results.len(),
+        steps
+    );
+}
+
+fn print_viability_json(results: &[ViabilityResult], steps: u64) {
+    let seeds = results
+        .iter()
+        .map(|result| {
+            serde_json::json!({
+                "seed": result.seed,
+                "passed": result.passed,
+                "failures": result.failures,
+                "final_tick": result.final_tick,
+                "extinction_tick": result.extinction_tick,
+                "min_live_after_tick_1000": result.min_live_after_warmup,
+                "peak_live": result.peak_live,
+                "peak_tick": result.peak_tick,
+                "final_live": result.final_live,
+                "enval_harvest": result.enval_harvest,
+                "chemical_harvest": result.chemical_harvest,
+                "recharge_energy": result.recharge_energy,
+                "renewable_coverage": result.renewable_coverage,
+                "max_ledger_residual": result.max_ledger_residual,
+                "initial_element_totals": element_amounts_json(result.initial_totals),
+                "final_element_totals": element_amounts_json(result.final_totals),
+                "relative_total_element_drift": result.relative_total_drift(),
+                "wall_seconds": result.wall_seconds,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "viability": {
+            "steps": steps,
+            "passed": results.iter().all(|result| result.passed),
+            "seeds": seeds,
+        }
+    });
+    println!("{}", value);
 }
 
 fn inspect_command(options: InspectOptions) -> ExitCode {
@@ -647,6 +988,10 @@ where
             args.next();
             parse_bench(args)
         }
+        Some("viability") => {
+            args.next();
+            parse_viability(args)
+        }
         Some("inspect") => {
             args.next();
             let snapshot = args
@@ -745,6 +1090,9 @@ where
             "--verbose-stats" => options.stats_mode = StatsMode::Full,
             "--json" => options.json = true,
             "--quiet" => options.quiet = true,
+            "--until-cells" => {
+                options.until_cells = Some(parse_value(&mut args, "--until-cells")?);
+            }
             "--predation" => {
                 options.config.predation_enabled = true;
                 options.predation_override = Some(true);
@@ -754,7 +1102,11 @@ where
                 options.predation_override = Some(false);
             }
             "--trace" => parse_trace_mode(&next_value(&mut args, "--trace")?)?,
-            other => return Err(format!("unrecognized argument '{other}'")),
+            other => {
+                if !parse_environment_flag(other, &mut args, &mut options.config)? {
+                    return Err(format!("unrecognized argument '{other}'"));
+                }
+            }
         }
     }
     Ok(true)
@@ -806,10 +1158,93 @@ where
             "--predation" => options.config.predation_enabled = true,
             "--no-predation" => options.config.predation_enabled = false,
             "--trace" => parse_trace_mode(&next_value(&mut args, "--trace")?)?,
-            other => return Err(format!("unrecognized argument '{other}'")),
+            other => {
+                if !parse_environment_flag(other, &mut args, &mut options.config)? {
+                    return Err(format!("unrecognized argument '{other}'"));
+                }
+            }
         }
     }
     Ok(Some(Command::Bench(options)))
+}
+
+fn parse_viability<I>(mut args: std::iter::Peekable<I>) -> Result<Option<Command>, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut options = ViabilityOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(None);
+            }
+            "--seeds" => {
+                options.seeds = next_value(&mut args, "--seeds")?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|seed| !seed.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if options.seeds.is_empty() {
+                    return Err("--seeds requires at least one seed".to_owned());
+                }
+            }
+            "--steps" => options.steps = parse_value(&mut args, "--steps")?,
+            "--jobs" => {
+                options.jobs = parse_value(&mut args, "--jobs")?;
+                if options.jobs == 0 {
+                    return Err("--jobs must be at least 1".to_owned());
+                }
+            }
+            "--json" => options.json = true,
+            "--quiet" => options.quiet = true,
+            "--width" => options.config.width = parse_value(&mut args, "--width")?,
+            "--height" => options.config.height = parse_value(&mut args, "--height")?,
+            "--initial-cells" => {
+                options.config.initial_founder_count = parse_value(&mut args, "--initial-cells")?;
+            }
+            "--dt-seconds" => options.config.dt_seconds = parse_value(&mut args, "--dt-seconds")?,
+            "--enval-alpha" => {
+                options.config.enval_diffusion_alpha = parse_value(&mut args, "--enval-alpha")?;
+            }
+            "--predation" => options.config.predation_enabled = true,
+            "--no-predation" => options.config.predation_enabled = false,
+            other => {
+                if !parse_environment_flag(other, &mut args, &mut options.config)? {
+                    return Err(format!("unrecognized argument '{other}'"));
+                }
+            }
+        }
+    }
+    Ok(Some(Command::Viability(options)))
+}
+
+fn parse_environment_flag<I>(
+    arg: &str,
+    args: &mut std::iter::Peekable<I>,
+    config: &mut Config,
+) -> Result<bool, String>
+where
+    I: Iterator<Item = String>,
+{
+    match arg {
+        "--permeability" => config.membrane_permeability = parse_value(args, arg)?,
+        "--catalyst-upkeep" => config.catalyst_upkeep_per_sec = parse_value(args, arg)?,
+        "--source-pairs" => config.enval_sources.pairs = parse_value(args, arg)?,
+        "--source-radius" => config.enval_sources.radius = parse_value(args, arg)?,
+        "--source-magnitude" => config.enval_sources.magnitude = parse_value(args, arg)?,
+        "--source-relaxation" => {
+            config.enval_sources.relaxation_per_second = parse_value(args, arg)?;
+        }
+        "--recharge-rate" => config.enval_recharge.rate_per_second = parse_value(args, arg)?,
+        "--heterogeneity" => config.element_fields.heterogeneity = parse_value(args, arg)?,
+        "--heterogeneity-scale" => {
+            config.element_fields.heterogeneity_scale = parse_value(args, arg)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn next_value<I>(args: &mut std::iter::Peekable<I>, flag: &str) -> Result<String, String>
@@ -960,7 +1395,7 @@ fn open_csv(path: Option<&PathBuf>) -> Result<Option<BufWriter<File>>, std::io::
 }
 
 fn csv_header() -> &'static str {
-    "tick,sim_time,population,live_cells,cell_records,dead_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,predation_events,interval_predation,cells_consumed,interval_consumed,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_time_without_food,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,cells_with_attackase,cells_with_defensase,avg_attack,max_attack,avg_defense,max_defense,enz_metabolic,enz_defensase,enz_attackase,rx_attempts,rx_successes,rx_no_substrate,rx_success_metabolic,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,predator_energy_gained,avg_energy_gained_per_predation,enzyme_transfers,enzyme_replacements"
+    "tick,sim_time,population,live_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,predation_events,interval_predation,cells_consumed,interval_consumed,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,cells_with_attackase,cells_with_defensase,avg_attack,max_attack,avg_defense,max_defense,enz_metabolic,enz_defensase,enz_attackase,rx_attempts,rx_successes,rx_no_substrate,rx_success_metabolic,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,leak_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_leak_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,predator_energy_gained,avg_energy_gained_per_predation,enzyme_transfers,enzyme_replacements,energy_founder,energy_injected,energy_extracted,energy_chemical_harvest,energy_chemical_cost,energy_enval_harvest,energy_pump_cost,energy_maintenance,energy_death_loss,energy_predation_transfer,energy_ledger_residual,renewable_coverage,enval_source_inflow,enval_cell_uptake,enval_cell_emission,enval_recharge,enval_edits,recharge_amount,recharge_energy"
 }
 
 fn emit_world_stats_profiled(
@@ -1030,8 +1465,8 @@ fn emit_stats(
     Ok(())
 }
 
-fn write_csv_record(
-    writer: &mut BufWriter<File>,
+fn write_csv_record<W: Write>(
+    writer: &mut W,
     stats: &WorldStats,
     interval: &StatsInterval,
 ) -> std::io::Result<()> {
@@ -1040,8 +1475,6 @@ fn write_csv_record(
         format!("{:.6}", stats.sim_time_seconds),
         stats.cell_count.to_string(),
         stats.live_cell_count.to_string(),
-        stats.cell_record_count.to_string(),
-        stats.dead_cell_count.to_string(),
         format!("{:.8}", stats.occupancy_fraction),
         stats.occupied_tile_count.to_string(),
         stats.empty_tile_count.to_string(),
@@ -1086,7 +1519,6 @@ fn write_csv_record(
         format!("{:.6}", stats.total_cell_energy),
         format!("{:.6}", stats.average_cell_age),
         format!("{:.6}", stats.max_cell_age),
-        format!("{:.6}", stats.average_time_without_food),
         format!("{:.6}", stats.average_enzyme_count),
         stats.min_enzyme_count.to_string(),
         stats.max_enzyme_count.to_string(),
@@ -1124,6 +1556,7 @@ fn write_csv_record(
         ),
         format!("{:.8}", stats.reaction_counters.executed_metabolic_flux),
         format!("{:.8}", stats.reaction_counters.uptake_flux),
+        format!("{:.8}", stats.reaction_counters.leak_flux),
         format!("{:.8}", stats.reaction_counters.secretion_flux),
         stats.reaction_counters.divisions.to_string(),
         interval.divisions.to_string(),
@@ -1131,6 +1564,7 @@ fn write_csv_record(
         interval.reaction_successes.to_string(),
         format!("{:.8}", interval.executed_metabolic_flux),
         format!("{:.8}", interval.uptake_flux),
+        format!("{:.8}", interval.leak_flux),
         format!("{:.8}", interval.secretion_flux),
         stats.operation_counters.cell_steps.to_string(),
         interval.cell_steps.to_string(),
@@ -1154,8 +1588,27 @@ fn write_csv_record(
         format!("{:.6}", stats.average_energy_gained_per_predation),
         stats.predation_enzyme_transfers.to_string(),
         stats.predation_enzyme_replacements.to_string(),
+        format!("{:.9}", stats.energy_ledger.founder_energy),
+        format!("{:.9}", stats.energy_ledger.injected_energy),
+        format!("{:.9}", stats.energy_ledger.extracted_energy),
+        format!("{:.9}", stats.energy_ledger.chemical_harvest),
+        format!("{:.9}", stats.energy_ledger.chemical_cost),
+        format!("{:.9}", stats.energy_ledger.enval_harvest),
+        format!("{:.9}", stats.energy_ledger.pump_cost),
+        format!("{:.9}", stats.energy_ledger.maintenance),
+        format!("{:.9}", stats.energy_ledger.death_loss),
+        format!("{:.9}", stats.energy_ledger.predation_transfer),
+        format!("{:.6e}", stats.energy_ledger_residual),
+        format!("{:.8}", stats.renewable_coverage),
+        format!("{:.9}", stats.enval_ledger.source_inflow),
+        format!("{:.9}", stats.enval_ledger.cell_uptake),
+        format!("{:.9}", stats.enval_ledger.cell_emission),
+        format!("{:.9}", stats.enval_ledger.recharge),
+        format!("{:.9}", stats.enval_ledger.edits),
+        format!("{:.9}", stats.enval_ledger.recharge_amount),
+        format!("{:.9}", stats.enval_ledger.recharge_energy),
     ];
-    debug_assert_eq!(fields.len(), csv_header().split(',').count());
+    assert_eq!(fields.len(), csv_header().split(',').count());
     writeln!(writer, "{}", fields.join(","))
 }
 
@@ -1174,7 +1627,7 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
     let extracellular = stats.extracellular_element_amounts.iter().sum::<f64>();
     let intracellular = stats.intracellular_element_amounts.iter().sum::<f64>();
     println!(
-        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} predation={} d_predation={} consumed={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4}",
+        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} predation={} d_predation={} consumed={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4} energy=founder:{:.3} injected:{:.3} extracted:{:.3} chem_harvest:{:.3} chem_cost:{:.3} enval_harvest:{:.3} pump:{:.3} maintenance:{:.3} death_loss:{:.3} predation:{:.3} residual:{:.3e} coverage={:.4}",
         stats.tick_count,
         stats.sim_time_seconds,
         stats.width,
@@ -1215,6 +1668,18 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.system_element_amounts[3],
         stats.system_element_amounts[4],
         stats.system_element_amounts[5],
+        stats.energy_ledger.founder_energy,
+        stats.energy_ledger.injected_energy,
+        stats.energy_ledger.extracted_energy,
+        stats.energy_ledger.chemical_harvest,
+        stats.energy_ledger.chemical_cost,
+        stats.energy_ledger.enval_harvest,
+        stats.energy_ledger.pump_cost,
+        stats.energy_ledger.maintenance,
+        stats.energy_ledger.death_loss,
+        stats.energy_ledger.predation_transfer,
+        stats.energy_ledger_residual,
+        stats.renewable_coverage,
     );
 }
 
@@ -1241,10 +1706,8 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.system_element_amounts,
     );
     println!(
-        "  cells live={} records={} dead_records={} births={} (+{}) deaths={} (+{}) divisions={} (+{}) avg_energy={:.3} min_energy={:.3} max_energy={:.3} avg_age={:.3}s max_age={:.3}s avg_no_food={:.3}",
+        "  cells live={} births={} (+{}) deaths={} (+{}) divisions={} (+{}) avg_energy={:.3} min_energy={:.3} max_energy={:.3} avg_age={:.3}s max_age={:.3}s",
         stats.live_cell_count,
-        stats.cell_record_count,
-        stats.dead_cell_count,
         stats.births,
         interval.births,
         stats.deaths,
@@ -1256,7 +1719,6 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.max_cell_energy,
         stats.average_cell_age,
         stats.max_cell_age,
-        stats.average_time_without_food,
     );
     println!(
         "  enzymes avg={:.2} min={} max={} cap={} cap_frac={:.3} hist_1_10={:?} attack_cells={} defense_cells={} avg_attack={:.2} max_attack={} avg_defense={:.2} max_defense={} totals=Met:{} Def:{} Atk:{}",
@@ -1328,6 +1790,31 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.near_zero_enval_tile_count,
     );
     println!(
+        "  energy_ledger founder={:.6} injected={:.6} extracted={:.6} chemical_harvest={:.6} chemical_cost={:.6} enval_harvest={:.6} pump_cost={:.6} maintenance={:.6} death_loss={:.6} predation_transfer={:.6} residual={:.3e} renewable_coverage={:.6}",
+        stats.energy_ledger.founder_energy,
+        stats.energy_ledger.injected_energy,
+        stats.energy_ledger.extracted_energy,
+        stats.energy_ledger.chemical_harvest,
+        stats.energy_ledger.chemical_cost,
+        stats.energy_ledger.enval_harvest,
+        stats.energy_ledger.pump_cost,
+        stats.energy_ledger.maintenance,
+        stats.energy_ledger.death_loss,
+        stats.energy_ledger.predation_transfer,
+        stats.energy_ledger_residual,
+        stats.renewable_coverage,
+    );
+    println!(
+        "  enval_ledger source_inflow={:.6} cell_uptake={:.6} cell_emission={:.6} recharge={:.6} edits={:.6} recharge_amount={:.6} recharge_energy={:.6}",
+        stats.enval_ledger.source_inflow,
+        stats.enval_ledger.cell_uptake,
+        stats.enval_ledger.cell_emission,
+        stats.enval_ledger.recharge,
+        stats.enval_ledger.edits,
+        stats.enval_ledger.recharge_amount,
+        stats.enval_ledger.recharge_energy,
+    );
+    println!(
         "  interval ticks={} pop_delta={:+} cell_steps={} cell_steps_per_sec={:.3} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reactions_per_sec={:.3}",
         interval.tick_delta,
         interval.population_delta,
@@ -1346,8 +1833,6 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
         "width": stats.width,
         "height": stats.height,
         "population": stats.live_cell_count,
-        "cell_records": stats.cell_record_count,
-        "dead_cells": stats.dead_cell_count,
         "occupancy_fraction": stats.occupancy_fraction,
         "births": stats.births,
         "deaths": stats.deaths,
@@ -1382,11 +1867,35 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
             "no_substrate": stats.reaction_counters.no_substrate_by_type.total(),
             "executed_metabolic_flux": stats.reaction_counters.executed_metabolic_flux,
             "uptake_flux": stats.reaction_counters.uptake_flux,
+            "leak_flux": stats.reaction_counters.leak_flux,
             "secretion_flux": stats.reaction_counters.secretion_flux,
             "divisions": stats.reaction_counters.divisions,
             "energy_delta": stats.reaction_counters.energy_delta_by_type.total(),
             "enval_input": stats.reaction_counters.enval_input_by_type.total(),
             "enval_output": stats.reaction_counters.enval_output_by_type.total(),
+        },
+        "energy_ledger": {
+            "founder_energy": stats.energy_ledger.founder_energy,
+            "injected_energy": stats.energy_ledger.injected_energy,
+            "extracted_energy": stats.energy_ledger.extracted_energy,
+            "chemical_harvest": stats.energy_ledger.chemical_harvest,
+            "chemical_cost": stats.energy_ledger.chemical_cost,
+            "enval_harvest": stats.energy_ledger.enval_harvest,
+            "pump_cost": stats.energy_ledger.pump_cost,
+            "maintenance": stats.energy_ledger.maintenance,
+            "death_loss": stats.energy_ledger.death_loss,
+            "predation_transfer": stats.energy_ledger.predation_transfer,
+            "residual": stats.energy_ledger_residual,
+            "renewable_coverage": stats.renewable_coverage,
+        },
+        "enval_ledger": {
+            "source_inflow": stats.enval_ledger.source_inflow,
+            "cell_uptake": stats.enval_ledger.cell_uptake,
+            "cell_emission": stats.enval_ledger.cell_emission,
+            "recharge": stats.enval_ledger.recharge,
+            "edits": stats.enval_ledger.edits,
+            "recharge_amount": stats.enval_ledger.recharge_amount,
+            "recharge_energy": stats.enval_ledger.recharge_energy,
         },
         "enval": {
             "average": stats.average_enval,
@@ -1409,6 +1918,7 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
             "reaction_successes": interval.reaction_successes,
             "executed_metabolic_flux": interval.executed_metabolic_flux,
             "uptake_flux": interval.uptake_flux,
+            "leak_flux": interval.leak_flux,
             "secretion_flux": interval.secretion_flux,
             "cell_steps": interval.cell_steps,
             "cell_steps_per_sec": interval.cell_steps_per_sec,
@@ -1552,9 +2062,12 @@ fn duration_ms(duration: Duration) -> f64 {
 fn print_usage() {
     eprintln!(
         "usage:
-  microcosm run [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--stats-every N] [--stats-mode compact|full] [--json] [--check-invariants] [--check-invariants-every N] [--csv [path]] [--snapshot-in path] [--snapshot-out [path]] [--profile|--profile-json] [--no-predation] [--trace off]
+  microcosm run [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--until-cells N] [--stats-every N] [--stats-mode compact|full] [--json] [--check-invariants] [--check-invariants-every N] [--csv [path]] [--snapshot-in path] [--snapshot-out [path]] [--profile|--profile-json] [--no-predation] [--trace off]
   microcosm bench [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--stats-every N] [--stats-mode compact|full] [--json] [--profile|--profile-json] [--no-predation] [--trace off]
-  microcosm inspect snapshot.micosm"
+  microcosm inspect snapshot.micosm
+  microcosm viability [--seeds 42,1,2,3,7] [--steps 60000] [--jobs N] [--json] [--quiet] [--width W] [--height H] [--initial-cells N] [--no-predation]
+environment flags (run, bench, viability):
+  [--permeability P] [--catalyst-upkeep U] [--source-pairs N] [--source-radius R] [--source-magnitude M] [--source-relaxation K] [--recharge-rate K] [--heterogeneity H] [--heterogeneity-scale S]"
     );
 }
 
@@ -1740,6 +2253,45 @@ mod tests {
     }
 
     #[test]
+    fn csv_rows_have_one_value_per_header_column_including_ledgers() {
+        let mut world = World::new(Config {
+            seed: "cli-csv-columns".to_owned(),
+            width: 16,
+            height: 12,
+            ..Config::default()
+        })
+        .unwrap();
+        world.spawn_founder_cells(4).unwrap();
+        world.step_many(20);
+        let mut state = StatsEmissionState::default();
+        let first = world.stats();
+        state.capture_interval(&first, Instant::now());
+        world.step_many(5);
+        let stats = world.stats();
+        let interval = state.capture_interval(&stats, Instant::now());
+        let mut buffer = Vec::new();
+        write_csv_record(&mut buffer, &stats, &interval).unwrap();
+        let row = String::from_utf8(buffer).unwrap();
+        let header = csv_header().split(',').collect::<Vec<_>>();
+        assert_eq!(row.trim_end().split(',').count(), header.len());
+        for column in [
+            "energy_enval_harvest",
+            "energy_pump_cost",
+            "energy_ledger_residual",
+            "renewable_coverage",
+            "enval_source_inflow",
+            "recharge_energy",
+            "leak_flux",
+        ] {
+            assert!(header.contains(&column), "missing {column}");
+        }
+        for removed in ["cell_records", "dead_cells"] {
+            assert!(!header.contains(&removed), "stale {removed}");
+        }
+        assert!(!header.iter().any(|column| column.contains("without_food")));
+    }
+
+    #[test]
     fn trace_off_is_accepted_and_other_trace_modes_error() {
         let args = vec![
             "bench".to_owned(),
@@ -1804,6 +2356,120 @@ mod tests {
 
         let json = collect_stats_for_output(&world, false, StatsMode::Compact, true);
         assert_eq!(json.enval_p50.to_bits(), 0.25_f32.to_bits());
+    }
+
+    #[test]
+    fn viability_defaults_and_flags_parse() {
+        let command = parse_args(vec!["viability".to_owned()]).unwrap().unwrap();
+        let Command::Viability(options) = command else {
+            panic!("expected viability command");
+        };
+        assert_eq!(options.seeds, vec!["42", "1", "2", "3", "7"]);
+        assert_eq!(options.steps, 60_000);
+        assert!(options.jobs >= 1);
+
+        let args = [
+            "viability",
+            "--seeds",
+            "5, 9",
+            "--steps",
+            "300",
+            "--jobs",
+            "2",
+            "--json",
+        ]
+        .map(str::to_owned);
+        let command = parse_args(args).unwrap().unwrap();
+        let Command::Viability(options) = command else {
+            panic!("expected viability command");
+        };
+        assert_eq!(options.seeds, vec!["5", "9"]);
+        assert_eq!(options.steps, 300);
+        assert_eq!(options.jobs, 2);
+        assert!(options.json);
+        assert!(parse_args(["viability", "--jobs", "0"].map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn until_cells_parses_and_stops_a_run_at_the_population_target() {
+        let args = ["run", "--steps", "500", "--until-cells", "4000"].map(str::to_owned);
+        let Command::Run(options) = parse_args(args).unwrap().unwrap() else {
+            panic!("expected run command");
+        };
+        assert_eq!(options.until_cells, Some(4000));
+        assert!(parse_args(["run", "--until-cells"].map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn environment_flags_parse_for_every_world_command() {
+        for command in ["run", "bench", "viability"] {
+            let args = [
+                command,
+                "--permeability",
+                "6",
+                "--catalyst-upkeep",
+                "0.02",
+                "--source-pairs",
+                "2",
+                "--source-radius",
+                "5",
+                "--source-magnitude",
+                "1.5",
+                "--source-relaxation",
+                "8",
+                "--recharge-rate",
+                "0.2",
+                "--heterogeneity",
+                "0.3",
+                "--heterogeneity-scale",
+                "32",
+            ]
+            .map(str::to_owned);
+            let config = match parse_args(args).unwrap().unwrap() {
+                Command::Run(options) => options.config,
+                Command::Bench(options) => options.config,
+                Command::Viability(options) => options.config,
+                Command::Inspect(_) => panic!("unexpected inspect command"),
+            };
+            assert_eq!(config.membrane_permeability, 6.0);
+            assert_eq!(config.catalyst_upkeep_per_sec, 0.02);
+            assert_eq!(config.enval_sources.pairs, 2);
+            assert_eq!(config.enval_sources.radius, 5.0);
+            assert_eq!(config.enval_sources.magnitude, 1.5);
+            assert_eq!(config.enval_sources.relaxation_per_second, 8.0);
+            assert_eq!(config.enval_recharge.rate_per_second, 0.2);
+            assert_eq!(config.element_fields.heterogeneity, 0.3);
+            assert_eq!(config.element_fields.heterogeneity_scale, 32.0);
+        }
+    }
+
+    #[test]
+    fn viability_results_do_not_depend_on_thread_count() {
+        let config = Config {
+            width: 24,
+            height: 18,
+            initial_founder_count: 6,
+            ..Config::default()
+        };
+        let run = |seed: &str| {
+            let mut config = config.clone();
+            config.seed = seed.to_owned();
+            run_viability_world(config, 300, true)
+        };
+        let sequential = ["a", "b"].map(run);
+        let parallel = std::thread::scope(|scope| {
+            let handles = ["a", "b"].map(|seed| scope.spawn(move || run(seed)));
+            handles.map(|handle| handle.join().unwrap())
+        });
+        for (left, right) in sequential.iter().zip(&parallel) {
+            assert_eq!(left.final_live, right.final_live);
+            assert_eq!(left.peak_live, right.peak_live);
+            assert_eq!(
+                left.chemical_harvest.to_bits(),
+                right.chemical_harvest.to_bits()
+            );
+            assert_eq!(left.final_totals, right.final_totals);
+        }
     }
 
     #[test]

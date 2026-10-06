@@ -2,8 +2,9 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, ElementFieldConfig, GenomePatch, LineageId, Position, RenderBrushPreview,
-    RenderBuffers, RenderDisplayMode, RenderVisualState, VERSION, World, WorldStats,
+    CellId, Config, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig, GenomePatch,
+    LineageId, Position, RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState,
+    VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -58,8 +59,6 @@ pub struct WasmStats {
     pub system_f: f64,
     pub total_element_amount: f64,
     pub live_cell_count: u32,
-    pub cell_record_count: u32,
-    pub dead_cell_count: u32,
     pub births: u64,
     pub deaths: u64,
     pub predation_events: u64,
@@ -100,6 +99,7 @@ pub struct WasmStats {
     pub reaction_successes: u64,
     pub executed_metabolic_flux: f64,
     pub uptake_flux: f64,
+    pub leak_flux: f64,
     pub secretion_flux: f64,
     pub divisions: u64,
     pub element_field_diffusion_tiles: u64,
@@ -112,6 +112,25 @@ pub struct WasmStats {
     pub spatial_candidate_checks: u64,
     pub overlap_candidates: u64,
     pub overlap_corrections: u64,
+    pub energy_founder: f64,
+    pub energy_injected: f64,
+    pub energy_extracted: f64,
+    pub energy_chemical_harvest: f64,
+    pub energy_chemical_cost: f64,
+    pub energy_enval_harvest: f64,
+    pub energy_pump_cost: f64,
+    pub energy_maintenance: f64,
+    pub energy_death_loss: f64,
+    pub energy_predation_transfer: f64,
+    pub energy_ledger_residual: f64,
+    pub renewable_coverage: f64,
+    pub enval_source_inflow: f64,
+    pub enval_cell_uptake: f64,
+    pub enval_cell_emission: f64,
+    pub enval_recharge: f64,
+    pub enval_edits: f64,
+    pub recharge_amount: f64,
+    pub recharge_energy: f64,
     pub render_epoch: u32,
 }
 
@@ -146,8 +165,6 @@ impl From<&WorldStats> for WasmStats {
             system_f: stats.system_element_amounts[5],
             total_element_amount: stats.total_element_amount,
             live_cell_count: clamp_usize_to_u32(stats.live_cell_count),
-            cell_record_count: clamp_usize_to_u32(stats.cell_record_count),
-            dead_cell_count: clamp_usize_to_u32(stats.dead_cell_count),
             births: stats.births,
             deaths: stats.deaths,
             predation_events: stats.predation_events,
@@ -188,6 +205,7 @@ impl From<&WorldStats> for WasmStats {
             reaction_successes: stats.reaction_counters.total_successes(),
             executed_metabolic_flux: stats.reaction_counters.executed_metabolic_flux,
             uptake_flux: stats.reaction_counters.uptake_flux,
+            leak_flux: stats.reaction_counters.leak_flux,
             secretion_flux: stats.reaction_counters.secretion_flux,
             divisions: stats.reaction_counters.divisions,
             element_field_diffusion_tiles: stats.operation_counters.element_field_diffusion_tiles,
@@ -200,6 +218,25 @@ impl From<&WorldStats> for WasmStats {
             spatial_candidate_checks: stats.operation_counters.spatial_candidate_checks,
             overlap_candidates: stats.operation_counters.overlap_candidates,
             overlap_corrections: stats.operation_counters.overlap_corrections,
+            energy_founder: stats.energy_ledger.founder_energy,
+            energy_injected: stats.energy_ledger.injected_energy,
+            energy_extracted: stats.energy_ledger.extracted_energy,
+            energy_chemical_harvest: stats.energy_ledger.chemical_harvest,
+            energy_chemical_cost: stats.energy_ledger.chemical_cost,
+            energy_enval_harvest: stats.energy_ledger.enval_harvest,
+            energy_pump_cost: stats.energy_ledger.pump_cost,
+            energy_maintenance: stats.energy_ledger.maintenance,
+            energy_death_loss: stats.energy_ledger.death_loss,
+            energy_predation_transfer: stats.energy_ledger.predation_transfer,
+            energy_ledger_residual: stats.energy_ledger_residual,
+            renewable_coverage: stats.renewable_coverage,
+            enval_source_inflow: stats.enval_ledger.source_inflow,
+            enval_cell_uptake: stats.enval_ledger.cell_uptake,
+            enval_cell_emission: stats.enval_ledger.cell_emission,
+            enval_recharge: stats.enval_ledger.recharge,
+            enval_edits: stats.enval_ledger.edits,
+            recharge_amount: stats.enval_ledger.recharge_amount,
+            recharge_energy: stats.enval_ledger.recharge_energy,
             render_epoch: (stats.tick_count & u64::from(u32::MAX)) as u32,
         }
     }
@@ -214,6 +251,10 @@ struct WasmInitConfig {
     dt_seconds: Option<f64>,
     enval_diffusion_alpha: Option<f32>,
     element_fields: Option<ElementFieldConfig>,
+    membrane_permeability: Option<f32>,
+    catalyst_upkeep_per_sec: Option<f64>,
+    enval_sources: Option<EnvalSourceConfig>,
+    enval_recharge: Option<EnvalRechargeConfig>,
     predation_enabled: Option<bool>,
 }
 
@@ -240,6 +281,18 @@ impl WasmInitConfig {
         }
         if let Some(element_fields) = self.element_fields {
             config.element_fields = element_fields;
+        }
+        if let Some(permeability) = self.membrane_permeability {
+            config.membrane_permeability = permeability;
+        }
+        if let Some(upkeep) = self.catalyst_upkeep_per_sec {
+            config.catalyst_upkeep_per_sec = upkeep;
+        }
+        if let Some(sources) = self.enval_sources {
+            config.enval_sources = sources;
+        }
+        if let Some(recharge) = self.enval_recharge {
+            config.enval_recharge = recharge;
         }
         if let Some(enabled) = self.predation_enabled {
             config.predation_enabled = enabled;
@@ -728,6 +781,7 @@ pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
                     "x": info.x,
                     "y": info.y,
                     "enval": info.enval,
+                    "enval_source_target": info.enval_source_target,
                     "cell_center_count": info.cell_center_count,
                     "element_concentrations": {
                         "A": info.element_concentrations[0],
@@ -777,8 +831,7 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "age_seconds": info.age_seconds,
                     "optimal_enval": info.optimal_enval,
                     "local_enval_average": info.local_enval_average,
-                    "repro_threshold": info.repro_threshold,
-                    "decay_time": info.decay_time
+                    "repro_threshold": info.repro_threshold
                 }),
             )
         }
@@ -1306,6 +1359,19 @@ mod tests {
     }
 
     #[test]
+    fn json_config_accepts_phase_three_environment_overrides() {
+        let json = br#"{"membrane_permeability":6.0,"catalyst_upkeep_per_sec":0.02,"enval_sources":{"pairs":1,"radius":4.0,"magnitude":2.0,"relaxation_per_second":3.0},"enval_recharge":{"rate_per_second":0.0},"element_fields":{"initial_amounts":[1.0,0.65,0.5,0.12,0.08,0.05],"diffusivities":[0.028,0.018,0.014,0.012,0.03,0.022]}}"#;
+        let config = parse_config_from_bytes(json.as_ptr(), json.len()).unwrap();
+        assert_eq!(config.membrane_permeability, 6.0);
+        assert_eq!(config.catalyst_upkeep_per_sec, 0.02);
+        assert_eq!(config.enval_sources.pairs, 1);
+        assert_eq!(config.enval_sources.magnitude, 2.0);
+        assert_eq!(config.enval_recharge.rate_per_second, 0.0);
+        assert_eq!(config.element_fields.heterogeneity, 0.5);
+        assert_eq!(config.element_fields.heterogeneity_scale, 24.0);
+    }
+
+    #[test]
     fn json_config_overrides_core_fields() {
         let json =
             br#"{"seed":"wasm-test","width":8,"height":6,"initial_cells":3,"predation_enabled":false}"#;
@@ -1419,6 +1485,85 @@ mod tests {
     }
 
     #[test]
+    fn javascript_stats_layout_matches_wasm_stats_field_by_field() {
+        macro_rules! rust_fields {
+            ($($name:ident: $ty:ident),* $(,)?) => {
+                vec![$((stringify!($name), stringify!($ty), std::mem::offset_of!(WasmStats, $name))),*]
+            };
+        }
+        let rust = rust_fields!(
+            tick_count: u64, sim_time_seconds: f64, width: u32, height: u32, tile_count: u32,
+            occupied_tile_count: u32, empty_tile_count: u32, occupancy_fraction: f64,
+            extracellular_a: f64, extracellular_b: f64, extracellular_c: f64,
+            extracellular_d: f64, extracellular_e: f64, extracellular_f: f64,
+            intracellular_a: f64, intracellular_b: f64, intracellular_c: f64,
+            intracellular_d: f64, intracellular_e: f64, intracellular_f: f64,
+            system_a: f64, system_b: f64, system_c: f64, system_d: f64, system_e: f64,
+            system_f: f64, total_element_amount: f64, live_cell_count: u32, births: u64,
+            deaths: u64, predation_events: u64, cells_consumed: u64,
+            predator_energy_gained: f64, predation_enzyme_transfers: u64,
+            predation_enzyme_replacements: u64, lineage_count: u32, total_lineage_records: u32,
+            extinct_lineage_count: u32, dominant_lineage_id: u64,
+            dominant_lineage_population: u64, dominant_lineage_share: f64,
+            average_cell_energy: f64, min_cell_energy: f64, max_cell_energy: f64,
+            total_cell_energy: f64, average_enzyme_count: f64, min_enzyme_count: u32,
+            max_enzyme_count: u32, cells_at_enzyme_cap: u32, fraction_cells_at_enzyme_cap: f64,
+            enzyme_metabolic_count: u64, enzyme_defensase_count: u64,
+            enzyme_attackase_count: u64, average_attack_total: f64, max_attack_total: u32,
+            average_defense_total: f64, max_defense_total: u32, average_enval: f32,
+            min_enval: f32, max_enval: f32, enval_std_dev: f32, enval_p05: f32, enval_p50: f32,
+            enval_p95: f32, reaction_attempts: u64, reaction_successes: u64,
+            executed_metabolic_flux: f64, uptake_flux: f64, leak_flux: f64,
+            secretion_flux: f64, divisions: u64, element_field_diffusion_tiles: u64,
+            element_uptake_events: u64, cell_steps: u64, enzyme_entries_seen: u64,
+            metabolic_enzyme_attempts: u64, predation_cells_considered: u64,
+            predation_candidate_pairs: u64, spatial_candidate_checks: u64,
+            overlap_candidates: u64, overlap_corrections: u64, energy_founder: f64,
+            energy_injected: f64, energy_extracted: f64, energy_chemical_harvest: f64,
+            energy_chemical_cost: f64, energy_enval_harvest: f64, energy_pump_cost: f64,
+            energy_maintenance: f64, energy_death_loss: f64, energy_predation_transfer: f64,
+            energy_ledger_residual: f64, renewable_coverage: f64, enval_source_inflow: f64,
+            enval_cell_uptake: f64, enval_cell_emission: f64, enval_recharge: f64,
+            enval_edits: f64, recharge_amount: f64, recharge_energy: f64, render_epoch: u32,
+        );
+
+        let source = include_str!("../../../wasmgpu/runtime.js");
+        let start = source.find("const STATS_FIELD_TYPES").unwrap();
+        let end = start + source[start..].find("]);").unwrap();
+        let mut offset = 0_usize;
+        let mut max_align = 1_usize;
+        let mut javascript = Vec::new();
+        for line in source[start..end].lines() {
+            let line = line.trim();
+            let Some(entry) = line.strip_prefix("[\"") else {
+                continue;
+            };
+            let (name, rest) = entry.split_once('"').unwrap();
+            let ty = rest.trim_start_matches(", \"").split('"').next().unwrap();
+            let size = match ty {
+                "u32" | "f32" => 4,
+                "u64" | "f64" => 8,
+                other => panic!("unknown stats type {other}"),
+            };
+            max_align = max_align.max(size);
+            offset = offset.div_ceil(size) * size;
+            javascript.push((name.to_owned(), ty.to_owned(), offset));
+            offset += size;
+        }
+        assert_eq!(javascript.len(), rust.len(), "field count differs");
+        for ((js_name, js_type, js_offset), (name, ty, rust_offset)) in javascript.iter().zip(&rust)
+        {
+            assert_eq!(js_name, name);
+            assert_eq!(js_type, ty, "{name}");
+            assert_eq!(*js_offset, *rust_offset, "{name}");
+        }
+        assert_eq!(
+            offset.div_ceil(max_align) * max_align,
+            std::mem::size_of::<WasmStats>()
+        );
+    }
+
+    #[test]
     fn stats_size_and_versions_are_exposed() {
         assert_eq!(
             exported_string(microcosm_version_ptr(), microcosm_version_len()),
@@ -1437,6 +1582,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
         assert_eq!(microcosm_inspect_tile(handle, 0, 0), STATUS_OK);
+        assert!(query_json().get("enval_source_target").is_some());
         assert!(microcosm_query_result_len() > 0);
         assert!(!microcosm_query_result_ptr().is_null());
         let before = unsafe { *microcosm_stats_ptr(handle) }.average_enval;
@@ -1541,7 +1687,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v2","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v3","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1570,9 +1716,38 @@ mod tests {
                 .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase"))
         );
 
-        let invalid = br#"{"schema":"microcosm.genome_patch.v2","genome":{"mutation_rate":2.0}}"#;
+        let invalid = br#"{"schema":"microcosm.genome_patch.v3","genome":{"mutation_rate":2.0}}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, invalid.as_ptr(), invalid.len()),
+            STATUS_WORLD_ERROR
+        );
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
+    }
+
+    #[test]
+    fn genome_patch_json_round_trips_half_saturation_and_rejects_v2() {
+        let json = br#"{"seed":"wasm-half-saturation","width":8,"height":6,"initial_cells":2}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+
+        let patch = br#"{"schema":"microcosm.genome_patch.v3","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
+            STATUS_OK
+        );
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 1), STATUS_OK);
+        let detail = query_json();
+        assert_eq!(
+            detail["cell_detail"]["genome"]["enzymes"][0]["half_saturation"],
+            0.0625
+        );
+
+        let old = format!(
+            r#"{{"schema":"microcosm.genome_patch.v{}","enzymes":[{{"op":"update","index":0,"fields":{{"half_saturation":0.5}}}}]}}"#,
+            2
+        );
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, old.as_ptr(), old.len()),
             STATUS_WORLD_ERROR
         );
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
@@ -1584,7 +1759,8 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v2","genome":{"decay_time":2222.0}}"#;
+        let patch =
+            br#"{"schema":"microcosm.genome_patch.v3","genome":{"repro_threshold":2222.0}}"#;
         assert_eq!(
             microcosm_apply_genome_brush(handle, 0, 0, 8, 6, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1608,16 +1784,22 @@ mod tests {
         assert_eq!(stats.tile_count, 48);
         assert_eq!(stats.live_cell_count, 4);
         assert_eq!(stats.occupied_tile_count, 4);
-        assert!(stats.extracellular_a >= 48.0);
+        assert!((stats.extracellular_a - 48.0).abs() <= 1.0e-4);
         assert!(stats.total_element_amount > stats.extracellular_a);
         assert!(stats.enzyme_metabolic_count >= 4);
         assert!(stats.average_cell_energy.is_finite());
         assert!(stats.enval_std_dev.is_finite());
 
+        assert!(stats.energy_founder > 0.0);
+        assert!(stats.enval_source_inflow == 0.0);
+
         assert_eq!(microcosm_step(handle, 3), STATUS_OK);
         let stepped = unsafe { *microcosm_stats_ptr(handle) };
         assert!(stepped.cell_steps >= 4);
         assert!(stepped.metabolic_enzyme_attempts > 0);
+        assert!(stepped.energy_maintenance > 0.0);
+        assert!(stepped.energy_ledger_residual.abs() < 1.0e-9);
+        assert!(stepped.renewable_coverage.is_finite());
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 }
