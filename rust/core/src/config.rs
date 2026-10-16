@@ -144,8 +144,79 @@ impl EnvalRechargeConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CellBodyConfig {
+    pub body_density: f32,
+    pub boundary_density: f32,
+    pub permeability_sigma: f32,
+    pub fission_strain: f64,
+    pub lysis_strain: f64,
+    pub assembly_half_saturation: f32,
+    pub assembly_energy_per_unit: f64,
+}
+
+impl Default for CellBodyConfig {
+    fn default() -> Self {
+        Self {
+            body_density: 1.0,
+            boundary_density: 0.2,
+            permeability_sigma: 0.3,
+            fission_strain: 1.485,
+            lysis_strain: 0.7,
+            assembly_half_saturation: 2.0,
+            assembly_energy_per_unit: 0.5,
+        }
+    }
+}
+
+impl CellBodyConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for (name, value) in [
+            ("cell_body.body_density", self.body_density),
+            ("cell_body.permeability_sigma", self.permeability_sigma),
+            ("cell_body.boundary_density", self.boundary_density),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(ConfigError::InvalidPositive(name, f64::from(value)));
+            }
+        }
+        for (name, value) in [
+            (
+                "cell_body.assembly_half_saturation",
+                f64::from(self.assembly_half_saturation),
+            ),
+            (
+                "cell_body.assembly_energy_per_unit",
+                self.assembly_energy_per_unit,
+            ),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(ConfigError::InvalidPositive(name, value));
+            }
+        }
+        if !self.fission_strain.is_finite() || self.fission_strain <= std::f64::consts::SQRT_2 {
+            return Err(ConfigError::InvalidPositive(
+                "cell_body.fission_strain > sqrt(2)",
+                self.fission_strain,
+            ));
+        }
+        if !self.lysis_strain.is_finite()
+            || !(0.0..1.0).contains(&self.lysis_strain)
+            || self.lysis_strain == 0.0
+        {
+            return Err(ConfigError::InvalidPositive(
+                "cell_body.lysis_strain in (0, 1)",
+                self.lysis_strain,
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    pub cell_body: CellBodyConfig,
+    pub founder_energy: f64,
     pub width: usize,
     pub height: usize,
     pub seed: String,
@@ -163,6 +234,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            cell_body: CellBodyConfig::default(),
+            founder_energy: 2.0,
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             seed: DEFAULT_SEED.to_owned(),
@@ -215,6 +288,13 @@ impl Config {
             return Err(ConfigError::InvalidNonnegative(
                 "catalyst_upkeep_per_sec",
                 self.catalyst_upkeep_per_sec,
+            ));
+        }
+        self.cell_body.validate()?;
+        if !self.founder_energy.is_finite() || self.founder_energy < 0.0 {
+            return Err(ConfigError::InvalidNonnegative(
+                "founder_energy",
+                self.founder_energy,
             ));
         }
         self.enval_sources.validate()?;

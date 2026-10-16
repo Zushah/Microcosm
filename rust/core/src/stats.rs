@@ -289,6 +289,7 @@ pub struct EnergyLedger {
     pub chemical_cost: f64,
     pub enval_harvest: f64,
     pub pump_cost: f64,
+    pub assembly_cost: f64,
     pub maintenance: f64,
     pub death_loss: f64,
     pub predation_transfer: f64,
@@ -299,6 +300,7 @@ impl EnergyLedger {
         self.founder_energy + self.injected_energy + self.chemical_harvest + self.enval_harvest
             - self.extracted_energy
             - self.chemical_cost
+            - self.assembly_cost
             - self.pump_cost
             - self.maintenance
             - self.death_loss
@@ -311,6 +313,7 @@ impl EnergyLedger {
             + self.chemical_harvest
             + self.chemical_cost
             + self.enval_harvest
+            + self.assembly_cost
             + self.pump_cost
             + self.maintenance
             + self.death_loss
@@ -320,7 +323,7 @@ impl EnergyLedger {
         1.0e-9 * self.magnitude() + 1.0e-6
     }
 
-    pub fn terms(&self) -> [(&'static str, f64); 10] {
+    pub fn terms(&self) -> [(&'static str, f64); 11] {
         [
             ("founder_energy", self.founder_energy),
             ("injected_energy", self.injected_energy),
@@ -329,6 +332,7 @@ impl EnergyLedger {
             ("chemical_cost", self.chemical_cost),
             ("enval_harvest", self.enval_harvest),
             ("pump_cost", self.pump_cost),
+            ("assembly_cost", self.assembly_cost),
             ("maintenance", self.maintenance),
             ("death_loss", self.death_loss),
             ("predation_transfer", self.predation_transfer),
@@ -391,6 +395,14 @@ pub struct WorldStats {
     pub live_cell_count: usize,
     pub births: u64,
     pub deaths: u64,
+    pub fissions: u64,
+    pub energy_deaths: u64,
+    pub lyses: u64,
+    pub radius_median: f32,
+    pub radius_p95: f32,
+    pub radius_max: f32,
+    pub mean_strain: f64,
+
     pub predation_events: u64,
     pub cells_consumed: u64,
     pub predator_energy_gained: f64,

@@ -6,7 +6,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::bio::{self, GenomeReactionContext, ReactionEnv};
-use crate::cell::{Cell, CellId, CellStore, FluxRecord};
+use crate::cell::{Cell, CellFluxLog, CellId, CellStore, FluxRecord};
 use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError};
 use crate::config::{Config, ConfigError};
 use crate::environment::{self, EnvalSources};
@@ -16,8 +16,8 @@ use crate::genome::{
 use crate::render_buffers::{RenderBuffers, RenderVisualState};
 use crate::rng::Rng;
 use crate::spatial::{
-    BilinearStencil, DEFAULT_CELL_RADIUS, Position, SpatialIndex, minimum_image_displacement,
-    toroidal_distance_squared, wrap_coordinate,
+    BilinearStencil, Position, REFERENCE_CELL_AREA, REFERENCE_CELL_RADIUS, SpatialIndex,
+    minimum_image_displacement, toroidal_distance_squared, wrap_coordinate,
 };
 use crate::stats::{
     ENZYME_COUNT_HISTOGRAM_LEN, EnergyLedger, EnvalLedger, EnzymeTypeCounts, OperationCounters,
@@ -31,10 +31,10 @@ const MOORE_WITH_CENTER_DX: [isize; 9] = [-1, -1, -1, 0, 0, 1, 1, 1, 0];
 const MOORE_WITH_CENTER_DY: [isize; 9] = [-1, 0, 1, -1, 1, -1, 0, 1, 0];
 const MAX_TRANSPORT_FRACTION: f64 = 0.25;
 const FOUNDER_PLACEMENT_ATTEMPTS: usize = 64;
-const DIVISION_PLACEMENT_ATTEMPTS: usize = 32;
+pub const MIN_DAUGHTER_BODY: f64 = 0.05;
 const OVERLAP_RELAXATION_PASSES: usize = 2;
 const GEOMETRY_TOLERANCE: f32 = 1.0e-5;
-const PREDATION_INTERACTION_DISTANCE: f32 = std::f32::consts::SQRT_2;
+const PREDATION_CONTACT_GAP: f32 = 0.514;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TileId(pub usize);
@@ -83,6 +83,11 @@ pub struct CellInspection {
     pub x: f32,
     pub y: f32,
     pub radius: f32,
+    pub body_total: f64,
+    pub boundary_total: f64,
+    pub area: f64,
+    pub strain: f64,
+    pub membrane_polarity: f64,
     pub energy: f64,
     pub lineage_id: LineageId,
     pub enzyme_count: usize,
@@ -92,7 +97,6 @@ pub struct CellInspection {
     pub age_seconds: f64,
     pub optimal_enval: f32,
     pub local_enval_average: f32,
-    pub repro_threshold: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -107,6 +111,8 @@ pub struct EnzymeDetailInspection {
     pub half_saturation: f32,
     pub energy_harvest_fraction: f32,
     pub secretion_fraction: f32,
+    pub body_fraction: f32,
+    pub boundary_fraction: f32,
     pub enval_sigma: f32,
     pub enval_throughput: f32,
     pub enval_energy_fraction: f32,
@@ -118,12 +124,9 @@ pub struct EnzymeDetailInspection {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GenomeDetailInspection {
     pub optimal_enval: f32,
-    pub repro_threshold: f64,
-    pub initial_energy: f64,
     pub mutation_rate: f32,
-    pub post_divide_mortality: f32,
     pub enval_mutation_floor: f32,
-    pub maintenance_cost_per_sec: f64,
+    pub maintenance_cost_per_area: f64,
     pub lineage_id: LineageId,
     pub enzyme_count: usize,
     pub min_cell_enzymes: usize,
@@ -164,9 +167,11 @@ pub struct GenomeEditResult {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CellDetailInspection {
     pub cell: CellInspection,
-    pub maintenance_cost_per_sec: f64,
+    pub maintenance_cost_per_area: f64,
     pub catalyst_upkeep_per_sec: f64,
     pub genome: GenomeDetailInspection,
+    pub body: [f32; ELEMENT_COUNT],
+    pub boundary: [f32; ELEMENT_COUNT],
     pub internal_elements: [f32; ELEMENT_COUNT],
     pub total_internal_elements: f32,
     pub recent_fluxes: FluxLogInspection,
@@ -223,6 +228,10 @@ pub struct World {
     enval_sources: EnvalSources,
     cells: CellStore,
     #[serde(skip, default)]
+    watched_cell_id: Option<CellId>,
+    #[serde(skip, default)]
+    flux_log: CellFluxLog,
+    #[serde(skip, default)]
     cell_phase_scratch: Vec<CellId>,
     #[serde(skip, default)]
     mechanics_corrections: Vec<Position>,
@@ -235,6 +244,8 @@ pub struct World {
     lineage_counters: BTreeMap<LineageId, LineageCounters>,
     birth_count: u64,
     death_count: u64,
+    energy_death_count: u64,
+    lysis_count: u64,
     predation_event_count: u64,
     cells_consumed_count: u64,
     predator_energy_gained: f64,
@@ -247,6 +258,8 @@ pub struct World {
     neighbors: Vec<NeighborIndices>,
     #[serde(skip, default)]
     spatial_index: SpatialIndex,
+    #[serde(skip, default)]
+    max_cell_radius: f32,
 }
 
 impl World {
@@ -281,6 +294,8 @@ impl World {
             element_fields,
             enval_sources,
             cells: CellStore::default(),
+            watched_cell_id: None,
+            flux_log: CellFluxLog::default(),
             cell_phase_scratch: Vec::new(),
             mechanics_corrections: Vec::new(),
             pair_scratch: Vec::new(),
@@ -289,6 +304,8 @@ impl World {
             lineage_counters: BTreeMap::new(),
             birth_count: 0,
             death_count: 0,
+            energy_death_count: 0,
+            lysis_count: 0,
             predation_event_count: 0,
             cells_consumed_count: 0,
             predator_energy_gained: 0.0,
@@ -303,6 +320,7 @@ impl World {
             },
             neighbors,
             spatial_index: SpatialIndex::new(config.width, config.height),
+            max_cell_radius: 0.0,
             rng,
             config,
         };
@@ -571,26 +589,29 @@ impl World {
 
     pub fn pick_cell(&self, position: Position) -> Option<CellId> {
         let position = position.wrapped(self.width as f32, self.height as f32)?;
-        self.spatial_index
-            .query_radius(position, DEFAULT_CELL_RADIUS + GEOMETRY_TOLERANCE)
-            .into_iter()
-            .filter_map(|cell_id| {
-                let cell = self.cells.get(cell_id)?;
-                let distance_squared = toroidal_distance_squared(
+        let mut nearest: Option<(CellId, f32)> = None;
+        self.spatial_index.find_within(
+            position,
+            self.max_cell_radius + GEOMETRY_TOLERANCE,
+            |id, center| {
+                let cell = &self.cells[id];
+                let distance = toroidal_distance_squared(
                     position,
-                    cell.position,
+                    center,
                     self.width as f32,
                     self.height as f32,
                 );
-                (distance_squared <= (cell.radius + GEOMETRY_TOLERANCE).powi(2))
-                    .then_some((cell_id, distance_squared))
-            })
-            .min_by(|(left_id, left_distance), (right_id, right_distance)| {
-                left_distance
-                    .total_cmp(right_distance)
-                    .then_with(|| left_id.index().cmp(&right_id.index()))
-            })
-            .map(|(cell_id, _)| cell_id)
+                if distance <= (cell.radius + GEOMETRY_TOLERANCE).powi(2)
+                    && nearest.is_none_or(|(other, best)| {
+                        distance < best || (distance == best && id.index() < other.index())
+                    })
+                {
+                    nearest = Some((id, distance));
+                }
+                false
+            },
+        );
+        nearest.map(|(id, _)| id)
     }
 
     pub fn local_enval_average(&self, tile_id: TileId, radius: usize) -> Option<f32> {
@@ -795,6 +816,73 @@ impl World {
         Ok(cell_id)
     }
 
+    fn founder_material(
+        &self,
+        position: Position,
+    ) -> Option<(ElementAmounts, ElementAmounts, [(usize, ElementAmounts); 4])> {
+        let stencil = BilinearStencil::new(position, self.width, self.height)?;
+        let composition = self.sample_element_fields_at(position)?;
+        let total = composition.total();
+        if total <= 0.0 {
+            return None;
+        }
+        let body_total =
+            f64::from(REFERENCE_CELL_AREA) * f64::from(self.config.cell_body.body_density);
+        let boundary_total = std::f64::consts::TAU
+            * f64::from(REFERENCE_CELL_RADIUS)
+            * f64::from(self.config.cell_body.boundary_density);
+        let mut body = ElementAmounts::ZERO;
+        let mut boundary = ElementAmounts::ZERO;
+        let mut withdrawals = [(0, ElementAmounts::ZERO); 4];
+        let mut weights = [0.0_f64; 4];
+        for (slot, sample) in stencil.samples.iter().enumerate() {
+            withdrawals[slot].0 = self.index_xy(sample.x, sample.y);
+            weights[slot] = f64::from(sample.weight);
+            for earlier in 0..slot {
+                if withdrawals[earlier].0 == withdrawals[slot].0 {
+                    weights[earlier] += weights[slot];
+                    weights[slot] = 0.0;
+                    break;
+                }
+            }
+        }
+        for element in ELEMENT_ORDER {
+            body[element] = (f64::from(composition[element]) / total * body_total) as f32;
+            boundary[element] = (f64::from(composition[element]) / total * boundary_total) as f32;
+            let mut remaining = f64::from(body[element]) + f64::from(boundary[element]);
+            let mut available = [0.0_f64; 4];
+            for slot in 0..4 {
+                if weights[slot] > 0.0 {
+                    available[slot] = f64::from(self.element_fields[withdrawals[slot].0][element]);
+                }
+            }
+            if available.iter().sum::<f64>() < remaining {
+                return None;
+            }
+            for _ in 0..4 {
+                let weighted: f64 = (0..4).map(|slot| weights[slot] * available[slot]).sum();
+                if weighted <= 0.0 {
+                    break;
+                }
+                let requested = remaining;
+                for slot in 0..4 {
+                    let moved = (requested * weights[slot] * available[slot] / weighted)
+                        .min(available[slot]);
+                    available[slot] -= moved;
+                    withdrawals[slot].1[element] += moved as f32;
+                    remaining -= moved;
+                }
+                if remaining <= 1.0e-12 {
+                    break;
+                }
+            }
+            if remaining > 1.0e-7 {
+                return None;
+            }
+        }
+        Some((body, boundary, withdrawals))
+    }
+
     fn insert_cell(
         &mut self,
         position: Position,
@@ -803,14 +891,31 @@ impl World {
         let position = position
             .wrapped(self.width as f32, self.height as f32)
             .ok_or(WorldError::InvalidCellPosition(position))?;
-        if !self.position_is_clear(position, DEFAULT_CELL_RADIUS, None) {
+        if !self.position_is_clear(position, REFERENCE_CELL_RADIUS, None) {
             return Err(WorldError::OverlappingCellPosition(position));
         }
         genome.enforce_enzyme_count_bounds(&mut self.rng);
         genome
             .validate()
             .map_err(|error| WorldError::GenomePatch(error.to_string()))?;
-        let cell = Cell::new(genome, position, self.sim_time_seconds);
+        let (body, boundary, withdrawals) = self
+            .founder_material(position)
+            .ok_or(WorldError::InsufficientFounderMaterial(position))?;
+        for (index, amounts) in withdrawals {
+            for element in ELEMENT_ORDER {
+                self.element_fields[index][element] -= amounts[element];
+            }
+        }
+        let cell = Cell::new(
+            genome,
+            position,
+            self.sim_time_seconds,
+            self.config.founder_energy,
+            body,
+            boundary,
+            self.config.cell_body.body_density,
+        );
+        self.max_cell_radius = self.max_cell_radius.max(cell.radius);
         self.record_lineage_birth(cell.lineage_id);
         self.birth_count = self.birth_count.saturating_add(1);
         let cell_id = self.cells.insert(cell);
@@ -1076,7 +1181,9 @@ impl World {
         for cell in self.cells.iter() {
             for element in ELEMENT_ORDER {
                 intracellular_element_amounts[element.index()] +=
-                    f64::from(cell.internal_elements[element]);
+                    f64::from(cell.internal_elements[element])
+                        + f64::from(cell.body[element])
+                        + f64::from(cell.boundary[element]);
             }
         }
         let mut system_element_amounts = [0.0_f64; ELEMENT_COUNT];
@@ -1193,6 +1300,21 @@ impl World {
             0.0
         };
 
+        let mut radii = self
+            .cells
+            .iter()
+            .map(|cell| cell.radius)
+            .collect::<Vec<_>>();
+        radii.sort_unstable_by(f32::total_cmp);
+        let radius_median = percentile_sorted_f32(&radii, 0.5);
+        let radius_p95 = percentile_sorted_f32(&radii, 0.95);
+        let radius_max = radii.last().copied().unwrap_or(0.0);
+        let mean_strain = self
+            .cells
+            .iter()
+            .map(|cell| cell.strain(self.config.cell_body.boundary_density))
+            .sum::<f64>()
+            / live_cell_count.max(1) as f64;
         let live_cell_count_f64 = live_cell_count as f64;
         WorldStats {
             tick_count: self.tick_count,
@@ -1221,6 +1343,13 @@ impl World {
             live_cell_count,
             births: self.birth_count,
             deaths: self.death_count,
+            fissions: self.reaction_counters.divisions,
+            energy_deaths: self.energy_death_count,
+            lyses: self.lysis_count,
+            radius_median,
+            radius_p95,
+            radius_max,
+            mean_strain,
             predation_events: self.predation_event_count,
             cells_consumed: self.cells_consumed_count,
             predator_energy_gained: self.predator_energy_gained,
@@ -1305,6 +1434,7 @@ impl World {
     }
 
     fn rebuild_spatial_index(&mut self) {
+        self.refresh_max_cell_radius();
         if !self
             .spatial_index
             .matches_dimensions(self.width, self.height)
@@ -1504,6 +1634,11 @@ impl World {
             x: cell.position.x,
             y: cell.position.y,
             radius: cell.radius,
+            body_total: cell.body.total(),
+            boundary_total: cell.boundary.total(),
+            area: cell.area(self.config.cell_body.body_density),
+            strain: cell.strain(self.config.cell_body.boundary_density),
+            membrane_polarity: cell.membrane_polarity(),
             energy: cell.energy,
             lineage_id: cell.lineage_id,
             enzyme_count: cell.genome.enzymes.len(),
@@ -1515,32 +1650,43 @@ impl World {
             local_enval_average: self
                 .local_enval_average_at(cell.position, LOCAL_ENVAL_RADIUS)
                 .unwrap_or(0.0),
-            repro_threshold: cell.genome.repro_threshold,
         })
     }
 
     pub fn inspect_cell_detail(
-        &self,
+        &mut self,
         cell_id: CellId,
         flux_limit: usize,
     ) -> Option<CellDetailInspection> {
+        let recent_fluxes = self.inspect_cell_fluxes(cell_id, flux_limit)?;
         let cell = self.cells.get(cell_id)?;
         let summary = self.inspect_cell(cell_id)?;
         Some(CellDetailInspection {
             cell: summary,
-            maintenance_cost_per_sec: cell.maintenance_cost_per_sec,
+            maintenance_cost_per_area: cell.maintenance_cost_per_area,
             catalyst_upkeep_per_sec: self.catalyst_upkeep_per_sec(cell),
             genome: inspect_genome(&cell.genome),
+            body: *cell.body.as_array(),
+            boundary: *cell.boundary.as_array(),
             internal_elements: *cell.internal_elements.as_array(),
             total_internal_elements: cell.internal_elements.total() as f32,
-            recent_fluxes: self.inspect_cell_fluxes(cell_id, flux_limit)?,
+            recent_fluxes,
         })
     }
 
-    pub fn inspect_cell_fluxes(&self, cell_id: CellId, limit: usize) -> Option<FluxLogInspection> {
-        let cell = self.cells.get(cell_id)?;
-        let flux_count = cell.flux_count();
-        let fluxes = cell
+    pub fn inspect_cell_fluxes(
+        &mut self,
+        cell_id: CellId,
+        limit: usize,
+    ) -> Option<FluxLogInspection> {
+        self.cells.get(cell_id)?;
+        if self.watched_cell_id != Some(cell_id) {
+            self.watched_cell_id = Some(cell_id);
+            self.flux_log.clear();
+        }
+        let flux_count = self.flux_log.flux_count();
+        let fluxes = self
+            .flux_log
             .fluxes_newest_first()
             .take(limit)
             .cloned()
@@ -1680,7 +1826,7 @@ impl World {
             .ok_or(WorldError::InvalidCell(cell_id))?;
         cell.genome = genome;
         cell.lineage_id = original_lineage;
-        cell.maintenance_cost_per_sec = cell.genome.maintenance_cost_per_sec;
+        cell.maintenance_cost_per_area = cell.genome.maintenance_cost_per_area;
         cell.refresh_combat_totals();
         Ok(changed_fields)
     }
@@ -1817,7 +1963,13 @@ impl World {
                 return Err(InvariantError::NonFiniteCellEnergy(cell_id));
             }
             if !cell.position.is_finite()
-                || cell.radius != DEFAULT_CELL_RADIUS
+                || !cell.radius.is_finite()
+                || cell.body.total() <= 0.0
+                || (cell.radius
+                    - (cell.area(self.config.cell_body.body_density) / std::f64::consts::PI).sqrt()
+                        as f32)
+                    .abs()
+                    > GEOMETRY_TOLERANCE
                 || cell.radius <= 0.0
                 || cell.position.wrapped(self.width as f32, self.height as f32)
                     != Some(cell.position)
@@ -1845,7 +1997,10 @@ impl World {
 
             for element in ELEMENT_ORDER {
                 let amount = cell.internal_elements[element];
-                if !amount.is_finite() || amount < 0.0 {
+                if [amount, cell.body[element], cell.boundary[element]]
+                    .iter()
+                    .any(|value| !value.is_finite() || *value < 0.0)
+                {
                     return Err(InvariantError::CellElementReservoirMismatch {
                         cell: cell_id,
                         element,
@@ -2002,6 +2157,7 @@ impl World {
             let env = ReactionEnv {
                 local_enval,
                 cell_area,
+                cell_body: self.config.cell_body,
             };
             let reservoir = self.cells.at_slot_mut(slot).internal_elements;
             let energy_before = self.cells.at_slot_mut(slot).energy;
@@ -2031,6 +2187,9 @@ impl World {
                 };
                 self.cells.at_slot_mut(slot).internal_elements[element] =
                     remaining + outcome.retained_products[element];
+                self.cells.at_slot_mut(slot).body[element] += outcome.body_products[element];
+                self.cells.at_slot_mut(slot).boundary[element] +=
+                    outcome.boundary_products[element];
             }
             if outcome.secreted_products != ElementAmounts::ZERO {
                 self.deposit_elements_at(position, outcome.secreted_products)
@@ -2049,6 +2208,7 @@ impl World {
             }
             self.energy_ledger.enval_harvest += outcome.enval_energy;
             self.energy_ledger.pump_cost += outcome.pump_cost;
+            self.energy_ledger.assembly_cost += outcome.assembly_cost;
             debug_assert!(self.cells.at_slot_mut(slot).energy >= 0.0);
             if outcome.enval_input != 0.0 {
                 if let Ok(applied) = self.adjust_enval_at(position, -outcome.enval_input) {
@@ -2081,33 +2241,43 @@ impl World {
             self.reaction_counters.secretion_flux += outcome.secreted_products.total();
 
             let energy_after = self.cells.at_slot_mut(slot).energy;
-            self.cells.at_slot_mut(slot).push_flux_record(FluxRecord {
-                tick_count: self.tick_count,
-                sim_time_seconds: self.sim_time_seconds,
-                cell_id: cell_id.index(),
-                x: position.x,
-                y: position.y,
-                catalyst_index,
-                catalyst_type: enzyme.enzyme_type,
-                reactants: *enzyme.reactants.as_array(),
-                products: *enzyme.products.as_array(),
-                requested_extent: outcome.requested_extent,
-                executed_extent: outcome.executed_extent,
-                element_deltas: outcome.element_deltas,
-                secreted_elements: *outcome.secreted_products.as_array(),
-                energy_before,
-                energy_after,
-                delta_cell_energy: outcome.energy_delta,
-                raw_chemical_energy: outcome.raw_chemical_energy,
-                enval_energy: outcome.enval_energy,
-                enval_input: outcome.enval_input,
-                enval_output: outcome.enval_output,
-                local_enval: env.local_enval,
-                optimal_enval: genome_context.optimal_enval,
-            });
+            if self.watched_cell_id == Some(cell_id) {
+                self.flux_log.push_flux_record(FluxRecord {
+                    tick_count: self.tick_count,
+                    sim_time_seconds: self.sim_time_seconds,
+                    cell_id: cell_id.index(),
+                    x: position.x,
+                    y: position.y,
+                    catalyst_index,
+                    catalyst_type: enzyme.enzyme_type,
+                    reactants: *enzyme.reactants.as_array(),
+                    products: *enzyme.products.as_array(),
+                    requested_extent: outcome.requested_extent,
+                    executed_extent: outcome.executed_extent,
+                    element_deltas: outcome.element_deltas,
+                    secreted_elements: *outcome.secreted_products.as_array(),
+                    energy_before,
+                    energy_after,
+                    delta_cell_energy: outcome.energy_delta,
+                    raw_chemical_energy: outcome.raw_chemical_energy,
+                    enval_energy: outcome.enval_energy,
+                    enval_input: outcome.enval_input,
+                    enval_output: outcome.enval_output,
+                    local_enval: env.local_enval,
+                    optimal_enval: genome_context.optimal_enval,
+                });
+            }
         }
 
-        let maintenance_loss = (self.cells.at_slot_mut(slot).maintenance_cost_per_sec
+        self.cells
+            .at_slot_mut(slot)
+            .refresh_radius(self.config.cell_body.body_density);
+        self.max_cell_radius = self.max_cell_radius.max(self.cells.at_slot(slot).radius);
+        let maintenance_loss = (self.cells.at_slot_mut(slot).maintenance_cost_per_area
+            * self
+                .cells
+                .at_slot(slot)
+                .area(self.config.cell_body.body_density)
             + self.catalyst_upkeep_per_sec(self.cells.at_slot(slot)))
             * self.config.dt_seconds;
         if maintenance_loss > 0.0 {
@@ -2117,6 +2287,7 @@ impl World {
         }
         if self.cells.at_slot_mut(slot).energy <= 0.0 {
             self.cells.at_slot_mut(slot).energy = 0.0;
+            self.energy_death_count += 1;
             self.kill_cell_and_release(cell_id);
             return;
         }
@@ -2125,8 +2296,12 @@ impl World {
         self.reaction_counters.uptake_flux += inward;
         self.reaction_counters.leak_flux += outward;
 
-        if self.cells[cell_id].energy >= self.cells[cell_id].genome.repro_threshold {
-            self.divide_cell(cell_id, local_enval);
+        let strain = self.cells[cell_id].strain(self.config.cell_body.boundary_density);
+        if strain < self.config.cell_body.lysis_strain {
+            self.lysis_count += 1;
+            self.kill_cell_and_release(cell_id);
+        } else if strain >= self.config.cell_body.fission_strain {
+            self.fission_cell(cell_id, local_enval);
         }
     }
 
@@ -2137,10 +2312,11 @@ impl World {
         let radius = f64::from(self.cells.at_slot_mut(slot).radius);
         let area = std::f64::consts::PI * radius * radius;
         let perimeter = 2.0 * std::f64::consts::PI * radius;
-        let fraction =
-            (f64::from(self.config.membrane_permeability) * perimeter * self.config.dt_seconds
-                / (2.0 * area))
-                .min(MAX_TRANSPORT_FRACTION);
+        let base_fraction =
+            f64::from(self.config.membrane_permeability) * perimeter * self.config.dt_seconds
+                / (2.0 * area);
+        let membrane_polarity = self.cells.at_slot(slot).membrane_polarity();
+        let sigma = f64::from(self.config.cell_body.permeability_sigma);
         let tile_indices = stencil
             .samples
             .map(|sample| self.index_xy(sample.x, sample.y));
@@ -2148,6 +2324,10 @@ impl World {
         let mut inward = 0.0_f64;
         let mut outward = 0.0_f64;
         for element in ELEMENT_ORDER {
+            let distance = f64::from(element.properties().polarity) - membrane_polarity;
+            let permeability_factor =
+                0.25 + 1.5 * (-distance * distance / (2.0 * sigma * sigma)).exp();
+            let fraction = (base_fraction * permeability_factor).min(MAX_TRANSPORT_FRACTION);
             let mut weighted_sources = [0.0_f64; 4];
             for (corner, sample) in stencil.samples.iter().enumerate() {
                 weighted_sources[corner] = f64::from(sample.weight)
@@ -2207,75 +2387,70 @@ impl World {
         self.adjust_enval_at(target, enval_delta)
     }
 
-    fn divide_cell(&mut self, cell_id: CellId, local_enval: f32) {
-        if !self.cells.contains(cell_id) {
-            return;
-        }
-        let parent_lineage = self.cells[cell_id].lineage_id;
-        let mut child_genome = self.cells[cell_id]
-            .genome
-            .mutate(&mut self.rng, local_enval);
-        child_genome.lineage_id = parent_lineage;
-
-        let child_energy = self.cells[cell_id].energy * (0.5 + (self.rng.next_f64() - 0.5) * 0.1);
-        self.cells[cell_id].energy = (self.cells[cell_id].energy - child_energy).max(0.0);
-
-        let mut child_elements = ElementAmounts::ZERO;
-        for element in ELEMENT_ORDER {
-            let parent_amount = self.cells[cell_id].internal_elements[element];
-            let fraction = 0.5 + (self.rng.next_f64() - 0.5) * 0.1;
-            let child_amount = (f64::from(parent_amount) * fraction) as f32;
-            child_elements[element] = child_amount;
-            self.cells[cell_id].internal_elements[element] = parent_amount - child_amount;
-        }
-
-        let parent_position = self.cells[cell_id].position;
-        let mut child_position = None;
-        for _ in 0..DIVISION_PLACEMENT_ATTEMPTS {
-            let offset_x = self.rng.range(-2.0, 2.0);
-            let offset_y = self.rng.range(-2.0, 2.0);
-            let Some(candidate) =
-                Position::new(parent_position.x + offset_x, parent_position.y + offset_y)
-                    .wrapped(self.width as f32, self.height as f32)
-            else {
-                continue;
-            };
-            if self.position_is_clear(candidate, DEFAULT_CELL_RADIUS, None) {
-                child_position = Some(candidate);
-                break;
-            }
-        }
-        let Some(child_position) = child_position else {
-            self.cells[cell_id].energy += child_energy;
-            for element in ELEMENT_ORDER {
-                self.cells[cell_id].internal_elements[element] += child_elements[element];
-            }
-            return;
-        };
-
-        let child_id = match self.insert_cell(child_position, child_genome) {
-            Ok(child_id) => child_id,
-            Err(_) => {
-                self.cells[cell_id].energy += child_energy;
-                for element in ELEMENT_ORDER {
-                    self.cells[cell_id].internal_elements[element] += child_elements[element];
-                }
-                return;
-            }
-        };
-        self.cells[child_id].energy = child_energy;
-        self.cells[child_id].internal_elements = child_elements;
-        self.cells[child_id].lineage_id = parent_lineage;
-        self.cells[child_id].genome.lineage_id = parent_lineage;
-        self.operation_counters.cell_divisions =
-            self.operation_counters.cell_divisions.saturating_add(1);
-        self.reaction_counters.divisions = self.reaction_counters.divisions.saturating_add(1);
-        if self
-            .rng
-            .chance(self.cells[cell_id].genome.post_divide_mortality)
+    fn fission_cell(&mut self, cell_id: CellId, local_enval: f32) {
+        let parent = &self.cells[cell_id];
+        if parent.strain(self.config.cell_body.boundary_density)
+            < self.config.cell_body.fission_strain
+            || parent.body.total() * 0.5 < MIN_DAUGHTER_BODY
         {
-            self.kill_cell_and_release(cell_id);
+            return;
         }
+        let fraction = 0.5 + (self.rng.next_f64() - 0.5) * 0.1;
+        if parent.body.total() * fraction.min(1.0 - fraction) < MIN_DAUGHTER_BODY {
+            return;
+        }
+        let angle = self.rng.range(0.0, std::f32::consts::TAU);
+        let axis = Position::new(angle.cos(), angle.sin());
+        let old_position = parent.position;
+        let lineage = parent.lineage_id;
+        let genome = parent.genome.mutate(&mut self.rng, local_enval);
+        let child_energy = parent.energy * fraction;
+        let mut body = ElementAmounts::ZERO;
+        let mut boundary = ElementAmounts::ZERO;
+        let mut free = ElementAmounts::ZERO;
+        let parent = &mut self.cells[cell_id];
+        for element in ELEMENT_ORDER {
+            body[element] = (f64::from(parent.body[element]) * fraction) as f32;
+            boundary[element] = (f64::from(parent.boundary[element]) * fraction) as f32;
+            free[element] = (f64::from(parent.internal_elements[element]) * fraction) as f32;
+            parent.body[element] -= body[element];
+            parent.boundary[element] -= boundary[element];
+            parent.internal_elements[element] -= free[element];
+        }
+        parent.energy -= child_energy;
+        parent.refresh_radius(self.config.cell_body.body_density);
+        let parent_radius = parent.radius;
+        let mut child = Cell::new(
+            genome,
+            old_position,
+            self.sim_time_seconds,
+            child_energy,
+            body,
+            boundary,
+            self.config.cell_body.body_density,
+        );
+        child.internal_elements = free;
+        let parent_position = Position::new(
+            old_position.x - axis.x * child.radius,
+            old_position.y - axis.y * child.radius,
+        )
+        .wrapped(self.width as f32, self.height as f32)
+        .expect("finite fission position");
+        child.position = Position::new(
+            old_position.x + axis.x * parent_radius,
+            old_position.y + axis.y * parent_radius,
+        )
+        .wrapped(self.width as f32, self.height as f32)
+        .expect("finite fission position");
+        self.update_cell_position(cell_id, parent_position);
+        let child_position = child.position;
+        let child_id = self.cells.insert(child);
+        assert!(self.spatial_index.insert(child_id, child_position));
+        self.increment_tile_cell_count(child_position);
+        self.record_lineage_birth(lineage);
+        self.birth_count += 1;
+        self.operation_counters.cell_divisions += 1;
+        self.reaction_counters.divisions += 1;
     }
 
     fn random_non_overlapping_position(&mut self, max_attempts: usize) -> Option<Position> {
@@ -2284,7 +2459,9 @@ impl World {
                 self.rng.range(0.0, self.width as f32),
                 self.rng.range(0.0, self.height as f32),
             );
-            if self.position_is_clear(position, DEFAULT_CELL_RADIUS, None) {
+            if self.position_is_clear(position, REFERENCE_CELL_RADIUS, None)
+                && self.founder_material(position).is_some()
+            {
                 return Some(position);
             }
         }
@@ -2305,7 +2482,7 @@ impl World {
         let mut candidates = 0_u64;
         let blocker = self.spatial_index.find_within(
             position,
-            radius + DEFAULT_CELL_RADIUS,
+            radius + self.max_cell_radius,
             |other_id, other_position| {
                 candidates += 1;
                 if Some(other_id) == ignored_cell {
@@ -2313,7 +2490,7 @@ impl World {
                 }
                 let other_radius = cells
                     .get(other_id)
-                    .map_or(DEFAULT_CELL_RADIUS, |other| other.radius);
+                    .map_or(REFERENCE_CELL_RADIUS, |other| other.radius);
                 let separation = radius + other_radius;
                 toroidal_distance_squared(position, other_position, width, height)
                     < (separation - GEOMETRY_TOLERANCE).max(0.0).powi(2)
@@ -2330,7 +2507,11 @@ impl World {
         let Some(cell) = self.cells.get(cell_id) else {
             return;
         };
-        let (position, released_elements) = (cell.position, cell.internal_elements);
+        let position = cell.position;
+        let mut released_elements = cell.internal_elements;
+        for element in ELEMENT_ORDER {
+            released_elements[element] += cell.body[element] + cell.boundary[element];
+        }
         self.deposit_elements_at(position, released_elements)
             .expect("active cell position must support conservative death release");
         let cell = self.remove_live_cell(cell_id);
@@ -2362,17 +2543,48 @@ impl World {
         counters.population = counters.population.saturating_sub(1);
     }
 
+    fn refresh_max_cell_radius(&mut self) {
+        self.max_cell_radius = self
+            .cells
+            .iter()
+            .map(|cell| cell.radius)
+            .fold(0.0, f32::max);
+    }
+
+    fn collect_contact_pairs(&self, gap: f32, pairs: &mut Vec<(CellId, CellId)>) {
+        pairs.clear();
+        for cell in self.cells.iter() {
+            self.spatial_index.find_within(
+                cell.position,
+                cell.radius + self.max_cell_radius + gap,
+                |other_id, position| {
+                    if other_id.index() > cell.id.index() {
+                        let separation = cell.radius + self.cells[other_id].radius + gap;
+                        if toroidal_distance_squared(
+                            cell.position,
+                            position,
+                            self.width as f32,
+                            self.height as f32,
+                        ) <= separation * separation
+                        {
+                            pairs.push((cell.id, other_id));
+                        }
+                    }
+                    false
+                },
+            );
+        }
+        pairs.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
+    }
+
     fn resolve_overlaps(&mut self) {
+        self.refresh_max_cell_radius();
         if self.cells.len() < 2 {
             return;
         }
         for _ in 0..OVERLAP_RELAXATION_PASSES {
             let mut pairs = std::mem::take(&mut self.pair_scratch);
-            self.spatial_index.collect_pairs_within(
-                DEFAULT_CELL_RADIUS * 2.0,
-                self.cells.iter().map(|cell| (cell.id, cell.position)),
-                &mut pairs,
-            );
+            self.collect_contact_pairs(0.0, &mut pairs);
             self.operation_counters.spatial_candidate_checks = self
                 .operation_counters
                 .spatial_candidate_checks
@@ -2483,11 +2695,7 @@ impl World {
         }
 
         let mut pairs = std::mem::take(&mut self.pair_scratch);
-        self.spatial_index.collect_pairs_within(
-            PREDATION_INTERACTION_DISTANCE + GEOMETRY_TOLERANCE,
-            self.cells.iter().map(|cell| (cell.id, cell.position)),
-            &mut pairs,
-        );
+        self.collect_contact_pairs(PREDATION_CONTACT_GAP, &mut pairs);
         self.operation_counters.spatial_candidate_checks = self
             .operation_counters
             .spatial_candidate_checks
@@ -2614,6 +2822,12 @@ impl World {
         };
 
         let prey = self.remove_live_cell(prey_id);
+        let mut structure = prey.body;
+        for element in ELEMENT_ORDER {
+            structure[element] += prey.boundary[element];
+        }
+        self.deposit_elements_at(prey.position, structure)
+            .expect("valid prey position");
         let absorbed_energy = prey.energy.max(0.0);
         if absorbed_energy > 0.0 {
             self.cells[predator_id].energy += absorbed_energy;
@@ -2647,12 +2861,9 @@ impl World {
 fn inspect_genome(genome: &Genome) -> GenomeDetailInspection {
     GenomeDetailInspection {
         optimal_enval: genome.optimal_enval,
-        repro_threshold: genome.repro_threshold,
-        initial_energy: genome.initial_energy,
         mutation_rate: genome.mutation_rate,
-        post_divide_mortality: genome.post_divide_mortality,
         enval_mutation_floor: genome.enval_mutation_floor,
-        maintenance_cost_per_sec: genome.maintenance_cost_per_sec,
+        maintenance_cost_per_area: genome.maintenance_cost_per_area,
         lineage_id: genome.lineage_id,
         enzyme_count: genome.enzymes.len(),
         min_cell_enzymes: MIN_CELL_ENZYMES,
@@ -2678,6 +2889,8 @@ fn inspect_enzyme(index: usize, enzyme: &Enzyme) -> EnzymeDetailInspection {
         half_saturation: enzyme.half_saturation,
         energy_harvest_fraction: enzyme.energy_harvest_fraction,
         secretion_fraction: enzyme.secretion_fraction,
+        body_fraction: enzyme.body_fraction,
+        boundary_fraction: enzyme.boundary_fraction,
         enval_sigma: enzyme.enval_sigma,
         enval_throughput: enzyme.enval_throughput,
         enval_energy_fraction: enzyme.enval_energy_fraction,
@@ -2728,6 +2941,7 @@ pub enum WorldError {
     InvalidCell(CellId),
     InvalidCellPosition(Position),
     OverlappingCellPosition(Position),
+    InsufficientFounderMaterial(Position),
     NonFiniteEnvalInput(f32),
     InvalidEnergyInput(f64),
     GenomePatch(String),
@@ -2748,6 +2962,11 @@ impl fmt::Display for WorldError {
             Self::OverlappingCellPosition(position) => write!(
                 f,
                 "cell position ({}, {}) overlaps an active cell",
+                position.x, position.y
+            ),
+            Self::InsufficientFounderMaterial(position) => write!(
+                f,
+                "insufficient founder material at ({}, {})",
                 position.x, position.y
             ),
             Self::NonFiniteEnvalInput(value) => write!(f, "non-finite enval value {value}"),
@@ -2941,7 +3160,7 @@ mod tests {
         LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
     };
     use crate::spatial::{
-        DEFAULT_CELL_RADIUS, Position, minimum_image_displacement, toroidal_distance_squared,
+        Position, REFERENCE_CELL_RADIUS, minimum_image_displacement, toroidal_distance_squared,
     };
 
     fn live_ids(world: &World) -> Vec<crate::cell::CellId> {
@@ -2959,7 +3178,7 @@ mod tests {
 
     fn only_a_config(seed: &str, width: usize, height: usize) -> Config {
         let mut config = small_config(seed, width, height);
-        config.element_fields.initial_amounts = ElementAmounts::new([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        config.element_fields.initial_amounts = ElementAmounts::new([2.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         config.element_fields.heterogeneity = 0.0;
         config
     }
@@ -2973,7 +3192,7 @@ mod tests {
     ) -> Genome {
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
         genome.lineage_id = LineageId(lineage);
-        genome.initial_energy = energy;
+        world.config.founder_energy = energy;
         genome.enzymes.clear();
         if attack > 0 {
             genome.enzymes.push(Enzyme::attackase(attack));
@@ -3007,6 +3226,449 @@ mod tests {
             assert!(cell.internal_elements[element].is_finite());
             assert!(cell.internal_elements[element] >= 0.0);
         }
+    }
+
+    #[test]
+    fn watching_is_exclusive_resets_on_change_and_never_changes_trajectory() {
+        let mut plain = World::new(small_config("watch-determinism", 16, 12)).unwrap();
+        plain.spawn_founder_cells(8).unwrap();
+        let mut watched = plain.clone();
+        let first = live_ids(&watched)[0];
+        let second = live_ids(&watched)[1];
+        assert_eq!(
+            watched
+                .inspect_cell_detail(first, 64)
+                .unwrap()
+                .recent_fluxes
+                .flux_count,
+            0
+        );
+        for tick in 0..500 {
+            plain.step();
+            watched.step();
+            if tick % 10 == 0 {
+                let id = if tick < 250 { first } else { second };
+                if watched.cell(id).is_some() {
+                    watched.inspect_cell_detail(id, 64).unwrap();
+                }
+            }
+            assert_eq!(
+                bincode::serialize(&plain).unwrap(),
+                bincode::serialize(&watched).unwrap()
+            );
+        }
+        assert_eq!(plain.flux_log.flux_count(), 0);
+        assert!(watched.flux_log.flux_count() > 0);
+        assert!(
+            watched
+                .flux_log
+                .fluxes_newest_first()
+                .all(|record| record.cell_id == second.index())
+        );
+        assert_eq!(
+            watched.inspect_cell_fluxes(first, 64).unwrap().flux_count,
+            0
+        );
+        let bytes = crate::snapshot::to_bytes(&watched).unwrap();
+        let mut restored = crate::snapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.watched_cell_id, None);
+        assert_eq!(restored.flux_log.flux_count(), 0);
+        watched.step_many(100);
+        restored.step_many(100);
+        assert_eq!(
+            bincode::serialize(&watched).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn snapshot_cell_storage_is_under_one_point_five_kilobytes_per_live_cell() {
+        let mut world = if let Ok(path) = std::env::var("MICROCOSM_REFERENCE_SNAPSHOT") {
+            crate::snapshot::load_from_path(path).unwrap()
+        } else {
+            let mut world = World::new(small_config("body-snapshot-size", 64, 48)).unwrap();
+            world.spawn_founder_cells(100).unwrap();
+            world.inspect_cell_fluxes(live_ids(&world)[0], 64).unwrap();
+            world.step_many(100);
+            world
+        };
+        let populated = crate::snapshot::to_bytes(&world).unwrap().len();
+        let count = world.cell_count();
+        world.cells = crate::cell::CellStore::default();
+        let empty = crate::snapshot::to_bytes(&world).unwrap().len();
+        println!(
+            "snapshot populated={populated} empty={empty} cells={count} bytes_per_cell={:.3}",
+            (populated - empty) as f64 / count as f64
+        );
+        assert!(
+            populated - empty <= 1_500 * count,
+            "{} bytes / {count} cells",
+            populated - empty
+        );
+    }
+
+    #[test]
+    fn mixed_radius_pairs_picking_and_placement_match_brute_force() {
+        let mut world = World::new(small_config("mixed-radius", 32, 24)).unwrap();
+        world.spawn_founder_cells(80).unwrap();
+        for (index, cell) in world.cells.iter_mut().enumerate() {
+            let scale = if index % 13 == 0 {
+                36.0
+            } else {
+                0.25 + (index % 5) as f32 * 0.5
+            };
+            for element in ELEMENT_ORDER {
+                cell.body[element] *= scale;
+            }
+            cell.refresh_radius(world.config.cell_body.body_density);
+        }
+        world.rebuild_derived_caches();
+        for gap in [0.0, super::PREDATION_CONTACT_GAP] {
+            let mut actual = Vec::new();
+            world.collect_contact_pairs(gap, &mut actual);
+            let mut expected = Vec::new();
+            for a in world.cells.iter() {
+                for b in world.cells.iter() {
+                    if a.id.index() < b.id.index()
+                        && toroidal_distance_squared(a.position, b.position, 32.0, 24.0)
+                            <= (a.radius + b.radius + gap).powi(2)
+                    {
+                        expected.push((a.id, b.id));
+                    }
+                }
+            }
+            expected.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
+            assert_eq!(actual, expected);
+            let capacity = actual.capacity();
+            let pointer = actual.as_ptr();
+            world.collect_contact_pairs(gap, &mut actual);
+            assert_eq!(actual.capacity(), capacity);
+            assert_eq!(actual.as_ptr(), pointer);
+        }
+        for index in 0..500 {
+            let position = Position::new(
+                (index * 17 % 320) as f32 * 0.1,
+                (index * 13 % 240) as f32 * 0.1,
+            );
+            let expected = world
+                .cells
+                .iter()
+                .filter_map(|cell| {
+                    let distance = toroidal_distance_squared(position, cell.position, 32.0, 24.0);
+                    (distance <= (cell.radius + GEOMETRY_TOLERANCE).powi(2))
+                        .then_some((cell.id, distance))
+                })
+                .min_by(|(a, da), (b, db)| da.total_cmp(db).then_with(|| a.index().cmp(&b.index())))
+                .map(|(id, _)| id);
+            assert_eq!(world.pick_cell(position), expected);
+            for radius in [0.1, 0.45, 2.5] {
+                let clear = world.cells.iter().all(|cell| {
+                    toroidal_distance_squared(position, cell.position, 32.0, 24.0)
+                        >= (radius + cell.radius - GEOMETRY_TOLERANCE).max(0.0).powi(2)
+                });
+                assert_eq!(world.position_is_clear(position, radius, None), clear);
+            }
+        }
+    }
+
+    #[test]
+    fn large_predator_uses_surface_contact_and_releases_prey_structure() {
+        let mut world = World::new(small_config("large-predation", 16, 12)).unwrap();
+        let a = world.tile_id(2, 3).unwrap();
+        let b = world.tile_id(5, 3).unwrap();
+        let predator = spawn_combat_cell(&mut world, a, 1, 50, 0, 2.0);
+        let prey = spawn_combat_cell(&mut world, b, 2, 0, 1, 2.0);
+        for element in ELEMENT_ORDER {
+            world.cells[predator].body[element] *= 25.0;
+        }
+        world.cells[predator].refresh_radius(world.config.cell_body.body_density);
+        world.refresh_max_cell_radius();
+        let structure = world.cells[prey].clone();
+        let before = world.element_field_totals();
+        let body_before = world.cells[predator].body;
+        world.resolve_predation();
+        assert!(world.cell(prey).is_none());
+        assert_eq!(world.cells[predator].body, body_before);
+        assert_eq!(world.cells[predator].energy, 4.0);
+        for element in ELEMENT_ORDER {
+            assert!(
+                (world.element_field_totals()[element.index()]
+                    - before[element.index()]
+                    - f64::from(structure.body[element])
+                    - f64::from(structure.boundary[element]))
+                .abs()
+                    < 1.0e-5
+            );
+        }
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn overlap_resolution_separates_disturbed_fission_daughters() {
+        let mut world = World::new(small_config("daughter-overlap", 16, 12)).unwrap();
+        let id = world.spawn_random_cell().unwrap().unwrap();
+        for element in ELEMENT_ORDER {
+            world.cells[id].boundary[element] *= 1.6;
+        }
+        world.fission_cell(id, 0.0);
+        let child_id = world.cells.ids().find(|other| *other != id).unwrap();
+        let center = world.cells[id].position;
+        world.update_cell_position(child_id, center);
+        let rng_before = bincode::serialize(&world.rng).unwrap();
+        for _ in 0..4 {
+            world.resolve_overlaps();
+        }
+        let parent = &world.cells[id];
+        let child = &world.cells[child_id];
+        assert!(
+            toroidal_distance_squared(parent.position, child.position, 16.0, 12.0).sqrt()
+                >= parent.radius + child.radius - GEOMETRY_TOLERANCE
+        );
+        assert_eq!(bincode::serialize(&world.rng).unwrap(), rng_before);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn transport_equilibrium_preserves_body_size_for_mixed_areas() {
+        for scale in [0.25, 1.0, 4.0, 16.0] {
+            let mut world = World::new(only_a_config("body-transport", 16, 12)).unwrap();
+            let genome = Genome::random_founder(&mut world.rng, 0.0);
+            let position = Position::new(3.5, 4.5);
+            let id = world
+                .spawn_cell_with_genome_at_position(position, genome)
+                .unwrap();
+            for element in ELEMENT_ORDER {
+                world.cells[id].body[element] *= scale;
+            }
+            world.cells[id].refresh_radius(world.config.cell_body.body_density);
+            let radius = world.cells[id].radius;
+            let body = world.cells[id].body;
+            let boundary = world.cells[id].boundary;
+            let total_before = world.stats().system_element_amounts;
+            let rng_before = bincode::serialize(&world.rng).unwrap();
+            for _ in 0..2_000 {
+                world.transport_elements(world.cells.slot(id).unwrap(), position);
+            }
+            let inside =
+                f64::from(world.cells[id].internal_elements[Element::A]) / cell_area(&world, id);
+            let outside = f64::from(world.sample_element_fields_at(position).unwrap()[Element::A]);
+            assert!(
+                (inside - outside).abs() < 1.0e-5,
+                "scale={scale} inside={inside} outside={outside}"
+            );
+            assert_eq!(world.cells[id].radius, radius);
+            assert_eq!(world.cells[id].body, body);
+            assert_eq!(world.cells[id].boundary, boundary);
+            assert_eq!(bincode::serialize(&world.rng).unwrap(), rng_before);
+            for element in ELEMENT_ORDER {
+                assert!(
+                    (world.stats().system_element_amounts[element.index()]
+                        - total_before[element.index()])
+                    .abs()
+                        < 1.0e-4
+                );
+            }
+            world.check_invariants().unwrap();
+        }
+    }
+
+    #[test]
+    fn membrane_polarity_controls_element_permeability() {
+        let mut world = World::new(small_config("polarity-transport", 8, 8)).unwrap();
+        let id = world.spawn_random_cell().unwrap().unwrap();
+        let position = world.cells[id].position;
+        world.cells[id].boundary = ElementAmounts::new([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        for amounts in &mut world.element_fields {
+            *amounts = ElementAmounts::new([1.0; 6]);
+        }
+        assert!((world.cells[id].membrane_polarity() - 0.9).abs() < 1.0e-6);
+        world.transport_elements(world.cells.slot(id).unwrap(), position);
+        let free = world.cells[id].internal_elements;
+        assert!(free[Element::A] > free[Element::B]);
+        assert!(free[Element::B] > free[Element::C]);
+        assert!(free[Element::C] > free[Element::D]);
+        world.cells[id].boundary = ElementAmounts::ZERO;
+        assert_eq!(world.cells[id].membrane_polarity(), 0.5);
+    }
+
+    #[test]
+    fn fission_conserves_pools_and_energy_places_touching_daughters_and_repeats_per_seed() {
+        for seed in ["fission-1", "fission-2", "fission-3"] {
+            let mut world = World::new(small_config(seed, 8, 8)).unwrap();
+            let genome = Genome::random_founder(&mut world.rng, 0.0);
+            let id = world
+                .spawn_cell_with_genome_at_position(Position::new(0.05, 0.05), genome)
+                .unwrap();
+            for element in ELEMENT_ORDER {
+                world.cells[id].boundary[element] *= 1.6;
+            }
+            world.cells[id].internal_elements = ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+            let before = world.cells[id].clone();
+            let field_before = world.element_field_totals();
+            let mut repeated = world.clone();
+            world.fission_cell(id, 0.1);
+            repeated.fission_cell(id, 0.1);
+            assert_eq!(
+                bincode::serialize(&world).unwrap(),
+                bincode::serialize(&repeated).unwrap()
+            );
+            assert_eq!(world.cell_count(), 2);
+            assert_eq!(world.reaction_counters.divisions, 1);
+            assert_eq!(world.element_field_totals(), field_before);
+            let child = world.cells.iter().find(|cell| cell.id != id).unwrap();
+            let parent = &world.cells[id];
+            assert_eq!(parent.energy + child.energy, before.energy);
+            assert_eq!(child.lineage_id, before.lineage_id);
+            let distance =
+                toroidal_distance_squared(parent.position, child.position, 8.0, 8.0).sqrt();
+            assert!((distance - parent.radius - child.radius).abs() < 1.0e-5);
+            for element in ELEMENT_ORDER {
+                for (original, left, right) in [
+                    (
+                        before.body[element],
+                        parent.body[element],
+                        child.body[element],
+                    ),
+                    (
+                        before.boundary[element],
+                        parent.boundary[element],
+                        child.boundary[element],
+                    ),
+                    (
+                        before.internal_elements[element],
+                        parent.internal_elements[element],
+                        child.internal_elements[element],
+                    ),
+                ] {
+                    assert!((left + right - original).abs() < 1.0e-6);
+                }
+            }
+            world.check_invariants().unwrap();
+        }
+    }
+
+    #[test]
+    fn lysis_releases_all_material_and_records_remaining_energy() {
+        let mut config = only_a_config("lysis", 8, 8);
+        config.catalyst_upkeep_per_sec = 0.0;
+        let mut world = World::new(config).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, 0.0);
+        genome.enzymes = vec![Enzyme::defensase(1)];
+        genome.maintenance_cost_per_area = 0.0;
+        let id = world
+            .spawn_cell_with_genome_at_position(Position::new(2.5, 3.5), genome)
+            .unwrap();
+        for element in ELEMENT_ORDER {
+            world.cells[id].boundary[element] *= 0.6;
+        }
+        world.cells[id].internal_elements = ElementAmounts::new([1.0; 6]);
+        let before = world.stats().system_element_amounts;
+        let energy = world.cells[id].energy;
+        world.step_cell(id);
+        assert_eq!(world.cell_count(), 0);
+        assert_eq!(world.lysis_count, 1);
+        assert_eq!(world.energy_death_count, 0);
+        assert_eq!(world.energy_ledger.death_loss, energy);
+        for element in ELEMENT_ORDER {
+            assert!(
+                (world.element_field_totals()[element.index()] - before[element.index()]).abs()
+                    < 1.0e-5
+            );
+        }
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn fission_requires_membrane_and_minimum_daughter_material() {
+        let mut world = World::new(small_config("fission-minimum", 8, 8)).unwrap();
+        let id = world.spawn_random_cell().unwrap().unwrap();
+        world.set_all_live_cell_energy(1_000_000.0).unwrap();
+        world.fission_cell(id, 0.0);
+        assert_eq!(world.cell_count(), 1);
+        for element in ELEMENT_ORDER {
+            world.cells[id].body[element] *= 0.01;
+        }
+        world.cells[id].refresh_radius(world.config.cell_body.body_density);
+        world.fission_cell(id, 0.0);
+        assert_eq!(world.cell_count(), 1);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn assembly_is_ledgered_and_closes_over_two_thousand_ticks() {
+        let mut world = World::new(small_config("assembly-ledger", 16, 12)).unwrap();
+        world.spawn_founder_cells(8).unwrap();
+        for cell in world.cells.iter_mut() {
+            for enzyme in &mut cell.genome.enzymes {
+                if enzyme.enzyme_type.is_metabolic() {
+                    enzyme.body_fraction = 0.2;
+                    enzyme.boundary_fraction = 0.2;
+                }
+            }
+        }
+        for _ in 0..2_000 {
+            world.step();
+            world.check_invariants().unwrap();
+        }
+        assert!(world.energy_ledger.assembly_cost > 0.0);
+    }
+
+    #[test]
+    fn founders_conserve_every_element_and_start_at_reference_geometry() {
+        let mut world = World::new(small_config("body-founders", 64, 48)).unwrap();
+        let before = world.element_field_totals();
+        assert_eq!(world.spawn_founder_cells(32).unwrap(), 32);
+        let after = world.stats().system_element_amounts;
+        for element in ELEMENT_ORDER {
+            assert!((before[element.index()] - after[element.index()]).abs() < 1.0e-4);
+        }
+        for cell in world.cells.iter() {
+            assert!((cell.radius - REFERENCE_CELL_RADIUS).abs() < 1.0e-4);
+            assert!((cell.strain(world.config.cell_body.boundary_density) - 1.0).abs() < 1.0e-4);
+            assert_eq!(cell.energy, 2.0);
+        }
+        world.check_invariants().unwrap();
+        let ids = live_ids(&world);
+        for id in ids {
+            world.kill_cell_and_release(id);
+        }
+        for element in ELEMENT_ORDER {
+            assert!(
+                (before[element.index()] - world.element_field_totals()[element.index()]).abs()
+                    < 1.0e-4
+            );
+        }
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn founders_reject_insufficient_material_without_changing_fields() {
+        let mut config = only_a_config("poor-founder", 1, 1);
+        config.element_fields.initial_amounts = ElementAmounts::new([0.1, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut world = World::new(config).unwrap();
+        let before = world.element_field_totals();
+        assert_eq!(world.spawn_founder_cells(3).unwrap(), 0);
+        assert_eq!(world.element_field_totals(), before);
+        assert_eq!(world.energy_ledger.founder_energy, 0.0);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn invariants_reject_invalid_structure_and_inconsistent_radius() {
+        let mut world = World::new(small_config("invalid-body", 8, 8)).unwrap();
+        let id = world.spawn_random_cell().unwrap().unwrap();
+        let cell = world.cells[id].clone();
+        world.cells[id].radius *= 2.0;
+        assert!(world.check_invariants().is_err());
+        world.cells[id] = cell.clone();
+        world.cells[id].body = ElementAmounts::ZERO;
+        assert!(world.check_invariants().is_err());
+        world.cells[id] = cell.clone();
+        world.cells[id].boundary[Element::A] = -1.0;
+        assert!(world.check_invariants().is_err());
+        world.cells[id] = cell;
+        world.cells[id].body[Element::A] = f32::NAN;
+        assert!(world.check_invariants().is_err());
     }
 
     #[test]
@@ -3307,7 +3969,8 @@ mod tests {
         let area = std::f64::consts::PI * radius * radius;
         let perimeter = 2.0 * std::f64::consts::PI * radius;
         (f64::from(world.config.membrane_permeability) * perimeter * world.config.dt_seconds
-            / (2.0 * area))
+            / (2.0 * area)
+            * 1.75)
             .min(MAX_TRANSPORT_FRACTION)
     }
 
@@ -3324,7 +3987,9 @@ mod tests {
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::A] = 0.1;
         let area = cell_area(&world, cell_id);
-        let expected = transport_fraction(&world, cell_id) * (1.0 - 0.1 / area) * area;
+        let expected = transport_fraction(&world, cell_id)
+            * (f64::from(world.tile_element_amounts(tile).unwrap()[Element::A]) - 0.1 / area)
+            * area;
 
         let (inward, outward) =
             world.transport_elements(world.cells.slot(cell_id).unwrap(), Position::new(1.0, 1.0));
@@ -3408,6 +4073,9 @@ mod tests {
             let cell_id = world
                 .spawn_cell_with_genome_at_position(position, genome)
                 .unwrap();
+            for amounts in &mut world.element_fields {
+                *amounts = world.config.element_fields.initial_amounts;
+            }
             let before = world.element_field_totals();
             let (inward, _) =
                 world.transport_elements(world.cells.slot(cell_id).unwrap(), position);
@@ -3520,6 +4188,9 @@ mod tests {
     #[test]
     fn fractional_uptake_is_nonnegative_and_conservative() {
         let mut world = World::new(only_a_config("fractional-uptake", 4, 4)).unwrap();
+        let tile = world.tile_id(1, 1).unwrap();
+        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         for amounts in &mut world.element_fields {
             *amounts = ElementAmounts::ZERO;
         }
@@ -3527,9 +4198,6 @@ mod tests {
             let tile = world.tile_id(x, y).unwrap();
             world.element_fields[tile.index()][Element::A] = amount;
         }
-        let tile = world.tile_id(1, 1).unwrap();
-        let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         let position = Position::new(1.5, 1.5);
         let before = world.element_field_totals()[Element::A.index()];
 
@@ -3641,8 +4309,8 @@ mod tests {
         let tile = world.tile_id(1, 1).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
         genome.enzymes = vec![Enzyme::defensase(1)];
-        genome.initial_energy = 0.001;
-        genome.maintenance_cost_per_sec = 10.0;
+        world.config.founder_energy = 0.001;
+        genome.maintenance_cost_per_area = 10.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements =
             ElementAmounts::new([0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
@@ -3662,9 +4330,8 @@ mod tests {
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
         genome.enzymes = vec![Enzyme::founder_downhill()];
         genome.optimal_enval = -0.9;
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.initial_energy = 1.0;
-        genome.repro_threshold = 1_000_000.0;
+        genome.maintenance_cost_per_area = 0.0;
+        world.config.founder_energy = 1.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].birth_sim_time = -10_000.0;
 
@@ -3684,9 +4351,8 @@ mod tests {
         let tile = world.tile_id(1, 1).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
         genome.enzymes = vec![Enzyme::defensase(1)];
-        genome.initial_energy = 0.0105;
-        genome.maintenance_cost_per_sec = 0.5;
-        genome.repro_threshold = 1_000_000.0;
+        world.config.founder_energy = 0.0105;
+        genome.maintenance_cost_per_area = 0.5 / f64::from(crate::spatial::REFERENCE_CELL_AREA);
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements =
             ElementAmounts::new([0.0, 0.4, 0.3, 0.2, 0.1, 0.05]);
@@ -3707,29 +4373,6 @@ mod tests {
     }
 
     #[test]
-    fn deaths_with_energy_left_record_death_loss() {
-        let mut world = World::new(only_a_config("energy-only-death-loss", 8, 8)).unwrap();
-        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.enzymes = vec![Enzyme::defensase(1)];
-        genome.initial_energy = 6.0;
-        genome.repro_threshold = 1.0;
-        genome.mutation_rate = 0.0;
-        genome.post_divide_mortality = 1.0;
-        genome.maintenance_cost_per_sec = 0.0;
-        let parent = world
-            .spawn_cell_with_genome_at_position(Position::new(4.0, 4.0), genome)
-            .unwrap();
-
-        world.divide_cell(parent, world.avg_enval);
-
-        assert!(world.cell(parent).is_none());
-        let ledger = world.energy_ledger();
-        assert!(ledger.death_loss > 2.0 && ledger.death_loss < 4.0);
-        assert!((world.total_live_cell_energy() + ledger.death_loss - 6.0).abs() <= 1.0e-12);
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
     fn reaction_costs_that_exhaust_energy_kill_the_cell() {
         let mut world = World::new(only_a_config("energy-only-death-reaction", 4, 4)).unwrap();
         let tile = world.tile_id(1, 1).unwrap();
@@ -3745,9 +4388,8 @@ mod tests {
         uphill.enval_pump = 0.0;
         uphill.enval_sigma = 1000.0;
         genome.enzymes = vec![uphill];
-        genome.initial_energy = 0.01;
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.repro_threshold = 1_000_000.0;
+        world.config.founder_energy = 0.01;
+        genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::A] = 5.0;
 
@@ -3774,14 +4416,14 @@ mod tests {
         catalyst.enval_pump = 0.0;
         genome.enzymes = vec![catalyst];
         genome.optimal_enval = local;
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.repro_threshold = 1_000_000.0;
+        genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 1.0;
 
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
         world.step_cell(cell_id);
 
-        let record = world.cells[cell_id].latest_flux().unwrap();
+        let record = world.flux_log.latest_flux().unwrap();
         assert!((record.local_enval - local).abs() <= 1.0e-6);
         assert!(record.executed_extent > 0.09);
     }
@@ -3798,8 +4440,7 @@ mod tests {
         catalyst.secretion_fraction = 0.0;
         genome.enzymes = vec![catalyst];
         genome.optimal_enval = 1.0;
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.repro_threshold = 1_000_000.0;
+        genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 1.0;
         let before = world.enval.clone();
@@ -3810,9 +4451,10 @@ mod tests {
             2 + MOORE_WITH_CENTER_DY[release_choice],
         );
 
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
         world.step_cell(cell_id);
 
-        let record = world.cells[cell_id].latest_flux().unwrap();
+        let record = world.flux_log.latest_flux().unwrap();
         assert!(record.enval_input > 0.0);
         assert!(record.enval_output < 0.0);
         let expected_output_magnitude = record.enval_input.abs()
@@ -3861,20 +4503,22 @@ mod tests {
         let mut catalyst = Enzyme::founder_downhill();
         catalyst.enval_sigma = 1000.0;
         catalyst.rate = 10.0;
+        catalyst.body_fraction = 0.0;
+        catalyst.boundary_fraction = 0.0;
         catalyst.secretion_fraction = 0.25;
         genome.enzymes = vec![catalyst];
-        genome.initial_energy = 10.0;
-        genome.repro_threshold = 1_000_000.0;
-        genome.maintenance_cost_per_sec = 0.0;
+        world.config.founder_energy = 10.0;
+        genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 100.0;
 
         let target_fluxes = CELL_FLUX_LOG_CAPACITY + 5;
         for _ in 0..target_fluxes {
+            world.inspect_cell_fluxes(cell_id, 0).unwrap();
             world.step_cell(cell_id);
         }
 
-        assert_eq!(world.cells[cell_id].flux_count(), CELL_FLUX_LOG_CAPACITY);
+        assert_eq!(world.flux_log.flux_count(), CELL_FLUX_LOG_CAPACITY);
         let logs = world.inspect_cell_fluxes(cell_id, 2).unwrap();
         assert!(logs.available);
         assert_eq!(logs.reason, "recorded");
@@ -3915,25 +4559,24 @@ mod tests {
         catalyst.secretion_fraction = 0.5;
         catalyst.enval_sigma = 1000.0;
         genome.enzymes = vec![catalyst];
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.repro_threshold = 1_000_000.0;
+        genome.maintenance_cost_per_area = 0.0;
         genome.optimal_enval = world.default_local_enval_average(tile).unwrap();
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 1.0;
-        let before = world.element_field_totals().iter().sum::<f64>()
-            + world.cells[cell_id].internal_elements.total();
+        let a_before = world.element_fields[tile.index()][Element::A];
+        let before = world.stats().total_element_amount;
 
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
         world.step_cell(cell_id);
 
-        let after = world.element_field_totals().iter().sum::<f64>()
-            + world.cells[cell_id].internal_elements.total();
+        let after = world.stats().total_element_amount;
         assert!((after - before).abs() <= 1.0e-5);
-        let record = world.cells[cell_id].latest_flux().unwrap();
+        let record = world.flux_log.latest_flux().unwrap();
         assert!(record.secreted_elements[Element::A.index()] > 0.0);
         assert!(
             world.element_fields[tile.index()][Element::A]
                 + world.cells[cell_id].internal_elements[Element::A]
-                > 1.0
+                > a_before
         );
         assert_valid_reservoir(&world, cell_id);
         world.check_invariants().unwrap();
@@ -3951,9 +4594,8 @@ mod tests {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
             genome: Some(GenomeFieldPatch {
                 optimal_enval: Some(0.25),
-                repro_threshold: Some(8.5),
                 mutation_rate: Some(0.02),
-                maintenance_cost_per_sec: Some(0.11),
+                maintenance_cost_per_area: Some(0.11),
                 ..GenomeFieldPatch::default()
             }),
             enzymes: vec![
@@ -3991,9 +4633,8 @@ mod tests {
                 .any(|field| field == "optimal_enval")
         );
         assert!((cell.genome.optimal_enval - 0.25).abs() <= 1.0e-6);
-        assert_eq!(cell.genome.repro_threshold, 8.5);
-        assert_eq!(cell.maintenance_cost_per_sec, 0.11);
-        assert_eq!(cell.genome.maintenance_cost_per_sec, 0.11);
+        assert_eq!(cell.maintenance_cost_per_area, 0.11);
+        assert_eq!(cell.genome.maintenance_cost_per_area, 0.11);
         assert_eq!(cell.energy, energy_before);
         assert_eq!(cell.lineage_id, lineage_before);
         assert_eq!(cell.genome.lineage_id, lineage_before);
@@ -4091,7 +4732,7 @@ mod tests {
         let patch = GenomePatch {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
             genome: Some(GenomeFieldPatch {
-                repro_threshold: Some(3333.0),
+                optimal_enval: Some(0.33),
                 ..GenomeFieldPatch::default()
             }),
             enzymes: Vec::new(),
@@ -4100,8 +4741,8 @@ mod tests {
         let result = world.apply_genome_brush(3, 3, 3, 3, &patch).unwrap();
         assert_eq!(result.visited_tile_count, 9);
         assert_eq!(result.patched_cell_count, 2);
-        assert_eq!(world.cells[first].genome.repro_threshold, 3333.0);
-        assert_eq!(world.cells[second].genome.repro_threshold, 3333.0);
+        assert_eq!(world.cells[first].genome.optimal_enval, 0.33);
+        assert_eq!(world.cells[second].genome.optimal_enval, 0.33);
         world.check_invariants().unwrap();
     }
 
@@ -4119,7 +4760,7 @@ mod tests {
         let patch = GenomePatch {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
             genome: Some(GenomeFieldPatch {
-                repro_threshold: Some(4444.0),
+                optimal_enval: Some(0.44),
                 ..GenomeFieldPatch::default()
             }),
             enzymes: Vec::new(),
@@ -4129,8 +4770,8 @@ mod tests {
 
         assert_eq!(result.visited_tile_count, 1);
         assert_eq!(result.patched_cell_count, 2);
-        assert_eq!(world.cells[first].genome.repro_threshold, 4444.0);
-        assert_eq!(world.cells[second].genome.repro_threshold, 4444.0);
+        assert_eq!(world.cells[first].genome.optimal_enval, 0.44);
+        assert_eq!(world.cells[second].genome.optimal_enval, 0.44);
         assert_eq!(world.inspect_tile_xy(1, 1).unwrap().cell_center_count, 2);
     }
 
@@ -4169,83 +4810,13 @@ mod tests {
         let mut catalyst = Enzyme::founder_downhill();
         catalyst.rate = 10.0;
         genome.enzymes = vec![catalyst];
-        genome.initial_energy = 10.0;
+        world.config.founder_energy = 10.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 2.0;
         for _ in 0..5 {
             world.step_cell(cell_id);
         }
         assert_ne!(world.average_enval().to_bits(), before.to_bits());
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn division_partitions_energy_and_continuous_elements() {
-        let mut world = World::new(only_a_config("division", 6, 6)).unwrap();
-        let tile = world.tile_id(3, 3).unwrap();
-        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.enzymes = vec![Enzyme::defensase(1)];
-        genome.repro_threshold = 1.0;
-        genome.initial_energy = 10.0;
-        genome.mutation_rate = 1.0;
-        genome.post_divide_mortality = 0.0;
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.optimal_enval = world.default_local_enval_average(tile).unwrap();
-        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
-        world.cells[cell_id].internal_elements =
-            ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let before = world.cells[cell_id].internal_elements;
-        let lineage = world.cells[cell_id].lineage_id;
-        let local_enval = world.default_local_enval_average(tile).unwrap();
-        let mut expected_rng = world.rng.clone();
-        let mut expected_child_genome = world.cells[cell_id]
-            .genome
-            .mutate(&mut expected_rng, local_enval);
-        expected_child_genome.lineage_id = lineage;
-
-        world.divide_cell(cell_id, local_enval);
-
-        assert_eq!(world.stats().live_cell_count, 2);
-        assert_eq!(world.reaction_counters.divisions, 1);
-        assert!(world.cells[cell_id].energy < 10.0);
-        let child_id = live_ids(&world)
-            .iter()
-            .copied()
-            .find(|active| *active != cell_id)
-            .unwrap();
-        assert_eq!(world.cells[child_id].lineage_id, lineage);
-        assert_eq!(world.cells[child_id].genome, expected_child_genome);
-        assert_ne!(world.cells[child_id].genome, world.cells[cell_id].genome);
-        let child_position = world.cells[child_id].position;
-        let displacement = minimum_image_displacement(
-            world.cells[cell_id].position,
-            child_position,
-            world.width as f32,
-            world.height as f32,
-        );
-        assert!(displacement.x.abs() <= 2.0);
-        assert!(displacement.y.abs() <= 2.0);
-        assert!(
-            toroidal_distance_squared(
-                world.cells[cell_id].position,
-                child_position,
-                world.width as f32,
-                world.height as f32,
-            ) >= (DEFAULT_CELL_RADIUS * 2.0 - GEOMETRY_TOLERANCE).powi(2)
-        );
-        for active_cell in live_ids(&world).iter().copied() {
-            assert_valid_reservoir(&world, active_cell);
-        }
-        let mut after = [0.0_f64; ELEMENT_COUNT];
-        for active_cell in live_ids(&world).iter().copied() {
-            for element in ELEMENT_ORDER {
-                after[element.index()] +=
-                    f64::from(world.cells[active_cell].internal_elements[element]);
-            }
-        }
-        for element in ELEMENT_ORDER {
-            assert!((after[element.index()] - f64::from(before[element])).abs() <= 1.0e-6);
-        }
         world.check_invariants().unwrap();
     }
 
@@ -4374,7 +4945,7 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_moore_neighbor_predation_works() {
+    fn predation_obeys_the_specified_surface_gap_at_the_old_diagonal_limit() {
         let mut world = World::new(only_a_config("predation-diagonal", 4, 4)).unwrap();
         let a_tile = world.tile_id(0, 0).unwrap();
         let b_tile = world.tile_id(1, 1).unwrap();
@@ -4382,6 +4953,9 @@ mod tests {
         let prey = spawn_combat_cell(&mut world, b_tile, 2, 0, 1, 1.0);
         world.resolve_predation();
         assert!(world.cell(predator).is_some());
+        assert!(world.cell(prey).is_some());
+        world.update_cell_position(prey, Position::new(0.999, 0.999));
+        world.resolve_predation();
         assert!(world.cell(prey).is_none());
         world.check_invariants().unwrap();
     }
@@ -4568,7 +5142,7 @@ mod tests {
             before
                 .cell_radius
                 .iter()
-                .all(|radius| *radius == DEFAULT_CELL_RADIUS)
+                .all(|radius| *radius == REFERENCE_CELL_RADIUS)
         );
         assert!(
             before
@@ -4579,9 +5153,9 @@ mod tests {
         assert!(before.cell_scale_data.chunks_exact(4).all(|scale| {
             scale
                 == [
-                    DEFAULT_CELL_RADIUS,
-                    DEFAULT_CELL_RADIUS,
-                    DEFAULT_CELL_RADIUS,
+                    REFERENCE_CELL_RADIUS,
+                    REFERENCE_CELL_RADIUS,
+                    REFERENCE_CELL_RADIUS,
                     0.0,
                 ]
         }));
@@ -4612,7 +5186,7 @@ mod tests {
         assert_eq!(cell_info.cell_id, cell_id);
         assert_eq!(cell_info.x, 2.0);
         assert_eq!(cell_info.y, 1.0);
-        assert_eq!(cell_info.radius, DEFAULT_CELL_RADIUS);
+        assert_eq!(cell_info.radius, REFERENCE_CELL_RADIUS);
         assert!(cell_info.energy.is_finite());
     }
 
@@ -4828,7 +5402,7 @@ mod tests {
                         first_positions[right],
                         first.width as f32,
                         first.height as f32,
-                    ) >= (DEFAULT_CELL_RADIUS * 2.0 - GEOMETRY_TOLERANCE).powi(2)
+                    ) >= (REFERENCE_CELL_RADIUS * 2.0 - GEOMETRY_TOLERANCE).powi(2)
                 );
             }
         }
@@ -4840,15 +5414,16 @@ mod tests {
         let mut world = World::new(only_a_config("newborn-waits", 8, 8)).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
         genome.enzymes = vec![Enzyme::defensase(1)];
-        genome.initial_energy = 10.0;
-        genome.repro_threshold = 5.0;
-        genome.post_divide_mortality = 0.0;
-        genome.maintenance_cost_per_sec = 0.0;
+        world.config.founder_energy = 10.0;
+        genome.maintenance_cost_per_area = 0.0;
         genome.optimal_enval = world.avg_enval;
         let parent = world
             .spawn_cell_with_genome_at_position(Position::new(4.0, 4.0), genome)
             .unwrap();
         let before_steps = world.operation_counters.cell_steps;
+        for element in ELEMENT_ORDER {
+            world.cells[parent].boundary[element] *= 1.6;
+        }
         world.step_cells();
         assert_eq!(live_ids(&world).len(), 2);
         assert_eq!(world.operation_counters.cell_steps - before_steps, 1);
@@ -4857,7 +5432,7 @@ mod tests {
             .copied()
             .find(|cell_id| *cell_id != parent)
             .unwrap();
-        assert!(world.cells[child].flux_count() == 0);
+        assert_eq!(world.inspect_cell_fluxes(child, 64).unwrap().flux_count, 0);
     }
 
     #[test]
@@ -4871,9 +5446,8 @@ mod tests {
         ] {
             let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
             genome.enzymes = vec![Enzyme::defensase(1)];
-            genome.initial_energy = 10.0;
-            genome.repro_threshold = 1_000_000.0;
-            genome.maintenance_cost_per_sec = 0.0;
+            world.config.founder_energy = 10.0;
+            genome.maintenance_cost_per_area = 0.0;
             genome.optimal_enval = world.avg_enval;
             world
                 .spawn_cell_with_genome_at_position(position, genome)
@@ -4892,77 +5466,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_continuous_division_rolls_back_energy_and_elements() {
-        let mut world = World::new(only_a_config("division-rollback", 1, 1)).unwrap();
-        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.post_divide_mortality = 0.0;
-        let parent = world
-            .spawn_cell_with_genome_at_position(Position::new(0.5, 0.5), genome)
-            .unwrap();
-        world.cells[parent].energy = 20.0;
-        world.cells[parent].internal_elements = ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let energy_before = world.cells[parent].energy;
-        let elements_before = world.cells[parent].internal_elements;
-        world.divide_cell(parent, world.avg_enval);
-        assert_eq!(live_ids(&world), vec![parent]);
-        assert!((world.cells[parent].energy - energy_before).abs() <= 1.0e-12);
-        for element in ELEMENT_ORDER {
-            assert!(
-                (world.cells[parent].internal_elements[element] - elements_before[element]).abs()
-                    <= 1.0e-6
-            );
-        }
-        assert_eq!(world.reaction_counters.divisions, 0);
-    }
-
-    #[test]
-    fn continuous_division_wraps_across_seams_and_retains_post_divide_mortality() {
-        let mut saw_wrapped_child = false;
-        for attempt in 0..64 {
-            let mut world =
-                World::new(only_a_config(&format!("division-seam-{attempt}"), 8, 8)).unwrap();
-            let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-            genome.enzymes = vec![Enzyme::defensase(1)];
-            genome.initial_energy = 20.0;
-            genome.repro_threshold = 1.0;
-            genome.mutation_rate = 0.0;
-            genome.post_divide_mortality = 1.0;
-            genome.maintenance_cost_per_sec = 0.0;
-            let parent = world
-                .spawn_cell_with_genome_at_position(Position::new(0.05, 0.05), genome)
-                .unwrap();
-
-            world.divide_cell(parent, world.avg_enval);
-            if world.reaction_counters.divisions == 0 {
-                continue;
-            }
-
-            let child = live_ids(&world)
-                .iter()
-                .copied()
-                .find(|id| *id != parent)
-                .unwrap();
-            let child_position = world.cells[child].position;
-            assert!(world.cell(parent).is_none());
-            assert!(world.cell(child).is_some());
-            assert_eq!(world.stats().live_cell_count, 1);
-            assert_eq!(world.stats().deaths, 1);
-            assert!(child_position.x >= 0.0 && child_position.x < world.width as f32);
-            assert!(child_position.y >= 0.0 && child_position.y < world.height as f32);
-            world.check_invariants().unwrap();
-
-            if child_position.x > world.width as f32 - 2.0
-                || child_position.y > world.height as f32 - 2.0
-            {
-                saw_wrapped_child = true;
-                break;
-            }
-        }
-        assert!(saw_wrapped_child);
-    }
-
-    #[test]
     fn fractional_position_death_release_is_conservative() {
         let mut world = World::new(only_a_config("fractional-death", 5, 5)).unwrap();
         let genome = Genome::random_founder(&mut world.rng, world.avg_enval);
@@ -4974,14 +5477,20 @@ mod tests {
         world.cells[cell_id].internal_elements =
             ElementAmounts::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let before = world.element_field_totals();
+        let body = world.cells[cell_id].body;
+        let boundary = world.cells[cell_id].boundary;
         world.kill_cell_and_release(cell_id);
         assert_eq!(world.pick_cell(position), None);
         assert_eq!(world.spatial_index.len(), 0);
         let after = world.element_field_totals();
         for element in ELEMENT_ORDER {
             assert!(
-                (after[element.index()] - before[element.index()] - (element.index() + 1) as f64)
-                    .abs()
+                (after[element.index()]
+                    - before[element.index()]
+                    - (element.index() + 1) as f64
+                    - f64::from(body[element])
+                    - f64::from(boundary[element]))
+                .abs()
                     <= 1.0e-5
             );
         }
@@ -5158,9 +5667,8 @@ mod tests {
         genome.enzymes = vec![engine];
         genome.lineage_id = LineageId(lineage);
         genome.optimal_enval = optimal_enval;
-        genome.initial_energy = 5.0;
-        genome.maintenance_cost_per_sec = 0.0;
-        genome.repro_threshold = 1_000_000.0;
+        world.config.founder_energy = 5.0;
+        genome.maintenance_cost_per_area = 0.0;
         genome
     }
 
@@ -5412,9 +5920,8 @@ mod tests {
             let mut world = World::new(closed_config("catalyst-upkeep", 6, 6)).unwrap();
             let mut genome = Genome::random_founder(&mut world.rng, 0.0);
             genome.enzymes = enzymes;
-            genome.initial_energy = 10.0;
-            genome.maintenance_cost_per_sec = 0.05;
-            genome.repro_threshold = 1_000_000.0;
+            world.config.founder_energy = 10.0;
+            genome.maintenance_cost_per_area = 0.05;
             let cell_id = world
                 .spawn_cell_with_genome_at_position(Position::new(2.0, 2.0), genome)
                 .unwrap();
@@ -5433,14 +5940,20 @@ mod tests {
         };
         let dt = Config::default().dt_seconds;
         let one = drain_with(vec![Enzyme::defensase(5)]);
-        assert!((one - (0.05 + 0.01) * dt).abs() <= 1.0e-15);
+        assert!(
+            (one - (0.05 * f64::from(crate::spatial::REFERENCE_CELL_AREA) + 0.01) * dt).abs()
+                <= 1.0e-10
+        );
         let four = drain_with(vec![
             Enzyme::defensase(5),
             Enzyme::attackase(5),
             Enzyme::defensase(7),
             Enzyme::attackase(9),
         ]);
-        assert!((four - (0.05 + 0.04) * dt).abs() <= 1.0e-15);
+        assert!(
+            (four - (0.05 * f64::from(crate::spatial::REFERENCE_CELL_AREA) + 0.04) * dt).abs()
+                <= 1.0e-10
+        );
     }
 
     #[test]
@@ -5467,6 +5980,10 @@ mod tests {
                 "seed {seed}: ledger residual {residual}"
             );
             world.check_invariants().unwrap();
+            assert!(
+                world.reaction_counters.divisions >= 1,
+                "seed {seed} had no fission"
+            );
             let stats = world.stats();
             assert!(stats.energy_ledger.enval_harvest > 0.0);
             assert!(stats.enval_ledger.recharge_energy > 0.0);
@@ -5502,8 +6019,7 @@ mod tests {
                 assert_eq!(world.pick_cell(position), Some(cell_id));
             }
         }
-        let mut genome = Genome::random_founder(&mut world.rng, 0.0);
-        genome.repro_threshold = 1_000_000.0;
+        let genome = Genome::random_founder(&mut world.rng, 0.0);
         let newborn = world
             .spawn_cell_with_genome_at_position(Position::new(0.5, 0.5), genome)
             .or_else(|_| {
@@ -5531,7 +6047,6 @@ mod tests {
             let mut world = World::new(closed_config("snapshot-death-size", 40, 30)).unwrap();
             let mut genome = Genome::random_founder(&mut world.rng, 0.0);
             genome.lineage_id = LineageId(7);
-            genome.repro_threshold = 1_000_000.0;
             let mut churned = 0;
             while churned < deaths {
                 let id = world
@@ -5621,9 +6136,8 @@ mod tests {
         let mut world = World::new(config).unwrap();
         for index in 0..80 {
             let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-            genome.initial_energy = 50.0;
-            genome.maintenance_cost_per_sec = 0.0;
-            genome.repro_threshold = 1_000_000.0;
+            world.config.founder_energy = 50.0;
+            genome.maintenance_cost_per_area = 0.0;
             let position = Position::new(
                 (index % 10) as f32 * 4.3 + 1.0,
                 (index / 10) as f32 * 4.1 + 1.0,
@@ -5633,8 +6147,7 @@ mod tests {
                 .unwrap();
             if index % 2 == 0 {
                 let mut genome = combat_genome(&mut world, 900 + index as u64, 0, 3, 50.0);
-                genome.maintenance_cost_per_sec = 0.0;
-                genome.repro_threshold = 1_000_000.0;
+                genome.maintenance_cost_per_area = 0.0;
                 let neighbour = Position::new(position.x + 0.91, position.y);
                 let _ = world.spawn_cell_with_genome_at_position(neighbour, genome);
             }

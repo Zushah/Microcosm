@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chem::{ELEMENT_COUNT, ElementAmounts};
 use crate::genome::{EnzymeType, Genome, LineageId};
-use crate::spatial::{DEFAULT_CELL_RADIUS, Position};
+use crate::spatial::Position;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CellId(pub usize);
@@ -68,36 +68,89 @@ pub struct Cell {
     pub genome: Genome,
     pub lineage_id: LineageId,
     pub internal_elements: ElementAmounts,
+    pub body: ElementAmounts,
+    pub boundary: ElementAmounts,
     pub birth_sim_time: f64,
-    pub maintenance_cost_per_sec: f64,
+    pub maintenance_cost_per_area: f64,
     pub combat_attack_total: u32,
     pub combat_defense_total: u32,
-    recent_fluxes: Vec<FluxRecord>,
-    flux_head: usize,
 }
 
 impl Cell {
-    pub fn new(genome: Genome, position: Position, birth_sim_time: f64) -> Self {
-        let energy = genome.initial_energy;
+    pub fn new(
+        genome: Genome,
+        position: Position,
+        birth_sim_time: f64,
+        energy: f64,
+        body: ElementAmounts,
+        boundary: ElementAmounts,
+        body_density: f32,
+    ) -> Self {
         let lineage_id = genome.lineage_id;
-        let maintenance_cost_per_sec = genome.maintenance_cost_per_sec;
+        let maintenance_cost_per_area = genome.maintenance_cost_per_area;
         let combat_attack_total = genome.attack_total();
         let combat_defense_total = genome.defense_total();
         Self {
             id: CellId(usize::MAX),
             position,
-            radius: DEFAULT_CELL_RADIUS,
+            radius: (body.total() / f64::from(body_density) / std::f64::consts::PI).sqrt() as f32,
+            body,
+            boundary,
             energy,
             genome,
             lineage_id,
             internal_elements: ElementAmounts::ZERO,
             birth_sim_time,
-            maintenance_cost_per_sec,
+            maintenance_cost_per_area,
             combat_attack_total,
             combat_defense_total,
-            recent_fluxes: Vec::new(),
-            flux_head: 0,
         }
+    }
+
+    pub fn area(&self, body_density: f32) -> f64 {
+        self.body.total() / f64::from(body_density)
+    }
+
+    pub fn refresh_radius(&mut self, body_density: f32) {
+        self.radius = (self.area(body_density) / std::f64::consts::PI).sqrt() as f32;
+    }
+
+    pub fn membrane_polarity(&self) -> f64 {
+        let total = self.boundary.total();
+        if total <= 0.0 {
+            return 0.5;
+        }
+        crate::chem::ELEMENT_ORDER
+            .iter()
+            .map(|element| {
+                f64::from(self.boundary[*element]) * f64::from(element.properties().polarity)
+            })
+            .sum::<f64>()
+            / total
+    }
+
+    pub fn strain(&self, boundary_density: f32) -> f64 {
+        self.boundary.total()
+            / f64::from(boundary_density)
+            / (std::f64::consts::TAU * f64::from(self.radius))
+    }
+
+    pub fn refresh_combat_totals(&mut self) {
+        self.combat_attack_total = self.genome.attack_total();
+        self.combat_defense_total = self.genome.defense_total();
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CellFluxLog {
+    recent_fluxes: Vec<FluxRecord>,
+    flux_head: usize,
+}
+
+impl CellFluxLog {
+    pub fn clear(&mut self) {
+        self.recent_fluxes.clear();
+        self.flux_head = 0;
     }
 
     pub fn push_flux_record(&mut self, record: FluxRecord) {
@@ -123,11 +176,6 @@ impl Cell {
 
     pub fn latest_flux(&self) -> Option<&FluxRecord> {
         self.fluxes_newest_first().next()
-    }
-
-    pub fn refresh_combat_totals(&mut self) {
-        self.combat_attack_total = self.genome.attack_total();
-        self.combat_defense_total = self.genome.defense_total();
     }
 }
 
@@ -267,6 +315,10 @@ mod tests {
             Genome::random_founder(&mut rng, 0.0),
             Position::new(1.0, 1.0),
             0.0,
+            2.0,
+            crate::chem::ElementAmounts::new([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            crate::chem::ElementAmounts::ZERO,
+            1.0,
         )
     }
 
@@ -299,7 +351,7 @@ mod tests {
 
     #[test]
     fn flux_ring_buffer_keeps_the_newest_records_in_order() {
-        let mut cell = cell("flux-ring");
+        let mut cell = super::CellFluxLog::default();
         assert!(cell.latest_flux().is_none());
         for tick in 0..10 {
             cell.push_flux_record(record(tick));

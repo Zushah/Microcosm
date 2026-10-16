@@ -19,7 +19,7 @@ const LINEAGE_REFRESH_INTERVAL_MS = 2500;
 const LINEAGE_LIST_REFRESH_INTERVAL_MS = 5000;
 const CELL_FLUX_LIMIT = 24;
 const LINEAGE_LIST_LIMIT = 32;
-const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v3";
+const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v4";
 const COMBAT_ENZYME_TYPES = new Set(["attackase", "defensase"]);
 const INTEGER_GENOME_FIELDS = new Set();
 const INTEGER_ENZYME_FIELDS = new Set(["combat_level"]);
@@ -403,6 +403,10 @@ export class MicrocosmGUI {
             ["Total elements", stats.total_element_amount],
             ["Births", stats.births],
             ["Deaths", stats.deaths],
+            ["Median radius", stats.radius_median],
+            ["Radius p95", stats.radius_p95],
+            ["Maximum radius", stats.radius_max],
+            ["Mean strain", stats.mean_strain],
             ["Average cell energy", stats.average_cell_energy],
             ["Average enval", stats.average_enval],
             ["Metabolic flux", stats.executed_metabolic_flux]
@@ -414,8 +418,8 @@ export class MicrocosmGUI {
             ["Renewable coverage", stats.renewable_coverage],
             ["Chemical cost", stats.energy_chemical_cost],
             ["Pump cost", stats.energy_pump_cost],
-            ["Maintenance + upkeep", stats.energy_maintenance],
-            ["Founder energy", stats.energy_founder]
+            ["Assembly cost", stats.energy_assembly_cost],
+            ["Maintenance + upkeep", stats.energy_maintenance]
         ];
         const datum = ([label, value]) => `
             <div class="datum">
@@ -550,6 +554,11 @@ export class MicrocosmGUI {
                 ["Cell id", cell.cell_id],
                 ["Position", `${displayValue(cell.x)}, ${displayValue(cell.y)}`],
                 ["Radius", cell.radius],
+                ["Body material", cell.body_total],
+                ["Boundary material", cell.boundary_total],
+                ["Area", cell.area],
+                ["Strain", cell.strain],
+                ["Membrane polarity", cell.membrane_polarity],
                 ["Lineage", cell.lineage_id],
                 ["Energy", cell.energy],
                 ["Age", `${displayValue(cell.age_seconds)}s`],
@@ -559,7 +568,6 @@ export class MicrocosmGUI {
                 ["Internal elements", cell.total_internal_elements],
                 ["Attack", cell.combat_attack_total],
                 ["Defense", cell.combat_defense_total],
-                ["Repro threshold", cell.repro_threshold]
             ]) : (this._detail.cellError ? payloadMessage(`Selected cell detail unavailable: ${this._detail.cellError}`, "smallNote errorText") : payloadMessage("No active cell selected."));
         }
         if (this.elements.lineageInspector) {
@@ -612,18 +620,22 @@ export class MicrocosmGUI {
             ["Cell id", cell.cell_id],
             ["Position", `${displayValue(cell.x)}, ${displayValue(cell.y)}`],
             ["Radius", cell.radius],
+            ["Body material", cell.body_total],
+            ["Boundary material", cell.boundary_total],
+            ["Area", cell.area],
+            ["Strain", cell.strain],
+            ["Membrane polarity", cell.membrane_polarity],
             ["Lineage", cell.lineage_id],
             ["Energy", cell.energy],
             ["Age", `${displayValue(cell.age_seconds)}s`],
             ["Optimal enval", cell.optimal_enval],
             ["Local enval average", cell.local_enval_average],
-            ["Maintenance / sec", detail.maintenance_cost_per_sec],
+            ["Maintenance / area", detail.maintenance_cost_per_area],
             ["Catalyst upkeep / sec", detail.catalyst_upkeep_per_sec],
             ["Enzyme count", cell.enzyme_count],
             ["Internal elements", cell.total_internal_elements],
             ["Attack total", cell.combat_attack_total],
             ["Defense total", cell.combat_defense_total],
-            ["Reproduction threshold", cell.repro_threshold]
         ]);
     }
 
@@ -636,11 +648,8 @@ export class MicrocosmGUI {
             ["Enzyme count", genome.enzyme_count],
             ["Enzyme bounds", `${displayValue(genome.min_cell_enzymes)}-${displayValue(genome.max_cell_enzymes)}`],
             ["Mutation rate", genome.mutation_rate],
-            ["Reproduction threshold", genome.repro_threshold],
-            ["Initial energy", genome.initial_energy],
             ["Enval mutation floor", genome.enval_mutation_floor],
-            ["Maintenance / sec", genome.maintenance_cost_per_sec],
-            ["Post-divide mortality", genome.post_divide_mortality]
+            ["Maintenance / area", genome.maintenance_cost_per_area],
         ]);
     }
 
@@ -657,6 +666,8 @@ export class MicrocosmGUI {
             { label: "Throughput", value: (enzyme) => enzyme.enval_throughput },
             { label: "Harvest", value: (enzyme) => enzyme.is_metabolic ? enzyme.energy_harvest_fraction : "—" },
             { label: "Secretion", value: (enzyme) => enzyme.is_metabolic ? enzyme.secretion_fraction : "—" },
+            { label: "Body fraction", value: (enzyme) => enzyme.is_metabolic ? enzyme.body_fraction : "—" },
+            { label: "Boundary fraction", value: (enzyme) => enzyme.is_metabolic ? enzyme.boundary_fraction : "—" },
             { label: "Combat", value: (enzyme) => enzyme.is_combat ? `level ${displayValue(enzyme.combat_level)}` : "—" }
         ], enzymes || [], "Select a live cell to inspect enzymes.");
     }

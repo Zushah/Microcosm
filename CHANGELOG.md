@@ -2,8 +2,9 @@
 
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
-## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-10-06) 2026-10-06
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Rework biology around gradient transport and enval sources
+## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-10-16) 2026-10-16
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Replace energy-based division with membrane-driven fission
+- [`206d5cf`](https://github.com/Zushah/Microcosm/commit/206d5cf) Rework biology around gradient transport and enval sources
 - [`1da3037`](https://github.com/Zushah/Microcosm/commit/1da3037) Replace tile-bound cells with continuous-space cells
 - [`8ac0242`](https://github.com/Zushah/Microcosm/commit/8ac0242) Bump Chalkboard from v3.0.2 to v3.0.5 and KaTeX from v0.16.45 to v0.18.7
 - [`cd28057`](https://github.com/Zushah/Microcosm/commit/cd28057) Rework deployment workflow

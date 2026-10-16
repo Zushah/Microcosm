@@ -2,9 +2,9 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellId, Config, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig, GenomePatch,
-    LineageId, Position, RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState,
-    VERSION, World, WorldStats,
+    CellBodyConfig, CellId, Config, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig,
+    GenomePatch, LineageId, Position, RenderBrushPreview, RenderBuffers, RenderDisplayMode,
+    RenderVisualState, VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -61,6 +61,13 @@ pub struct WasmStats {
     pub live_cell_count: u32,
     pub births: u64,
     pub deaths: u64,
+    pub fissions: u64,
+    pub energy_deaths: u64,
+    pub lyses: u64,
+    pub radius_median: f32,
+    pub radius_p95: f32,
+    pub radius_max: f32,
+    pub mean_strain: f64,
     pub predation_events: u64,
     pub cells_consumed: u64,
     pub predator_energy_gained: f64,
@@ -119,6 +126,7 @@ pub struct WasmStats {
     pub energy_chemical_cost: f64,
     pub energy_enval_harvest: f64,
     pub energy_pump_cost: f64,
+    pub energy_assembly_cost: f64,
     pub energy_maintenance: f64,
     pub energy_death_loss: f64,
     pub energy_predation_transfer: f64,
@@ -167,6 +175,13 @@ impl From<&WorldStats> for WasmStats {
             live_cell_count: clamp_usize_to_u32(stats.live_cell_count),
             births: stats.births,
             deaths: stats.deaths,
+            fissions: stats.fissions,
+            energy_deaths: stats.energy_deaths,
+            lyses: stats.lyses,
+            radius_median: stats.radius_median,
+            radius_p95: stats.radius_p95,
+            radius_max: stats.radius_max,
+            mean_strain: stats.mean_strain,
             predation_events: stats.predation_events,
             cells_consumed: stats.cells_consumed,
             predator_energy_gained: stats.predator_energy_gained,
@@ -225,6 +240,7 @@ impl From<&WorldStats> for WasmStats {
             energy_chemical_cost: stats.energy_ledger.chemical_cost,
             energy_enval_harvest: stats.energy_ledger.enval_harvest,
             energy_pump_cost: stats.energy_ledger.pump_cost,
+            energy_assembly_cost: stats.energy_ledger.assembly_cost,
             energy_maintenance: stats.energy_ledger.maintenance,
             energy_death_loss: stats.energy_ledger.death_loss,
             energy_predation_transfer: stats.energy_ledger.predation_transfer,
@@ -244,6 +260,8 @@ impl From<&WorldStats> for WasmStats {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct WasmInitConfig {
+    cell_body: Option<CellBodyConfig>,
+    founder_energy: Option<f64>,
     seed: Option<String>,
     width: Option<usize>,
     height: Option<usize>,
@@ -261,6 +279,12 @@ struct WasmInitConfig {
 impl WasmInitConfig {
     fn into_core_config(self) -> Config {
         let mut config = Config::default();
+        if let Some(cell_body) = self.cell_body {
+            config.cell_body = cell_body;
+        }
+        if let Some(energy) = self.founder_energy {
+            config.founder_energy = energy;
+        }
         if let Some(seed) = self.seed {
             config.seed = seed;
         }
@@ -831,7 +855,11 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "age_seconds": info.age_seconds,
                     "optimal_enval": info.optimal_enval,
                     "local_enval_average": info.local_enval_average,
-                    "repro_threshold": info.repro_threshold
+                    "body_total": info.body_total,
+                    "boundary_total": info.boundary_total,
+                    "area": info.area,
+                    "strain": info.strain,
+                    "membrane_polarity": info.membrane_polarity
                 }),
             )
         }
@@ -876,7 +904,7 @@ pub extern "C" fn microcosm_pick_cell(handle: u32, x: f32, y: f32) -> u32 {
 pub extern "C" fn microcosm_inspect_cell_detail(handle: u32, cell_id: u32, flux_limit: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
-            let Some(instance) = runtime.instance(handle) else {
+            let Some(instance) = runtime.instance_mut(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
             let flux_limit =
@@ -942,7 +970,7 @@ pub extern "C" fn microcosm_inspect_cell_elements(handle: u32, cell_id: u32) -> 
 pub extern "C" fn microcosm_inspect_cell_fluxes(handle: u32, cell_id: u32, flux_limit: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
-            let Some(instance) = runtime.instance(handle) else {
+            let Some(instance) = runtime.instance_mut(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
             let flux_limit =
@@ -1500,7 +1528,7 @@ mod tests {
             intracellular_d: f64, intracellular_e: f64, intracellular_f: f64,
             system_a: f64, system_b: f64, system_c: f64, system_d: f64, system_e: f64,
             system_f: f64, total_element_amount: f64, live_cell_count: u32, births: u64,
-            deaths: u64, predation_events: u64, cells_consumed: u64,
+            deaths: u64, fissions: u64, energy_deaths: u64, lyses: u64, radius_median: f32, radius_p95: f32, radius_max: f32, mean_strain: f64, predation_events: u64, cells_consumed: u64,
             predator_energy_gained: f64, predation_enzyme_transfers: u64,
             predation_enzyme_replacements: u64, lineage_count: u32, total_lineage_records: u32,
             extinct_lineage_count: u32, dominant_lineage_id: u64,
@@ -1520,7 +1548,7 @@ mod tests {
             predation_candidate_pairs: u64, spatial_candidate_checks: u64,
             overlap_candidates: u64, overlap_corrections: u64, energy_founder: f64,
             energy_injected: f64, energy_extracted: f64, energy_chemical_harvest: f64,
-            energy_chemical_cost: f64, energy_enval_harvest: f64, energy_pump_cost: f64,
+            energy_chemical_cost: f64, energy_enval_harvest: f64, energy_pump_cost: f64, energy_assembly_cost: f64,
             energy_maintenance: f64, energy_death_loss: f64, energy_predation_transfer: f64,
             energy_ledger_residual: f64, renewable_coverage: f64, enval_source_inflow: f64,
             enval_cell_uptake: f64, enval_cell_emission: f64, enval_recharge: f64,
@@ -1687,7 +1715,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v3","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v4","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1716,7 +1744,7 @@ mod tests {
                 .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase"))
         );
 
-        let invalid = br#"{"schema":"microcosm.genome_patch.v3","genome":{"mutation_rate":2.0}}"#;
+        let invalid = br#"{"schema":"microcosm.genome_patch.v4","genome":{"mutation_rate":2.0}}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, invalid.as_ptr(), invalid.len()),
             STATUS_WORLD_ERROR
@@ -1730,7 +1758,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v3","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v4","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1759,8 +1787,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch =
-            br#"{"schema":"microcosm.genome_patch.v3","genome":{"repro_threshold":2222.0}}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v4","genome":{"optimal_enval":0.22}}"#;
         assert_eq!(
             microcosm_apply_genome_brush(handle, 0, 0, 8, 6, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1784,7 +1811,7 @@ mod tests {
         assert_eq!(stats.tile_count, 48);
         assert_eq!(stats.live_cell_count, 4);
         assert_eq!(stats.occupied_tile_count, 4);
-        assert!((stats.extracellular_a - 48.0).abs() <= 1.0e-4);
+        assert!((stats.extracellular_a + stats.intracellular_a - 48.0).abs() <= 1.0e-4);
         assert!(stats.total_element_amount > stats.extracellular_a);
         assert!(stats.enzyme_metabolic_count >= 4);
         assert!(stats.average_cell_energy.is_finite());

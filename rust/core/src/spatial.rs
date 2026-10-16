@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cell::CellId;
 
-pub const DEFAULT_CELL_RADIUS: f32 = 0.45;
+pub const REFERENCE_CELL_RADIUS: f32 = 0.45;
+pub const REFERENCE_CELL_AREA: f32 =
+    std::f32::consts::PI * REFERENCE_CELL_RADIUS * REFERENCE_CELL_RADIUS;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Position {

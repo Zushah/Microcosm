@@ -16,7 +16,7 @@ pub use chem::{
     ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError, ElementProperties,
 };
 pub use config::{
-    Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
+    CellBodyConfig, Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
     DEFAULT_MEMBRANE_PERMEABILITY, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig,
 };
 pub use environment::{ENVAL_PER_RECHARGE_ENERGY, EnvalSource, EnvalSources, RechargeOutcome};
@@ -31,7 +31,7 @@ pub use snapshot::{
     SNAPSHOT_EXTENSION, SNAPSHOT_VERSION, SnapshotError, load_from_path, save_to_path,
 };
 pub use spatial::{
-    BilinearSample, BilinearStencil, DEFAULT_CELL_RADIUS, Position, SpatialIndex,
+    BilinearSample, BilinearStencil, REFERENCE_CELL_AREA, REFERENCE_CELL_RADIUS, Position, SpatialIndex,
     minimum_image_delta, minimum_image_displacement, toroidal_distance, toroidal_distance_squared,
     wrap_coordinate,
 };
