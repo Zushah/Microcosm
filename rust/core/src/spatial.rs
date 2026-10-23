@@ -158,6 +158,7 @@ pub struct SpatialIndex {
 }
 
 const BUCKET_RANGE_EPSILON: f32 = 1.0e-3;
+const INITIAL_BUCKET_CAPACITY: usize = 4;
 
 impl SpatialIndex {
     pub fn new(width: usize, height: usize) -> Self {
@@ -172,7 +173,9 @@ impl SpatialIndex {
             rows,
             bucket_width: width / columns as f32,
             bucket_height: height / rows as f32,
-            buckets: vec![Vec::new(); columns.saturating_mul(rows)],
+            buckets: (0..columns.saturating_mul(rows))
+                .map(|_| Vec::with_capacity(INITIAL_BUCKET_CAPACITY))
+                .collect(),
             len: 0,
         }
     }

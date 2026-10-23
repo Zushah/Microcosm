@@ -4,6 +4,7 @@ pub mod chem;
 pub mod config;
 pub mod environment;
 pub mod genome;
+pub mod interaction;
 pub mod render_buffers;
 pub mod rng;
 pub mod snapshot;
@@ -11,19 +12,19 @@ pub mod spatial;
 pub mod stats;
 pub mod world;
 
-pub use cell::{CELL_FLUX_LOG_CAPACITY, Cell, CellId, CellStore, FluxRecord};
+pub use cell::{CELL_FLUX_LOG_CAPACITY, Cell, CellId, CellStore, FluxRecord, ReactionSite};
 pub use chem::{
     ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError, ElementProperties,
 };
 pub use config::{
-    CellBodyConfig, Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
+    CellBodyConfig, CellMotionConfig, Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
     DEFAULT_MEMBRANE_PERMEABILITY, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig,
+    SurfaceConfig,
 };
 pub use environment::{ENVAL_PER_RECHARGE_ENERGY, EnvalSource, EnvalSources, RechargeOutcome};
 pub use genome::{
-    CatalystError, Enzyme, EnzymeFieldPatch, EnzymePatchOperation, EnzymeType, GENOME_PATCH_SCHEMA,
-    Genome, GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId, MAX_CELL_ENZYMES,
-    MIN_CELL_ENZYMES, PredationEnzymeTransferStats,
+    CatalystError, Enzyme, EnzymeFieldPatch, EnzymePatchOperation, GENOME_PATCH_SCHEMA, Genome,
+    GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 pub use render_buffers::{RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState};
 pub use rng::Rng;
@@ -36,11 +37,12 @@ pub use spatial::{
     wrap_coordinate,
 };
 pub use stats::{
-    ENZYME_COUNT_HISTOGRAM_LEN, EnergyLedger, EnvalLedger, EnzymeTypeAmounts, EnzymeTypeCounts,
-    OperationCounters, ReactionCounters, StepProfile, WorldStats, renewable_coverage,
+    ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger, InteractionCounters, OperationCounters,
+    ReactionCounters, StepProfile, WorldStats, renewable_coverage,
 };
+pub use interaction::Contact;
 pub use world::{
-    CellDetailInspection, CellInspection, EnzymeDetailInspection, FluxLogInspection,
+    CellDetailInspection, CellInspection, ContactInspection, EnzymeDetailInspection, FluxLogInspection,
     GenomeDetailInspection, GenomeEditResult, InvariantError, LineageCounters,
     LineageListInspection, LineageSummaryInspection, NeighborIndices, TileId, TileInspection,
     World, WorldError,

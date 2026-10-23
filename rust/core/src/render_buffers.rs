@@ -104,8 +104,6 @@ pub struct RenderBuffers {
     pub cell_flags: Vec<u32>,
     pub cell_enzyme_count: Vec<u32>,
     pub cell_age_seconds: Vec<f32>,
-    pub cell_attack: Vec<u32>,
-    pub cell_defense: Vec<u32>,
 }
 
 impl RenderBuffers {
@@ -140,8 +138,6 @@ impl RenderBuffers {
         self.cell_flags.clear();
         self.cell_enzyme_count.clear();
         self.cell_age_seconds.clear();
-        self.cell_attack.clear();
-        self.cell_defense.clear();
     }
 
     pub(crate) fn clear_for_refresh(&mut self) {

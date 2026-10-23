@@ -3,87 +3,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::chem::{ELEMENT_COUNT, Element};
-use crate::genome::EnzymeType;
 
 pub const ENZYME_COUNT_HISTOGRAM_LEN: usize = 11;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnzymeTypeCounts {
-    pub metabolic: u64,
-    pub defensase: u64,
-    pub attackase: u64,
-}
-
-impl EnzymeTypeCounts {
-    pub fn add(&mut self, enzyme_type: EnzymeType, value: u64) {
-        match enzyme_type {
-            EnzymeType::Metabolic => self.metabolic = self.metabolic.saturating_add(value),
-            EnzymeType::Defensase => self.defensase = self.defensase.saturating_add(value),
-            EnzymeType::Attackase => self.attackase = self.attackase.saturating_add(value),
-        }
-    }
-
-    pub fn increment(&mut self, enzyme_type: EnzymeType) {
-        self.add(enzyme_type, 1);
-    }
-
-    pub fn get(self, enzyme_type: EnzymeType) -> u64 {
-        match enzyme_type {
-            EnzymeType::Metabolic => self.metabolic,
-            EnzymeType::Defensase => self.defensase,
-            EnzymeType::Attackase => self.attackase,
-        }
-    }
-
-    pub fn total(self) -> u64 {
-        self.metabolic
-            .saturating_add(self.defensase)
-            .saturating_add(self.attackase)
-    }
-
-    pub fn saturating_delta(self, previous: Self) -> Self {
-        Self {
-            metabolic: self.metabolic.saturating_sub(previous.metabolic),
-            defensase: self.defensase.saturating_sub(previous.defensase),
-            attackase: self.attackase.saturating_sub(previous.attackase),
-        }
-    }
-
-    pub fn add_assign(&mut self, other: Self) {
-        self.metabolic = self.metabolic.saturating_add(other.metabolic);
-        self.defensase = self.defensase.saturating_add(other.defensase);
-        self.attackase = self.attackase.saturating_add(other.attackase);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct EnzymeTypeAmounts {
-    pub metabolic: f64,
-    pub defensase: f64,
-    pub attackase: f64,
-}
-
-impl EnzymeTypeAmounts {
-    pub fn add(&mut self, enzyme_type: EnzymeType, value: f64) {
-        match enzyme_type {
-            EnzymeType::Metabolic => self.metabolic += value,
-            EnzymeType::Defensase => self.defensase += value,
-            EnzymeType::Attackase => self.attackase += value,
-        }
-    }
-
-    pub fn total(self) -> f64 {
-        self.metabolic + self.defensase + self.attackase
-    }
-
-    pub fn delta(self, previous: Self) -> Self {
-        Self {
-            metabolic: self.metabolic - previous.metabolic,
-            defensase: self.defensase - previous.defensase,
-            attackase: self.attackase - previous.attackase,
-        }
-    }
-}
+pub const EXPOSED_CELL_THRESHOLD: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationCounters {
@@ -95,19 +17,13 @@ pub struct OperationCounters {
     pub element_uptake_events: u64,
     pub cell_divisions: u64,
     pub cell_deaths: u64,
-    pub predation_pairs_checked: u64,
-    pub predation_cells_considered: u64,
-    pub predation_candidate_pairs: u64,
-    pub predation_cross_lineage_pairs: u64,
-    pub predation_events: u64,
-    pub predation_cells_consumed: u64,
     pub local_enval_average_calls: u64,
-    pub combat_enzyme_skips: u64,
     pub enzyme_list_clones: u64,
     pub genome_clones: u64,
     pub spatial_candidate_checks: u64,
     pub overlap_candidates: u64,
     pub overlap_corrections: u64,
+    pub surface_contact_queries: u64,
 }
 
 impl OperationCounters {
@@ -131,30 +47,9 @@ impl OperationCounters {
                 .saturating_sub(previous.element_uptake_events),
             cell_divisions: self.cell_divisions.saturating_sub(previous.cell_divisions),
             cell_deaths: self.cell_deaths.saturating_sub(previous.cell_deaths),
-            predation_pairs_checked: self
-                .predation_pairs_checked
-                .saturating_sub(previous.predation_pairs_checked),
-            predation_cells_considered: self
-                .predation_cells_considered
-                .saturating_sub(previous.predation_cells_considered),
-            predation_candidate_pairs: self
-                .predation_candidate_pairs
-                .saturating_sub(previous.predation_candidate_pairs),
-            predation_cross_lineage_pairs: self
-                .predation_cross_lineage_pairs
-                .saturating_sub(previous.predation_cross_lineage_pairs),
-            predation_events: self
-                .predation_events
-                .saturating_sub(previous.predation_events),
-            predation_cells_consumed: self
-                .predation_cells_consumed
-                .saturating_sub(previous.predation_cells_consumed),
             local_enval_average_calls: self
                 .local_enval_average_calls
                 .saturating_sub(previous.local_enval_average_calls),
-            combat_enzyme_skips: self
-                .combat_enzyme_skips
-                .saturating_sub(previous.combat_enzyme_skips),
             enzyme_list_clones: self
                 .enzyme_list_clones
                 .saturating_sub(previous.enzyme_list_clones),
@@ -168,6 +63,9 @@ impl OperationCounters {
             overlap_corrections: self
                 .overlap_corrections
                 .saturating_sub(previous.overlap_corrections),
+            surface_contact_queries: self
+                .surface_contact_queries
+                .saturating_sub(previous.surface_contact_queries),
         }
     }
 
@@ -190,28 +88,9 @@ impl OperationCounters {
             .saturating_add(other.element_uptake_events);
         self.cell_divisions = self.cell_divisions.saturating_add(other.cell_divisions);
         self.cell_deaths = self.cell_deaths.saturating_add(other.cell_deaths);
-        self.predation_pairs_checked = self
-            .predation_pairs_checked
-            .saturating_add(other.predation_pairs_checked);
-        self.predation_cells_considered = self
-            .predation_cells_considered
-            .saturating_add(other.predation_cells_considered);
-        self.predation_candidate_pairs = self
-            .predation_candidate_pairs
-            .saturating_add(other.predation_candidate_pairs);
-        self.predation_cross_lineage_pairs = self
-            .predation_cross_lineage_pairs
-            .saturating_add(other.predation_cross_lineage_pairs);
-        self.predation_events = self.predation_events.saturating_add(other.predation_events);
-        self.predation_cells_consumed = self
-            .predation_cells_consumed
-            .saturating_add(other.predation_cells_consumed);
         self.local_enval_average_calls = self
             .local_enval_average_calls
             .saturating_add(other.local_enval_average_calls);
-        self.combat_enzyme_skips = self
-            .combat_enzyme_skips
-            .saturating_add(other.combat_enzyme_skips);
         self.enzyme_list_clones = self
             .enzyme_list_clones
             .saturating_add(other.enzyme_list_clones);
@@ -225,17 +104,20 @@ impl OperationCounters {
         self.overlap_corrections = self
             .overlap_corrections
             .saturating_add(other.overlap_corrections);
+        self.surface_contact_queries = self
+            .surface_contact_queries
+            .saturating_add(other.surface_contact_queries);
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReactionCounters {
-    pub attempts_by_type: EnzymeTypeCounts,
-    pub successes_by_type: EnzymeTypeCounts,
-    pub no_substrate_by_type: EnzymeTypeCounts,
-    pub energy_delta_by_type: EnzymeTypeAmounts,
-    pub enval_input_by_type: EnzymeTypeAmounts,
-    pub enval_output_by_type: EnzymeTypeAmounts,
+    pub attempts: u64,
+    pub successes: u64,
+    pub no_substrate: u64,
+    pub energy_delta: f64,
+    pub enval_input: f64,
+    pub enval_output: f64,
     pub executed_metabolic_flux: f64,
     pub uptake_flux: f64,
     pub leak_flux: f64,
@@ -246,22 +128,12 @@ pub struct ReactionCounters {
 impl ReactionCounters {
     pub fn saturating_delta(self, previous: Self) -> Self {
         Self {
-            attempts_by_type: self
-                .attempts_by_type
-                .saturating_delta(previous.attempts_by_type),
-            successes_by_type: self
-                .successes_by_type
-                .saturating_delta(previous.successes_by_type),
-            no_substrate_by_type: self
-                .no_substrate_by_type
-                .saturating_delta(previous.no_substrate_by_type),
-            energy_delta_by_type: self
-                .energy_delta_by_type
-                .delta(previous.energy_delta_by_type),
-            enval_input_by_type: self.enval_input_by_type.delta(previous.enval_input_by_type),
-            enval_output_by_type: self
-                .enval_output_by_type
-                .delta(previous.enval_output_by_type),
+            attempts: self.attempts.saturating_sub(previous.attempts),
+            successes: self.successes.saturating_sub(previous.successes),
+            no_substrate: self.no_substrate.saturating_sub(previous.no_substrate),
+            energy_delta: self.energy_delta - previous.energy_delta,
+            enval_input: self.enval_input - previous.enval_input,
+            enval_output: self.enval_output - previous.enval_output,
             executed_metabolic_flux: self.executed_metabolic_flux
                 - previous.executed_metabolic_flux,
             uptake_flux: self.uptake_flux - previous.uptake_flux,
@@ -272,12 +144,21 @@ impl ReactionCounters {
     }
 
     pub fn total_attempts(self) -> u64 {
-        self.attempts_by_type.total()
+        self.attempts
     }
 
     pub fn total_successes(self) -> u64 {
-        self.successes_by_type.total()
+        self.successes
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct InteractionCounters {
+    pub field_surface_extent: f64,
+    pub cell_surface_extent: f64,
+    pub boundary_digested: f64,
+    pub cross_lineage_boundary_digested: f64,
+    pub lyses_after_digestion: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -292,7 +173,6 @@ pub struct EnergyLedger {
     pub assembly_cost: f64,
     pub maintenance: f64,
     pub death_loss: f64,
-    pub predation_transfer: f64,
 }
 
 impl EnergyLedger {
@@ -323,7 +203,7 @@ impl EnergyLedger {
         1.0e-9 * self.magnitude() + 1.0e-6
     }
 
-    pub fn terms(&self) -> [(&'static str, f64); 11] {
+    pub fn terms(&self) -> [(&'static str, f64); 10] {
         [
             ("founder_energy", self.founder_energy),
             ("injected_energy", self.injected_energy),
@@ -335,7 +215,6 @@ impl EnergyLedger {
             ("assembly_cost", self.assembly_cost),
             ("maintenance", self.maintenance),
             ("death_loss", self.death_loss),
-            ("predation_transfer", self.predation_transfer),
         ]
     }
 }
@@ -402,13 +281,6 @@ pub struct WorldStats {
     pub radius_p95: f32,
     pub radius_max: f32,
     pub mean_strain: f64,
-
-    pub predation_events: u64,
-    pub cells_consumed: u64,
-    pub predator_energy_gained: f64,
-    pub average_energy_gained_per_predation: f64,
-    pub predation_enzyme_transfers: u64,
-    pub predation_enzyme_replacements: u64,
     pub lineage_count: usize,
     pub extant_lineage_count: usize,
     pub total_lineage_records: usize,
@@ -429,13 +301,13 @@ pub struct WorldStats {
     pub enzyme_count_histogram: [u64; ENZYME_COUNT_HISTOGRAM_LEN],
     pub cells_at_enzyme_cap: usize,
     pub fraction_cells_at_enzyme_cap: f64,
-    pub cells_with_attackase: usize,
-    pub cells_with_defensase: usize,
-    pub average_attack_total: f64,
-    pub max_attack_total: u32,
-    pub average_defense_total: f64,
-    pub max_defense_total: u32,
-    pub enzyme_type_totals: EnzymeTypeCounts,
+    pub total_enzyme_count: u64,
+    pub mean_exposure: f64,
+    pub max_exposure: f32,
+    pub exposed_cell_count: usize,
+    pub contact_pairs: u64,
+    pub cross_lineage_contact_pairs: u64,
+    pub interaction: InteractionCounters,
     pub reaction_counters: ReactionCounters,
     pub operation_counters: OperationCounters,
     pub energy_ledger: EnergyLedger,
@@ -463,7 +335,6 @@ pub struct StepProfile {
     pub element_field_diffusion: Duration,
     pub cell_step: Duration,
     pub cell_mechanics: Duration,
-    pub predation: Duration,
     pub enval_diffusion: Duration,
     pub total: Duration,
     pub counters: OperationCounters,
@@ -474,7 +345,6 @@ impl StepProfile {
         self.element_field_diffusion += other.element_field_diffusion;
         self.cell_step += other.cell_step;
         self.cell_mechanics += other.cell_mechanics;
-        self.predation += other.predation;
         self.enval_diffusion += other.enval_diffusion;
         self.total += other.total;
         self.counters.add_assign(other.counters);

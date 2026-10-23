@@ -8,11 +8,7 @@ use crate::rng::Rng;
 
 pub const MIN_CELL_ENZYMES: usize = 1;
 pub const MAX_CELL_ENZYMES: usize = 10;
-pub const DEFAULT_COMBAT_LEVEL_MEAN: u32 = 100;
-pub const DEFAULT_COMBAT_LEVEL_SIGMA: f64 = 10.0;
-pub const COMBAT_LEVEL_MUTATION_STEP_MIN: u32 = 1;
-pub const COMBAT_LEVEL_MUTATION_STEP_MAX: u32 = 4;
-pub const GENOME_PATCH_SCHEMA: &str = "microcosm.genome_patch.v4";
+pub const GENOME_PATCH_SCHEMA: &str = "microcosm.genome_patch.v5";
 pub const DEFAULT_HALF_SATURATION: f32 = 0.1;
 pub const FOUNDER_ENGINE_RATE: f32 = 0.8;
 pub const FOUNDER_ENGINE_ENVAL_THROUGHPUT: f32 = 0.18;
@@ -20,11 +16,6 @@ const FOUNDER_ENGINE_HARVEST_FRACTION: f32 = 0.65;
 const MIN_HALF_SATURATION: f32 = 1.0e-3;
 
 const STOICHIOMETRY_EPSILON: f64 = 1.0e-6;
-const EVOLVABLE_ENZYME_TYPES: [EnzymeType; 3] = [
-    EnzymeType::Metabolic,
-    EnzymeType::Attackase,
-    EnzymeType::Defensase,
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LineageId(pub u64);
@@ -41,49 +32,8 @@ impl fmt::Display for LineageId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EnzymeType {
-    Metabolic,
-    Defensase,
-    Attackase,
-}
-
-impl EnzymeType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Metabolic => "metabolic",
-            Self::Defensase => "defensase",
-            Self::Attackase => "attackase",
-        }
-    }
-
-    pub const fn is_metabolic(self) -> bool {
-        matches!(self, Self::Metabolic)
-    }
-
-    pub const fn is_combat(self) -> bool {
-        matches!(self, Self::Defensase | Self::Attackase)
-    }
-}
-
-impl std::str::FromStr for EnzymeType {
-    type Err = GenomePatchError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "metabolic" => Ok(Self::Metabolic),
-            "defensase" => Ok(Self::Defensase),
-            "attackase" => Ok(Self::Attackase),
-            other => Err(GenomePatchError::new(format!(
-                "unsupported enzyme_type '{other}'"
-            ))),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Enzyme {
-    pub enzyme_type: EnzymeType,
     pub reactants: ElementAmounts,
     pub products: ElementAmounts,
     pub rate: f32,
@@ -97,7 +47,7 @@ pub struct Enzyme {
     pub enval_energy_fraction: f32,
     pub enval_release_fraction: f32,
     pub enval_pump: f32,
-    pub combat_level: u32,
+    pub exposure: f32,
 }
 
 impl Enzyme {
@@ -109,7 +59,6 @@ impl Enzyme {
         secretion_fraction: f32,
     ) -> Self {
         Self {
-            enzyme_type: EnzymeType::Metabolic,
             reactants,
             products,
             rate,
@@ -123,7 +72,7 @@ impl Enzyme {
             enval_energy_fraction: 2.0 / 3.0,
             enval_release_fraction: 1.0 / 3.0,
             enval_pump: 0.3,
-            combat_level: 0,
+            exposure: 0.0,
         }
     }
 
@@ -169,46 +118,30 @@ impl Enzyme {
         enzyme
     }
 
-    pub fn defensase(level: u32) -> Self {
-        Self::combat(EnzymeType::Defensase, level)
-    }
-
-    pub fn attackase(level: u32) -> Self {
-        Self::combat(EnzymeType::Attackase, level)
-    }
-
-    pub fn random(enzyme_type: EnzymeType, rng: &mut Rng) -> Self {
-        match enzyme_type {
-            EnzymeType::Metabolic => Self::random_metabolic(rng),
-            EnzymeType::Defensase | EnzymeType::Attackase => {
-                let level = normalize_combat_level(rng.gaussian(
-                    f64::from(DEFAULT_COMBAT_LEVEL_MEAN),
-                    DEFAULT_COMBAT_LEVEL_SIGMA,
-                ));
-                Self::combat(enzyme_type, level)
-            }
+    pub fn random(rng: &mut Rng) -> Self {
+        let source = ELEMENT_ORDER[rng.usize(ELEMENT_COUNT)];
+        let mut target = ELEMENT_ORDER[rng.usize(ELEMENT_COUNT - 1)];
+        if target.index() >= source.index() {
+            target = ELEMENT_ORDER[target.index() + 1];
         }
-    }
-
-    pub fn edit_default(enzyme_type: EnzymeType) -> Self {
-        match enzyme_type {
-            EnzymeType::Metabolic => Self::founder_downhill(),
-            EnzymeType::Defensase => Self::defensase(DEFAULT_COMBAT_LEVEL_MEAN),
-            EnzymeType::Attackase => Self::attackase(DEFAULT_COMBAT_LEVEL_MEAN),
-        }
+        let mut reactants = ElementAmounts::ZERO;
+        let mut products = ElementAmounts::ZERO;
+        reactants[source] = 1.0;
+        products[target] = 1.0;
+        let mut enzyme = Self::metabolic(
+            reactants,
+            products,
+            0.15 + rng.next_f32() * 0.85,
+            rng.next_f32(),
+            rng.next_f32() * 0.35,
+        );
+        enzyme.enval_sigma = 0.12 + rng.next_f32() * 0.18;
+        enzyme.enval_throughput = 0.04 + rng.next_f32() * 0.18;
+        enzyme.enval_pump = rng.next_f32() * 0.08;
+        enzyme
     }
 
     pub fn validate(&self) -> Result<(), CatalystError> {
-        if self.enzyme_type.is_combat() {
-            if self.body_fraction != 0.0 || self.boundary_fraction != 0.0 {
-                return Err(CatalystError::new("combat routing fractions must be zero"));
-            }
-            if self.combat_level == 0 {
-                return Err(CatalystError::new("combat_level must be >= 1"));
-            }
-            return Ok(());
-        }
-
         self.reactants
             .validate_nonnegative("reactants")
             .map_err(|error| CatalystError::new(error.to_string()))?;
@@ -227,6 +160,7 @@ impl Enzyme {
             ("enval_energy_fraction", self.enval_energy_fraction),
             ("enval_release_fraction", self.enval_release_fraction),
             ("enval_pump", self.enval_pump),
+            ("exposure", self.exposure),
         ] {
             if !value.is_finite() {
                 return Err(CatalystError::new(format!("{name} must be finite")));
@@ -248,6 +182,7 @@ impl Enzyme {
             ("boundary_fraction", self.boundary_fraction),
             ("enval_energy_fraction", self.enval_energy_fraction),
             ("enval_release_fraction", self.enval_release_fraction),
+            ("exposure", self.exposure),
         ] {
             if !(0.0..=1.0).contains(&value) {
                 return Err(CatalystError::new(format!("{name} must be in [0, 1]")));
@@ -293,55 +228,7 @@ impl Enzyme {
         Ok(())
     }
 
-    fn random_metabolic(rng: &mut Rng) -> Self {
-        let source = ELEMENT_ORDER[rng.usize(ELEMENT_COUNT)];
-        let mut target = ELEMENT_ORDER[rng.usize(ELEMENT_COUNT - 1)];
-        if target.index() >= source.index() {
-            target = ELEMENT_ORDER[target.index() + 1];
-        }
-        let mut reactants = ElementAmounts::ZERO;
-        let mut products = ElementAmounts::ZERO;
-        reactants[source] = 1.0;
-        products[target] = 1.0;
-        let mut enzyme = Self::metabolic(
-            reactants,
-            products,
-            0.15 + rng.next_f32() * 0.85,
-            rng.next_f32(),
-            rng.next_f32() * 0.35,
-        );
-        enzyme.enval_sigma = 0.12 + rng.next_f32() * 0.18;
-        enzyme.enval_throughput = 0.04 + rng.next_f32() * 0.18;
-        enzyme.enval_pump = rng.next_f32() * 0.08;
-        enzyme
-    }
-
-    fn combat(enzyme_type: EnzymeType, level: u32) -> Self {
-        Self {
-            enzyme_type,
-            reactants: ElementAmounts::ZERO,
-            products: ElementAmounts::ZERO,
-            rate: 0.0,
-            half_saturation: 0.0,
-            energy_harvest_fraction: 0.0,
-            secretion_fraction: 0.0,
-            body_fraction: 0.0,
-            boundary_fraction: 0.0,
-            enval_sigma: 0.0,
-            enval_throughput: 0.0,
-            enval_energy_fraction: 0.0,
-            enval_release_fraction: 0.0,
-            enval_pump: 0.0,
-            combat_level: level.max(1),
-        }
-    }
-
     fn normalize_after_mutation(&mut self) {
-        if self.enzyme_type.is_combat() {
-            *self = Self::combat(self.enzyme_type, self.combat_level);
-            return;
-        }
-
         for element in ELEMENT_ORDER {
             if !self.reactants[element].is_finite() || self.reactants[element] < 0.0 {
                 self.reactants[element] = 0.0;
@@ -396,7 +283,7 @@ impl Enzyme {
         self.enval_release_fraction = finite_or(self.enval_release_fraction, 1.0 / 3.0)
             .clamp(0.0, 1.0 - self.enval_energy_fraction);
         self.enval_pump = finite_or(self.enval_pump, 0.3).max(0.0);
-        self.combat_level = 0;
+        self.exposure = finite_or(self.exposure, 0.0).clamp(0.0, 1.0);
     }
 }
 
@@ -421,13 +308,6 @@ impl fmt::Display for CatalystError {
 
 impl Error for CatalystError {}
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PredationEnzymeTransferStats {
-    pub added: usize,
-    pub replacements: usize,
-    pub replacement_slots: Vec<usize>,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Genome {
     pub optimal_enval: f32,
@@ -441,17 +321,12 @@ pub struct Genome {
 impl Genome {
     pub fn random_founder(rng: &mut Rng, average_enval: f32) -> Self {
         let optimal_enval = average_enval + (rng.next_f32() - 0.5) * 0.20;
-        let defensase_level = normalize_combat_level(rng.gaussian(
-            f64::from(DEFAULT_COMBAT_LEVEL_MEAN),
-            DEFAULT_COMBAT_LEVEL_SIGMA,
-        ));
         let mut genome = Self {
             optimal_enval,
             enzymes: vec![
                 Enzyme::founder_downhill(),
                 Enzyme::founder_engine_forward(),
                 Enzyme::founder_engine_reverse(),
-                Enzyme::defensase(defensase_level),
             ],
             mutation_rate: 0.06,
             enval_mutation_floor: 0.03,
@@ -481,12 +356,7 @@ impl Genome {
 
         for enzyme in &mut genome.enzymes {
             if rng.chance(mutation_rate * 0.2) {
-                let next_type = EVOLVABLE_ENZYME_TYPES[rng.usize(EVOLVABLE_ENZYME_TYPES.len())];
-                *enzyme = Enzyme::random(next_type, rng);
-            } else if enzyme.enzyme_type.is_combat() {
-                if rng.chance(mutation_rate) {
-                    enzyme.combat_level = mutate_combat_level(enzyme.combat_level, rng);
-                }
+                *enzyme = Enzyme::random(rng);
             } else {
                 if rng.chance(mutation_rate) {
                     let element = ELEMENT_ORDER[rng.usize(ELEMENT_COUNT)];
@@ -549,6 +419,10 @@ impl Genome {
                     enzyme.enval_pump =
                         (enzyme.enval_pump * (1.0 + (rng.next_f32() - 0.5) * 0.4)).max(0.0);
                 }
+                if rng.chance(mutation_rate) {
+                    enzyme.exposure =
+                        (enzyme.exposure + (rng.next_f32() - 0.5) * 0.12).clamp(0.0, 1.0);
+                }
                 enzyme.normalize_after_mutation();
             }
         }
@@ -557,58 +431,11 @@ impl Genome {
             let index = rng.usize(genome.enzymes.len());
             genome.enzymes.swap_remove(index);
         } else if rng.chance(mutation_rate * 0.3) && genome.enzymes.len() < MAX_CELL_ENZYMES {
-            let enzyme_type = EVOLVABLE_ENZYME_TYPES[rng.usize(EVOLVABLE_ENZYME_TYPES.len())];
-            genome.enzymes.push(Enzyme::random(enzyme_type, rng));
+            genome.enzymes.push(Enzyme::random(rng));
         }
 
         genome.enforce_enzyme_count_bounds(rng);
         genome
-    }
-
-    pub fn absorb_predation_enzymes(
-        &mut self,
-        prey_enzymes: &[Enzyme],
-        rng: &mut Rng,
-    ) -> PredationEnzymeTransferStats {
-        let mut stats = PredationEnzymeTransferStats::default();
-        if prey_enzymes.is_empty() {
-            self.enforce_enzyme_count_bounds(rng);
-            return stats;
-        }
-        self.enforce_enzyme_count_bounds(rng);
-        let free_slots = MAX_CELL_ENZYMES.saturating_sub(self.enzymes.len());
-        if free_slots > 0 {
-            if prey_enzymes.len() <= free_slots {
-                self.enzymes.extend_from_slice(prey_enzymes);
-                stats.added = prey_enzymes.len();
-            } else {
-                let selected = select_random_indices(prey_enzymes.len(), free_slots, rng);
-                for index in selected {
-                    self.enzymes.push(prey_enzymes[index]);
-                    stats.added += 1;
-                }
-            }
-            self.enforce_enzyme_count_bounds(rng);
-            return stats;
-        }
-
-        let replacement_order = select_random_indices(self.enzymes.len(), self.enzymes.len(), rng);
-        let mut replacement_index = 0;
-        for enzyme in prey_enzymes {
-            if replacement_index >= replacement_order.len() {
-                break;
-            }
-            if !rng.chance(0.25) {
-                continue;
-            }
-            let slot = replacement_order[replacement_index];
-            replacement_index += 1;
-            self.enzymes[slot] = *enzyme;
-            stats.replacements += 1;
-            stats.replacement_slots.push(slot);
-        }
-        self.enforce_enzyme_count_bounds(rng);
-        stats
     }
 
     pub fn enforce_enzyme_count_bounds(&mut self, rng: &mut Rng) {
@@ -616,8 +443,7 @@ impl Genome {
             self.enzymes.truncate(MAX_CELL_ENZYMES);
         }
         if self.enzymes.is_empty() {
-            self.enzymes
-                .push(Enzyme::random(EnzymeType::Metabolic, rng));
+            self.enzymes.push(Enzyme::random(rng));
         }
         for enzyme in &mut self.enzymes {
             enzyme.normalize_after_mutation();
@@ -632,27 +458,6 @@ impl Genome {
             enzyme.validate()?;
         }
         Ok(())
-    }
-
-    pub fn attack_total(&self) -> u32 {
-        self.enzymes
-            .iter()
-            .filter(|enzyme| enzyme.enzyme_type == EnzymeType::Attackase)
-            .map(|enzyme| enzyme.combat_level.max(1))
-            .sum()
-    }
-
-    pub fn defense_total(&self) -> u32 {
-        self.enzymes
-            .iter()
-            .filter(|enzyme| enzyme.enzyme_type == EnzymeType::Defensase)
-            .map(|enzyme| enzyme.combat_level.max(1))
-            .sum()
-    }
-
-    pub fn refresh_combat_totals(&mut self) {
-        let _ = self.attack_total();
-        let _ = self.defense_total();
     }
 }
 
@@ -780,7 +585,7 @@ impl EnzymePatchOperation {
                         GenomePatchError::new("enzyme append operation requires enzyme fields")
                     })?;
                 let index = enzymes.len();
-                let mut enzyme = fields.build_new_enzyme()?;
+                let mut enzyme = fields.build_new_enzyme();
                 fields.apply_to_enzyme(&mut enzyme, &format!("enzyme[{index}]"), changed_fields)?;
                 enzymes.push(enzyme);
                 changed_fields.push(format!("enzyme[{index}].append"));
@@ -798,7 +603,7 @@ impl EnzymePatchOperation {
                 if index >= enzymes.len() {
                     return Err(GenomePatchError::new(format!("no enzyme at index {index}")));
                 }
-                let mut enzyme = fields.build_new_enzyme()?;
+                let mut enzyme = fields.build_new_enzyme();
                 fields.apply_to_enzyme(&mut enzyme, &format!("enzyme[{index}]"), changed_fields)?;
                 enzymes[index] = enzyme;
                 changed_fields.push(format!("enzyme[{index}].replace"));
@@ -834,7 +639,6 @@ impl EnzymePatchOperation {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnzymeFieldPatch {
-    pub enzyme_type: Option<String>,
     pub reactants: Option<[f32; ELEMENT_COUNT]>,
     pub products: Option<[f32; ELEMENT_COUNT]>,
     pub rate: Option<f32>,
@@ -848,17 +652,12 @@ pub struct EnzymeFieldPatch {
     pub enval_energy_fraction: Option<f32>,
     pub enval_release_fraction: Option<f32>,
     pub enval_pump: Option<f32>,
-    pub combat_level: Option<u32>,
+    pub exposure: Option<f32>,
 }
 
 impl EnzymeFieldPatch {
-    fn build_new_enzyme(&self) -> Result<Enzyme, GenomePatchError> {
-        let enzyme_type = self
-            .enzyme_type
-            .as_deref()
-            .ok_or_else(|| GenomePatchError::new("new enzyme operations require enzyme_type"))?
-            .parse::<EnzymeType>()?;
-        Ok(Enzyme::edit_default(enzyme_type))
+    fn build_new_enzyme(&self) -> Enzyme {
+        Enzyme::founder_downhill()
     }
 
     fn apply_to_enzyme(
@@ -867,13 +666,6 @@ impl EnzymeFieldPatch {
         label: &str,
         changed_fields: &mut Vec<String>,
     ) -> Result<(), GenomePatchError> {
-        if let Some(value) = &self.enzyme_type {
-            let enzyme_type = value.parse::<EnzymeType>()?;
-            if enzyme.enzyme_type != enzyme_type {
-                *enzyme = Enzyme::edit_default(enzyme_type);
-            }
-            changed_fields.push(format!("{label}.enzyme_type"));
-        }
         if let Some(values) = self.reactants {
             enzyme.reactants = patch_element_amounts(&format!("{label}.reactants"), values)?;
             changed_fields.push(format!("{label}.reactants"));
@@ -901,15 +693,7 @@ impl EnzymeFieldPatch {
         set_enzyme_field!(enval_energy_fraction, probability_f32);
         set_enzyme_field!(enval_release_fraction, probability_f32);
         set_enzyme_field!(enval_pump, nonnegative_f32);
-        if let Some(value) = self.combat_level {
-            if value == 0 {
-                return Err(GenomePatchError::new(format!(
-                    "{label}.combat_level must be >= 1"
-                )));
-            }
-            enzyme.combat_level = value;
-            changed_fields.push(format!("{label}.combat_level"));
-        }
+        set_enzyme_field!(exposure, probability_f32);
         enzyme
             .validate()
             .map_err(|error| GenomePatchError::new(format!("{label}: {error}")))
@@ -986,45 +770,6 @@ fn probability_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
     }
 }
 
-fn select_random_indices(count: usize, limit: usize, rng: &mut Rng) -> Vec<usize> {
-    let capped = limit.min(count);
-    let mut indices = (0..count).collect::<Vec<_>>();
-    for i in 0..capped {
-        let swap_index = i + rng.usize(count - i);
-        indices.swap(i, swap_index);
-    }
-    indices.truncate(capped);
-    indices
-}
-
-pub fn normalize_combat_level(value: f64) -> u32 {
-    let numeric = if value.is_finite() {
-        value
-    } else {
-        f64::from(DEFAULT_COMBAT_LEVEL_MEAN)
-    };
-    numeric.round().max(1.0) as u32
-}
-
-pub fn mutate_combat_level(level: u32, rng: &mut Rng) -> u32 {
-    let current = level.max(1);
-    let step = COMBAT_LEVEL_MUTATION_STEP_MIN
-        + rng.usize((COMBAT_LEVEL_MUTATION_STEP_MAX - COMBAT_LEVEL_MUTATION_STEP_MIN + 1) as usize)
-            as u32;
-    let branch = if rng.chance(0.5) {
-        0_i32
-    } else if rng.chance(0.5) {
-        -1
-    } else {
-        1
-    };
-    if branch == 0 {
-        current
-    } else {
-        ((i64::from(current) + i64::from(branch) * i64::from(step)).max(1)) as u32
-    }
-}
-
 pub fn mutate_optimal_enval(parent: f32, reference: f32, floor: f32, rng: &mut Rng) -> f32 {
     let midpoint = (parent + reference) * 0.5;
     let mut step = (parent - midpoint).abs();
@@ -1048,13 +793,13 @@ pub fn mutate_optimal_enval(parent: f32, reference: f32, floor: f32, rng: &mut R
 #[cfg(test)]
 mod tests {
     use super::{
-        Enzyme, EnzymeFieldPatch, EnzymePatchOperation, EnzymeType, GENOME_PATCH_SCHEMA, Genome,
+        Enzyme, EnzymeFieldPatch, EnzymePatchOperation, GENOME_PATCH_SCHEMA, Genome,
         GenomePatch, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
     };
     use crate::rng::Rng;
 
     #[test]
-    fn v4_routing_patch_round_trips_and_rejects_v3_and_invalid_routes() {
+    fn routing_patch_round_trips_and_rejects_v3_and_invalid_routes() {
         let mut rng = Rng::from_seed_str("v4-routing");
         let original = Genome::random_founder(&mut rng, 0.0);
         let patch = GenomePatch {
@@ -1099,10 +844,8 @@ mod tests {
         let mut genome = super::Genome::random_founder(&mut rng, 0.0);
         genome.mutation_rate = 1.0;
         for enzyme in &mut genome.enzymes {
-            if enzyme.enzyme_type.is_metabolic() {
-                enzyme.body_fraction = 0.45;
-                enzyme.boundary_fraction = 0.45;
-            }
+            enzyme.body_fraction = 0.45;
+            enzyme.boundary_fraction = 0.45;
         }
         for _ in 0..100 {
             genome = genome.mutate(&mut rng, 0.0);
@@ -1117,13 +860,13 @@ mod tests {
     }
 
     #[test]
-    fn founder_genome_is_downhill_then_enval_engine_then_defensase() {
+    fn founder_genome_is_downhill_then_enval_engine_pair() {
         use crate::chem::{Element, ElementAmounts};
 
         let mut rng = Rng::from_seed_str("founder-genome");
         let genome = Genome::random_founder(&mut rng, 0.1);
         genome.validate().unwrap();
-        assert_eq!(genome.enzymes.len(), 4);
+        assert_eq!(genome.enzymes.len(), 3);
         assert!((genome.optimal_enval - 0.1).abs() <= 0.1);
 
         let downhill = genome.enzymes[0];
@@ -1146,7 +889,6 @@ mod tests {
         let defaults = Enzyme::metabolic(b, c, 1.0, 0.5, 0.5);
         for (index, (reactants, products)) in [(b, c), (c, b)].into_iter().enumerate() {
             let engine = genome.enzymes[index + 1];
-            assert_eq!(engine.enzyme_type, EnzymeType::Metabolic);
             assert_eq!(engine.reactants, reactants);
             assert_eq!(engine.products, products);
             assert_eq!(engine.body_fraction, 0.02);
@@ -1170,10 +912,6 @@ mod tests {
             - genome.enzymes[2].products.intrinsic_energy();
         assert!((forward_release - 0.1).abs() <= 1.0e-6);
         assert!((reverse_release + 0.1).abs() <= 1.0e-6);
-
-        assert_eq!(genome.enzymes[3].enzyme_type, EnzymeType::Defensase);
-        assert_eq!(genome.attack_total(), 0);
-        assert!(genome.defense_total() > 0);
     }
 
     #[test]
@@ -1206,84 +944,6 @@ mod tests {
         }
     }
 
-    fn genome_with_enzymes(count: usize, start_level: u32) -> Genome {
-        let mut rng = Rng::from_seed_str("enzyme-transfer-genome");
-        let mut genome = Genome::random_founder(&mut rng, 0.0);
-        genome.enzymes.clear();
-        for index in 0..count {
-            let level = start_level + index as u32;
-            genome.enzymes.push(if index % 2 == 0 {
-                Enzyme::attackase(level)
-            } else {
-                Enzyme::defensase(level)
-            });
-        }
-        genome
-    }
-
-    #[test]
-    fn predation_enzyme_transfer_adds_all_in_order_without_consuming_rng_when_space_allows() {
-        let mut predator = genome_with_enzymes(4, 10);
-        let prey = genome_with_enzymes(3, 100);
-        let original_len = predator.enzymes.len();
-        let mut rng = Rng::from_seed_str("transfer-all");
-        let mut untouched_rng = rng.clone();
-
-        let stats = predator.absorb_predation_enzymes(&prey.enzymes, &mut rng);
-
-        assert_eq!(predator.enzymes.len(), 7);
-        assert_eq!(stats.added, 3);
-        assert_eq!(stats.replacements, 0);
-        assert_eq!(&predator.enzymes[original_len..], prey.enzymes.as_slice());
-        assert_eq!(rng.next_f64().to_bits(), untouched_rng.next_f64().to_bits());
-    }
-
-    #[test]
-    fn predation_enzyme_transfer_randomly_fills_partial_free_slots() {
-        fn run_once(predator_count: usize, prey_count: usize, seed: &str) -> (Genome, usize) {
-            let mut predator = genome_with_enzymes(predator_count, 10);
-            let prey = genome_with_enzymes(prey_count, 100);
-            let mut rng = Rng::from_seed_str(seed);
-            let stats = predator.absorb_predation_enzymes(&prey.enzymes, &mut rng);
-            (predator, stats.added)
-        }
-
-        let (first, first_added) = run_once(7, 4, "transfer-partial-a");
-        let (first_repeat, first_repeat_added) = run_once(7, 4, "transfer-partial-a");
-        assert_eq!(first, first_repeat);
-        assert_eq!(first_added, 3);
-        assert_eq!(first_repeat_added, 3);
-        assert_eq!(first.enzymes.len(), MAX_CELL_ENZYMES);
-
-        let (second, second_added) = run_once(4, 7, "transfer-partial-b");
-        assert_eq!(second_added, 6);
-        assert_eq!(second.enzymes.len(), MAX_CELL_ENZYMES);
-    }
-
-    #[test]
-    fn predation_enzyme_replacement_is_deterministic_and_uses_unique_slots() {
-        fn run_once() -> (Genome, Vec<usize>, usize) {
-            let mut predator = genome_with_enzymes(MAX_CELL_ENZYMES, 10);
-            let prey = genome_with_enzymes(7, 200);
-            let mut rng = Rng::from_seed_str("replacement-determinism");
-            let stats = predator.absorb_predation_enzymes(&prey.enzymes, &mut rng);
-            (predator, stats.replacement_slots, stats.replacements)
-        }
-
-        let (first, first_slots, first_replacements) = run_once();
-        let (second, second_slots, second_replacements) = run_once();
-        assert_eq!(first, second);
-        assert_eq!(first_slots, second_slots);
-        assert_eq!(first_replacements, second_replacements);
-        assert!(first_replacements > 0);
-        assert_eq!(first.enzymes.len(), MAX_CELL_ENZYMES);
-
-        let mut unique_slots = first_slots.clone();
-        unique_slots.sort_unstable();
-        unique_slots.dedup();
-        assert_eq!(unique_slots.len(), first_slots.len());
-    }
-
     #[test]
     fn metabolic_enval_pump_uses_the_previous_default_and_fallback() {
         let mut enzyme = Enzyme::founder_downhill();
@@ -1294,11 +954,11 @@ mod tests {
     }
 
     #[test]
-    fn v4_patch_round_trips_half_saturation_and_rejects_v2() {
+    fn patch_round_trips_half_saturation_and_rejects_v2() {
         let mut rng = Rng::from_seed_str("patch-v3-half-saturation");
         let mut genome = Genome::random_founder(&mut rng, 0.0);
         let patch = GenomePatch {
-            schema: Some("microcosm.genome_patch.v4".to_owned()),
+            schema: Some("microcosm.genome_patch.v5".to_owned()),
             genome: None,
             enzymes: vec![EnzymePatchOperation {
                 op: "update".to_owned(),
@@ -1323,7 +983,6 @@ mod tests {
                 index: None,
                 fields: None,
                 enzyme: Some(EnzymeFieldPatch {
-                    enzyme_type: Some("metabolic".to_owned()),
                     half_saturation: Some(0.05),
                     ..EnzymeFieldPatch::default()
                 }),
@@ -1368,13 +1027,9 @@ mod tests {
             let child = genome.mutate(&mut rng, 0.0);
             child.validate().unwrap();
             for enzyme in &child.enzymes {
-                if enzyme.enzyme_type.is_metabolic() {
-                    assert!(enzyme.half_saturation.is_finite());
-                    assert!(enzyme.half_saturation >= 1.0e-3);
-                    saw_change |= enzyme.half_saturation != super::DEFAULT_HALF_SATURATION;
-                } else {
-                    assert_eq!(enzyme.half_saturation, 0.0);
-                }
+                assert!(enzyme.half_saturation.is_finite());
+                assert!(enzyme.half_saturation >= 1.0e-3);
+                saw_change |= enzyme.half_saturation != super::DEFAULT_HALF_SATURATION;
             }
             genome = child;
         }
@@ -1390,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_patch_accepts_generic_metabolic_fields_and_rejects_v1() {
+    fn patch_accepts_generic_catalyst_fields_and_rejects_v1() {
         let mut rng = Rng::from_seed_str("patch-v2");
         let mut genome = Genome::random_founder(&mut rng, 0.0);
         let patch = GenomePatch {
@@ -1419,5 +1074,109 @@ mod tests {
             enzymes: Vec::new(),
         };
         assert!(old.apply_to_genome(&mut genome).is_err());
+    }
+
+    fn exposure_patch(schema: &str, exposure: f32) -> GenomePatch {
+        GenomePatch {
+            schema: Some(schema.to_owned()),
+            genome: None,
+            enzymes: vec![EnzymePatchOperation {
+                op: "update".to_owned(),
+                index: Some(1),
+                fields: Some(EnzymeFieldPatch {
+                    exposure: Some(exposure),
+                    ..EnzymeFieldPatch::default()
+                }),
+                enzyme: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn founders_start_with_every_enzyme_fully_internal() {
+        let mut rng = Rng::from_seed_str("founder-exposure");
+        for _ in 0..20 {
+            let genome = Genome::random_founder(&mut rng, 0.0);
+            assert!(genome.enzymes.iter().all(|enzyme| enzyme.exposure == 0.0));
+        }
+        assert_eq!(Enzyme::random(&mut rng).exposure, 0.0);
+    }
+
+    #[test]
+    fn v5_patch_round_trips_exposure_and_rejects_v4_and_out_of_range_values() {
+        assert_eq!(GENOME_PATCH_SCHEMA, "microcosm.genome_patch.v5");
+        let mut rng = Rng::from_seed_str("exposure-patch");
+        let original = Genome::random_founder(&mut rng, 0.0);
+
+        let mut genome = original.clone();
+        let changed = exposure_patch(GENOME_PATCH_SCHEMA, 0.35)
+            .apply_to_genome(&mut genome)
+            .unwrap();
+        assert_eq!(changed, vec!["enzyme[1].exposure".to_owned()]);
+        assert_eq!(genome.enzymes[1].exposure, 0.35);
+        let decoded: Genome = bincode::deserialize(&bincode::serialize(&genome).unwrap()).unwrap();
+        assert_eq!(decoded, genome);
+
+        let append = GenomePatch {
+            schema: Some(GENOME_PATCH_SCHEMA.to_owned()),
+            genome: None,
+            enzymes: vec![EnzymePatchOperation {
+                op: "append".to_owned(),
+                index: None,
+                fields: None,
+                enzyme: Some(EnzymeFieldPatch {
+                    exposure: Some(1.0),
+                    ..EnzymeFieldPatch::default()
+                }),
+            }],
+        };
+        let mut appended = original.clone();
+        append.apply_to_genome(&mut appended).unwrap();
+        assert_eq!(appended.enzymes.last().unwrap().exposure, 1.0);
+
+        for schema in ["microcosm.genome_patch.v4", "microcosm.genome_patch.v3"] {
+            let mut target = original.clone();
+            assert!(exposure_patch(schema, 0.35).apply_to_genome(&mut target).is_err());
+            assert_eq!(target, original);
+        }
+        for invalid in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+            let mut target = original.clone();
+            assert!(
+                exposure_patch(GENOME_PATCH_SCHEMA, invalid)
+                    .apply_to_genome(&mut target)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn exposure_stays_valid_and_drifts_over_one_hundred_mutating_generations() {
+        let mut rng = Rng::from_seed_str("exposure-mutation");
+        let mut genome = Genome::random_founder(&mut rng, 0.0);
+        genome.mutation_rate = 1.0;
+        genome.enzymes[0].exposure = 0.98;
+        genome.enzymes[1].exposure = 0.02;
+        let mut saw_interior = false;
+        let mut saw_bounds = false;
+        for _ in 0..100 {
+            genome = genome.mutate(&mut rng, 0.0);
+            genome.validate().unwrap();
+            for enzyme in &genome.enzymes {
+                assert!(enzyme.exposure.is_finite());
+                assert!((0.0..=1.0).contains(&enzyme.exposure));
+                saw_interior |= enzyme.exposure > 0.0 && enzyme.exposure < 1.0;
+                saw_bounds |= enzyme.exposure == 0.0 || enzyme.exposure == 1.0;
+            }
+        }
+        assert!(saw_interior && saw_bounds);
+
+        let mut enzyme = Enzyme::founder_downhill();
+        for (raw, normalized) in [(f32::NAN, 0.0), (-0.5, 0.0), (1.5, 1.0), (0.25, 0.25)] {
+            enzyme.exposure = raw;
+            enzyme.normalize_after_mutation();
+            assert_eq!(enzyme.exposure, normalized);
+        }
+        enzyme.exposure = 1.5;
+        assert!(enzyme.validate().is_err());
     }
 }

@@ -41,9 +41,7 @@ const CELL_VIEW_DEFINITIONS = Object.freeze([
     { key: "cellLineage", ptr: "microcosm_cell_lineage_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_lineage" },
     { key: "cellFlags", ptr: "microcosm_cell_flags_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_flags" },
     { key: "cellEnzymeCount", ptr: "microcosm_cell_enzyme_count_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_enzyme_count" },
-    { key: "cellAgeSeconds", ptr: "microcosm_cell_age_seconds_ptr", length: "microcosm_cell_count", dtype: "f32", name: "microcosm.cell_age_seconds" },
-    { key: "cellAttack", ptr: "microcosm_cell_attack_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_attack" },
-    { key: "cellDefense", ptr: "microcosm_cell_defense_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_defense" }
+    { key: "cellAgeSeconds", ptr: "microcosm_cell_age_seconds_ptr", length: "microcosm_cell_count", dtype: "f32", name: "microcosm.cell_age_seconds" }
 ]);
 
 const VIEW_DEFINITIONS = Object.freeze([...TILE_VIEW_DEFINITIONS, LATTICE_VIEW_DEFINITION, ...CELL_VIEW_DEFINITIONS]);
@@ -106,11 +104,6 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["radius_p95", "f32"],
     ["radius_max", "f32"],
     ["mean_strain", "f64"],
-    ["predation_events", "u64"],
-    ["cells_consumed", "u64"],
-    ["predator_energy_gained", "f64"],
-    ["predation_enzyme_transfers", "u64"],
-    ["predation_enzyme_replacements", "u64"],
     ["lineage_count", "u32"],
     ["total_lineage_records", "u32"],
     ["extinct_lineage_count", "u32"],
@@ -126,13 +119,7 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["max_enzyme_count", "u32"],
     ["cells_at_enzyme_cap", "u32"],
     ["fraction_cells_at_enzyme_cap", "f64"],
-    ["enzyme_metabolic_count", "u64"],
-    ["enzyme_defensase_count", "u64"],
-    ["enzyme_attackase_count", "u64"],
-    ["average_attack_total", "f64"],
-    ["max_attack_total", "u32"],
-    ["average_defense_total", "f64"],
-    ["max_defense_total", "u32"],
+    ["total_enzyme_count", "u64"],
     ["average_enval", "f32"],
     ["min_enval", "f32"],
     ["max_enval", "f32"],
@@ -152,8 +139,6 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["cell_steps", "u64"],
     ["enzyme_entries_seen", "u64"],
     ["metabolic_enzyme_attempts", "u64"],
-    ["predation_cells_considered", "u64"],
-    ["predation_candidate_pairs", "u64"],
     ["spatial_candidate_checks", "u64"],
     ["overlap_candidates", "u64"],
     ["overlap_corrections", "u64"],
@@ -167,7 +152,6 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["energy_assembly_cost", "f64"],
     ["energy_maintenance", "f64"],
     ["energy_death_loss", "f64"],
-    ["energy_predation_transfer", "f64"],
     ["energy_ledger_residual", "f64"],
     ["renewable_coverage", "f64"],
     ["enval_source_inflow", "f64"],
@@ -177,6 +161,16 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["enval_edits", "f64"],
     ["recharge_amount", "f64"],
     ["recharge_energy", "f64"],
+    ["mean_exposure", "f64"],
+    ["max_exposure", "f32"],
+    ["exposed_cell_count", "u32"],
+    ["contact_pairs", "u64"],
+    ["cross_lineage_contact_pairs", "u64"],
+    ["field_surface_extent", "f64"],
+    ["cell_surface_extent", "f64"],
+    ["boundary_digested", "f64"],
+    ["cross_lineage_boundary_digested", "f64"],
+    ["lyses_after_digestion", "u64"],
     ["render_epoch", "u32"]
 ]);
 

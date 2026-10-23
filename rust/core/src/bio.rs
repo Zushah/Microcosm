@@ -1,6 +1,6 @@
 use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, ElementAmounts};
 use crate::config::CellBodyConfig;
-use crate::genome::{Enzyme, EnzymeType, Genome};
+use crate::genome::{Enzyme, Genome};
 use crate::rng::Rng;
 use crate::spatial::REFERENCE_CELL_AREA;
 
@@ -11,6 +11,20 @@ pub struct ReactionEnv {
     pub local_enval: f32,
     pub cell_area: f32,
     pub cell_body: CellBodyConfig,
+    pub capacity_fraction: f64,
+    pub pool_extent: Option<f32>,
+}
+
+impl ReactionEnv {
+    pub fn internal(local_enval: f32, cell_area: f32, cell_body: CellBodyConfig) -> Self {
+        Self {
+            local_enval,
+            cell_area,
+            cell_body,
+            capacity_fraction: 1.0,
+            pool_extent: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,24 +65,21 @@ pub fn compute_enval_factor(
     genome: GenomeReactionContext,
     env: ReactionEnv,
 ) -> f32 {
-    if enzyme.enzyme_type != EnzymeType::Metabolic {
-        return 0.0;
-    }
     let sigma = enzyme.enval_sigma.max(1.0e-6);
     let distance = env.local_enval - genome.optimal_enval;
     (-(distance * distance) / (2.0 * sigma * sigma)).exp()
 }
 
-pub fn compute_saturation(enzyme: &Enzyme, reservoir: ElementAmounts, cell_area: f32) -> f64 {
-    let area = f64::from(cell_area);
-    if enzyme.enzyme_type != EnzymeType::Metabolic || !area.is_finite() || area <= 0.0 {
+pub fn compute_saturation(enzyme: &Enzyme, reservoir: ElementAmounts, pool_extent: f32) -> f64 {
+    let extent = f64::from(pool_extent);
+    if !extent.is_finite() || extent <= 0.0 {
         return 0.0;
     }
     let mut limiting = f64::INFINITY;
     for element in ELEMENT_ORDER {
         let coefficient = f64::from(enzyme.reactants[element]);
         if coefficient > 0.0 {
-            limiting = limiting.min(f64::from(reservoir[element]) / area / coefficient);
+            limiting = limiting.min(f64::from(reservoir[element]) / extent / coefficient);
         }
     }
     if !limiting.is_finite() || limiting <= 0.0 {
@@ -86,11 +97,11 @@ pub fn compute_flux(
     env: ReactionEnv,
     rng: &mut Rng,
 ) -> Option<FluxOutcome> {
-    if enzyme.enzyme_type != EnzymeType::Metabolic
-        || !cell_energy.is_finite()
+    if !cell_energy.is_finite()
         || cell_energy < 0.0
         || !dt_seconds.is_finite()
         || dt_seconds <= 0.0
+        || !(env.capacity_fraction > 0.0)
     {
         return None;
     }
@@ -107,12 +118,14 @@ pub fn compute_flux(
     }
 
     let enval_factor = f64::from(compute_enval_factor(enzyme, genome, env));
-    let saturation = compute_saturation(enzyme, reservoir, env.cell_area);
+    let saturation =
+        compute_saturation(enzyme, reservoir, env.pool_extent.unwrap_or(env.cell_area));
     let nominal_extent = f64::from(enzyme.rate)
         * dt_seconds
         * enval_factor
         * saturation
-        * f64::from(env.cell_area / REFERENCE_CELL_AREA);
+        * f64::from(env.cell_area / REFERENCE_CELL_AREA)
+        * env.capacity_fraction;
     let requested_extent = nominal_extent.min(substrate_limit).max(0.0);
     if requested_extent <= 1.0e-12 {
         return None;
@@ -243,11 +256,7 @@ mod tests {
     }
 
     fn environment(local_enval: f32) -> ReactionEnv {
-        ReactionEnv {
-            local_enval,
-            cell_area: 1.0,
-            cell_body: crate::config::CellBodyConfig::default(),
-        }
+        ReactionEnv::internal(local_enval, 1.0, crate::config::CellBodyConfig::default())
     }
 
     #[test]
@@ -321,6 +330,46 @@ mod tests {
     }
 
     #[test]
+    fn internal_capacity_is_the_unexposed_share_and_exact_at_zero_exposure() {
+        let reservoir = ElementAmounts::new([0.0, 0.0, 0.0, 10.0, 0.0, 0.0]);
+        let run = |exposure: f32| {
+            let mut enzyme = Enzyme::founder_downhill();
+            enzyme.exposure = exposure;
+            let env = ReactionEnv {
+                capacity_fraction: 1.0 - f64::from(enzyme.exposure),
+                ..environment(0.25)
+            };
+            compute_flux(
+                &enzyme,
+                reservoir,
+                20.0,
+                0.01,
+                context(),
+                env,
+                &mut Rng::from_seed_str("internal-capacity"),
+            )
+        };
+        let reference = compute_flux(
+            &Enzyme::founder_downhill(),
+            reservoir,
+            20.0,
+            0.01,
+            context(),
+            environment(0.25),
+            &mut Rng::from_seed_str("internal-capacity"),
+        )
+        .unwrap();
+        assert_eq!(run(0.0).unwrap(), reference);
+        let quarter = run(0.75).unwrap();
+        assert!(
+            (f64::from(quarter.requested_extent) - 0.25 * f64::from(reference.requested_extent))
+                .abs()
+                <= 1.0e-6 * f64::from(reference.requested_extent)
+        );
+        assert!(run(1.0).is_none());
+    }
+
+    #[test]
     fn enval_factor_uses_local_average_not_tile_value() {
         let enzyme = Enzyme::founder_downhill();
         let matched = compute_enval_factor(&enzyme, context(), environment(0.25));
@@ -348,11 +397,7 @@ mod tests {
                 10.0,
                 dt,
                 context(),
-                ReactionEnv {
-                    local_enval: 0.25,
-                    cell_area: area,
-                    cell_body: crate::config::CellBodyConfig::default(),
-                },
+                ReactionEnv::internal(0.25, area, crate::config::CellBodyConfig::default()),
                 &mut rng,
             )
             .map_or(0.0, |outcome| f64::from(outcome.requested_extent))

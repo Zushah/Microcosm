@@ -2,9 +2,9 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellBodyConfig, CellId, Config, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig,
-    GenomePatch, LineageId, Position, RenderBrushPreview, RenderBuffers, RenderDisplayMode,
-    RenderVisualState, VERSION, World, WorldStats,
+    CellBodyConfig, CellId, CellMotionConfig, Config, ElementFieldConfig, EnvalRechargeConfig,
+    EnvalSourceConfig, GenomePatch, LineageId, Position, RenderBrushPreview, RenderBuffers,
+    RenderDisplayMode, RenderVisualState, SurfaceConfig, VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -68,11 +68,6 @@ pub struct WasmStats {
     pub radius_p95: f32,
     pub radius_max: f32,
     pub mean_strain: f64,
-    pub predation_events: u64,
-    pub cells_consumed: u64,
-    pub predator_energy_gained: f64,
-    pub predation_enzyme_transfers: u64,
-    pub predation_enzyme_replacements: u64,
     pub lineage_count: u32,
     pub total_lineage_records: u32,
     pub extinct_lineage_count: u32,
@@ -88,13 +83,7 @@ pub struct WasmStats {
     pub max_enzyme_count: u32,
     pub cells_at_enzyme_cap: u32,
     pub fraction_cells_at_enzyme_cap: f64,
-    pub enzyme_metabolic_count: u64,
-    pub enzyme_defensase_count: u64,
-    pub enzyme_attackase_count: u64,
-    pub average_attack_total: f64,
-    pub max_attack_total: u32,
-    pub average_defense_total: f64,
-    pub max_defense_total: u32,
+    pub total_enzyme_count: u64,
     pub average_enval: f32,
     pub min_enval: f32,
     pub max_enval: f32,
@@ -114,8 +103,6 @@ pub struct WasmStats {
     pub cell_steps: u64,
     pub enzyme_entries_seen: u64,
     pub metabolic_enzyme_attempts: u64,
-    pub predation_cells_considered: u64,
-    pub predation_candidate_pairs: u64,
     pub spatial_candidate_checks: u64,
     pub overlap_candidates: u64,
     pub overlap_corrections: u64,
@@ -129,7 +116,6 @@ pub struct WasmStats {
     pub energy_assembly_cost: f64,
     pub energy_maintenance: f64,
     pub energy_death_loss: f64,
-    pub energy_predation_transfer: f64,
     pub energy_ledger_residual: f64,
     pub renewable_coverage: f64,
     pub enval_source_inflow: f64,
@@ -139,6 +125,16 @@ pub struct WasmStats {
     pub enval_edits: f64,
     pub recharge_amount: f64,
     pub recharge_energy: f64,
+    pub mean_exposure: f64,
+    pub max_exposure: f32,
+    pub exposed_cell_count: u32,
+    pub contact_pairs: u64,
+    pub cross_lineage_contact_pairs: u64,
+    pub field_surface_extent: f64,
+    pub cell_surface_extent: f64,
+    pub boundary_digested: f64,
+    pub cross_lineage_boundary_digested: f64,
+    pub lyses_after_digestion: u64,
     pub render_epoch: u32,
 }
 
@@ -182,11 +178,6 @@ impl From<&WorldStats> for WasmStats {
             radius_p95: stats.radius_p95,
             radius_max: stats.radius_max,
             mean_strain: stats.mean_strain,
-            predation_events: stats.predation_events,
-            cells_consumed: stats.cells_consumed,
-            predator_energy_gained: stats.predator_energy_gained,
-            predation_enzyme_transfers: stats.predation_enzyme_transfers,
-            predation_enzyme_replacements: stats.predation_enzyme_replacements,
             lineage_count: clamp_usize_to_u32(stats.lineage_count),
             total_lineage_records: clamp_usize_to_u32(stats.total_lineage_records),
             extinct_lineage_count: clamp_usize_to_u32(stats.extinct_lineage_count),
@@ -202,13 +193,7 @@ impl From<&WorldStats> for WasmStats {
             max_enzyme_count: clamp_usize_to_u32(stats.max_enzyme_count),
             cells_at_enzyme_cap: clamp_usize_to_u32(stats.cells_at_enzyme_cap),
             fraction_cells_at_enzyme_cap: stats.fraction_cells_at_enzyme_cap,
-            enzyme_metabolic_count: stats.enzyme_type_totals.metabolic,
-            enzyme_defensase_count: stats.enzyme_type_totals.defensase,
-            enzyme_attackase_count: stats.enzyme_type_totals.attackase,
-            average_attack_total: stats.average_attack_total,
-            max_attack_total: stats.max_attack_total,
-            average_defense_total: stats.average_defense_total,
-            max_defense_total: stats.max_defense_total,
+            total_enzyme_count: stats.total_enzyme_count,
             average_enval: stats.average_enval,
             min_enval: stats.min_enval,
             max_enval: stats.max_enval,
@@ -228,8 +213,6 @@ impl From<&WorldStats> for WasmStats {
             cell_steps: stats.operation_counters.cell_steps,
             enzyme_entries_seen: stats.operation_counters.enzyme_entries_seen,
             metabolic_enzyme_attempts: stats.operation_counters.metabolic_enzyme_attempts,
-            predation_cells_considered: stats.operation_counters.predation_cells_considered,
-            predation_candidate_pairs: stats.operation_counters.predation_candidate_pairs,
             spatial_candidate_checks: stats.operation_counters.spatial_candidate_checks,
             overlap_candidates: stats.operation_counters.overlap_candidates,
             overlap_corrections: stats.operation_counters.overlap_corrections,
@@ -243,7 +226,6 @@ impl From<&WorldStats> for WasmStats {
             energy_assembly_cost: stats.energy_ledger.assembly_cost,
             energy_maintenance: stats.energy_ledger.maintenance,
             energy_death_loss: stats.energy_ledger.death_loss,
-            energy_predation_transfer: stats.energy_ledger.predation_transfer,
             energy_ledger_residual: stats.energy_ledger_residual,
             renewable_coverage: stats.renewable_coverage,
             enval_source_inflow: stats.enval_ledger.source_inflow,
@@ -253,6 +235,16 @@ impl From<&WorldStats> for WasmStats {
             enval_edits: stats.enval_ledger.edits,
             recharge_amount: stats.enval_ledger.recharge_amount,
             recharge_energy: stats.enval_ledger.recharge_energy,
+            mean_exposure: stats.mean_exposure,
+            max_exposure: stats.max_exposure,
+            exposed_cell_count: clamp_usize_to_u32(stats.exposed_cell_count),
+            contact_pairs: stats.contact_pairs,
+            cross_lineage_contact_pairs: stats.cross_lineage_contact_pairs,
+            field_surface_extent: stats.interaction.field_surface_extent,
+            cell_surface_extent: stats.interaction.cell_surface_extent,
+            boundary_digested: stats.interaction.boundary_digested,
+            cross_lineage_boundary_digested: stats.interaction.cross_lineage_boundary_digested,
+            lyses_after_digestion: stats.interaction.lyses_after_digestion,
             render_epoch: (stats.tick_count & u64::from(u32::MAX)) as u32,
         }
     }
@@ -273,7 +265,8 @@ struct WasmInitConfig {
     catalyst_upkeep_per_sec: Option<f64>,
     enval_sources: Option<EnvalSourceConfig>,
     enval_recharge: Option<EnvalRechargeConfig>,
-    predation_enabled: Option<bool>,
+    cell_motion: Option<CellMotionConfig>,
+    surface: Option<SurfaceConfig>,
 }
 
 impl WasmInitConfig {
@@ -318,8 +311,11 @@ impl WasmInitConfig {
         if let Some(recharge) = self.enval_recharge {
             config.enval_recharge = recharge;
         }
-        if let Some(enabled) = self.predation_enabled {
-            config.predation_enabled = enabled;
+        if let Some(cell_motion) = self.cell_motion {
+            config.cell_motion = cell_motion;
+        }
+        if let Some(surface) = self.surface {
+            config.surface = surface;
         }
         config
     }
@@ -850,8 +846,6 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "lineage_id": info.lineage_id.raw(),
                     "enzyme_count": info.enzyme_count,
                     "total_internal_elements": info.total_internal_elements,
-                    "combat_attack_total": info.combat_attack_total,
-                    "combat_defense_total": info.combat_defense_total,
                     "age_seconds": info.age_seconds,
                     "optimal_enval": info.optimal_enval,
                     "local_enval_average": info.local_enval_average,
@@ -859,7 +853,9 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "boundary_total": info.boundary_total,
                     "area": info.area,
                     "strain": info.strain,
-                    "membrane_polarity": info.membrane_polarity
+                    "membrane_polarity": info.membrane_polarity,
+                    "field_share": info.field_share,
+                    "contacts": info.contacts
                 }),
             )
         }
@@ -1359,8 +1355,6 @@ ptr_fn!(microcosm_cell_lineage_ptr, cell_lineage, u32);
 ptr_fn!(microcosm_cell_flags_ptr, cell_flags, u32);
 ptr_fn!(microcosm_cell_enzyme_count_ptr, cell_enzyme_count, u32);
 ptr_fn!(microcosm_cell_age_seconds_ptr, cell_age_seconds, f32);
-ptr_fn!(microcosm_cell_attack_ptr, cell_attack, u32);
-ptr_fn!(microcosm_cell_defense_ptr, cell_defense, u32);
 
 #[cfg(test)]
 mod tests {
@@ -1402,13 +1396,17 @@ mod tests {
     #[test]
     fn json_config_overrides_core_fields() {
         let json =
-            br#"{"seed":"wasm-test","width":8,"height":6,"initial_cells":3,"predation_enabled":false}"#;
+            br#"{"seed":"wasm-test","width":8,"height":6,"initial_cells":3}"#;
         let config = parse_config_from_bytes(json.as_ptr(), json.len()).unwrap();
         assert_eq!(config.seed, "wasm-test");
         assert_eq!(config.width, 8);
         assert_eq!(config.height, 6);
         assert_eq!(config.initial_founder_count, 3);
-        assert!(!config.predation_enabled);
+
+        let json = br#"{"cell_motion":{"diffusivity":0.0},"surface":{"contact_gap":0.3}}"#;
+        let config = parse_config_from_bytes(json.as_ptr(), json.len()).unwrap();
+        assert_eq!(config.cell_motion.diffusivity, 0.0);
+        assert_eq!(config.surface.contact_gap, 0.3);
     }
 
     #[test]
@@ -1528,31 +1526,30 @@ mod tests {
             intracellular_d: f64, intracellular_e: f64, intracellular_f: f64,
             system_a: f64, system_b: f64, system_c: f64, system_d: f64, system_e: f64,
             system_f: f64, total_element_amount: f64, live_cell_count: u32, births: u64,
-            deaths: u64, fissions: u64, energy_deaths: u64, lyses: u64, radius_median: f32, radius_p95: f32, radius_max: f32, mean_strain: f64, predation_events: u64, cells_consumed: u64,
-            predator_energy_gained: f64, predation_enzyme_transfers: u64,
-            predation_enzyme_replacements: u64, lineage_count: u32, total_lineage_records: u32,
+            deaths: u64, fissions: u64, energy_deaths: u64, lyses: u64, radius_median: f32, radius_p95: f32, radius_max: f32, mean_strain: f64, lineage_count: u32, total_lineage_records: u32,
             extinct_lineage_count: u32, dominant_lineage_id: u64,
             dominant_lineage_population: u64, dominant_lineage_share: f64,
             average_cell_energy: f64, min_cell_energy: f64, max_cell_energy: f64,
             total_cell_energy: f64, average_enzyme_count: f64, min_enzyme_count: u32,
             max_enzyme_count: u32, cells_at_enzyme_cap: u32, fraction_cells_at_enzyme_cap: f64,
-            enzyme_metabolic_count: u64, enzyme_defensase_count: u64,
-            enzyme_attackase_count: u64, average_attack_total: f64, max_attack_total: u32,
-            average_defense_total: f64, max_defense_total: u32, average_enval: f32,
+            total_enzyme_count: u64, average_enval: f32,
             min_enval: f32, max_enval: f32, enval_std_dev: f32, enval_p05: f32, enval_p50: f32,
             enval_p95: f32, reaction_attempts: u64, reaction_successes: u64,
             executed_metabolic_flux: f64, uptake_flux: f64, leak_flux: f64,
             secretion_flux: f64, divisions: u64, element_field_diffusion_tiles: u64,
             element_uptake_events: u64, cell_steps: u64, enzyme_entries_seen: u64,
-            metabolic_enzyme_attempts: u64, predation_cells_considered: u64,
-            predation_candidate_pairs: u64, spatial_candidate_checks: u64,
+            metabolic_enzyme_attempts: u64, spatial_candidate_checks: u64,
             overlap_candidates: u64, overlap_corrections: u64, energy_founder: f64,
             energy_injected: f64, energy_extracted: f64, energy_chemical_harvest: f64,
             energy_chemical_cost: f64, energy_enval_harvest: f64, energy_pump_cost: f64, energy_assembly_cost: f64,
-            energy_maintenance: f64, energy_death_loss: f64, energy_predation_transfer: f64,
+            energy_maintenance: f64, energy_death_loss: f64,
             energy_ledger_residual: f64, renewable_coverage: f64, enval_source_inflow: f64,
             enval_cell_uptake: f64, enval_cell_emission: f64, enval_recharge: f64,
-            enval_edits: f64, recharge_amount: f64, recharge_energy: f64, render_epoch: u32,
+            enval_edits: f64, recharge_amount: f64, recharge_energy: f64, mean_exposure: f64,
+            max_exposure: f32, exposed_cell_count: u32, contact_pairs: u64,
+            cross_lineage_contact_pairs: u64, field_surface_extent: f64,
+            cell_surface_extent: f64, boundary_digested: f64,
+            cross_lineage_boundary_digested: f64, lyses_after_digestion: u64, render_epoch: u32,
         );
 
         let source = include_str!("../../../wasmgpu/runtime.js");
@@ -1715,7 +1712,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v4","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"enzyme_type":"attackase","combat_level":77}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v5","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"rate":0.77}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1741,10 +1738,10 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|enzyme| enzyme["enzyme_type"].as_str() == Some("attackase"))
+                .any(|enzyme| (enzyme["rate"].as_f64().unwrap() - 0.77).abs() <= 1.0e-6)
         );
 
-        let invalid = br#"{"schema":"microcosm.genome_patch.v4","genome":{"mutation_rate":2.0}}"#;
+        let invalid = br#"{"schema":"microcosm.genome_patch.v5","genome":{"mutation_rate":2.0}}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, invalid.as_ptr(), invalid.len()),
             STATUS_WORLD_ERROR
@@ -1758,7 +1755,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v4","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1782,12 +1779,71 @@ mod tests {
     }
 
     #[test]
+    fn genome_patch_json_round_trips_exposure_and_rejects_v4_and_unknown_fields() {
+        let json = br#"{"seed":"wasm-exposure","width":8,"height":6,"initial_cells":2}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+
+        let patch = br#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":1,"fields":{"exposure":0.375}}]}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
+            STATUS_OK
+        );
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 1), STATUS_OK);
+        let detail = query_json();
+        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][0]["exposure"], 0.0);
+        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][1]["exposure"], 0.375);
+        assert_eq!(microcosm_step(handle, 20), STATUS_OK);
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 64), STATUS_OK);
+        let fluxes = query_json()["cell_detail"]["recent_fluxes"]["fluxes"].clone();
+        let sites = fluxes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["site"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert!(sites.iter().any(|site| site == "internal"), "{sites:?}");
+        assert!(
+            sites
+                .iter()
+                .all(|site| site == "internal" || site == "field" || site.starts_with("cell:"))
+        );
+
+        for (rejected, status) in [
+            (
+                r#"{"schema":"microcosm.genome_patch.v4","enzymes":[{"op":"update","index":1,"fields":{"exposure":0.5}}]}"#,
+                STATUS_WORLD_ERROR,
+            ),
+            (
+                r#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":1,"fields":{"exposure":1.5}}]}"#,
+                STATUS_WORLD_ERROR,
+            ),
+            (
+                r#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"append","enzyme":{"level":7}}]}"#,
+                STATUS_CONFIG_ERROR,
+            ),
+        ] {
+            assert_eq!(
+                microcosm_apply_cell_genome_patch(handle, 0, rejected.as_ptr(), rejected.len()),
+                status,
+                "{rejected}"
+            );
+        }
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 1), STATUS_OK);
+        assert_eq!(
+            query_json()["cell_detail"]["genome"]["enzymes"][1]["exposure"],
+            0.375
+        );
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
+    }
+
+    #[test]
     fn genome_brush_export_reports_patch_counts() {
         let json = br#"{"seed":"wasm-genome-brush","width":8,"height":6,"initial_cells":4}"#;
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v4","genome":{"optimal_enval":0.22}}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v5","genome":{"optimal_enval":0.22}}"#;
         assert_eq!(
             microcosm_apply_genome_brush(handle, 0, 0, 8, 6, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1813,7 +1869,7 @@ mod tests {
         assert_eq!(stats.occupied_tile_count, 4);
         assert!((stats.extracellular_a + stats.intracellular_a - 48.0).abs() <= 1.0e-4);
         assert!(stats.total_element_amount > stats.extracellular_a);
-        assert!(stats.enzyme_metabolic_count >= 4);
+        assert!(stats.total_enzyme_count >= 4);
         assert!(stats.average_cell_energy.is_finite());
         assert!(stats.enval_std_dev.is_finite());
 
@@ -1827,6 +1883,13 @@ mod tests {
         assert!(stepped.energy_maintenance > 0.0);
         assert!(stepped.energy_ledger_residual.abs() < 1.0e-9);
         assert!(stepped.renewable_coverage.is_finite());
+        assert_eq!(stepped.max_exposure, 0.0);
+        assert_eq!(stepped.exposed_cell_count, 0);
+        assert_eq!(stepped.boundary_digested, 0.0);
+        assert_eq!(microcosm_inspect_cell(handle, 0), STATUS_OK);
+        let cell = query_json();
+        assert!(cell["field_share"].as_f64().unwrap() > 0.0);
+        assert!(cell["contacts"].is_array());
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 }

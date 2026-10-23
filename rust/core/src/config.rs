@@ -18,6 +18,8 @@ pub const DEFAULT_ENVAL_SOURCE_RADIUS: f32 = 6.0;
 pub const DEFAULT_ENVAL_SOURCE_MAGNITUDE: f32 = 1.0;
 pub const DEFAULT_ENVAL_SOURCE_RELAXATION_PER_SECOND: f32 = 5.0;
 pub const DEFAULT_ENVAL_RECHARGE_RATE_PER_SECOND: f32 = 0.1;
+pub const DEFAULT_SURFACE_CONTACT_GAP: f32 = 0.1;
+pub const DEFAULT_CELL_DIFFUSIVITY: f32 = 0.2;
 
 pub const DEFAULT_ELEMENT_FIELD_AMOUNTS: ElementAmounts =
     ElementAmounts::new([1.00, 0.65, 0.50, 0.12, 0.08, 0.05]);
@@ -145,6 +147,56 @@ impl EnvalRechargeConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CellMotionConfig {
+    pub diffusivity: f32,
+}
+
+impl Default for CellMotionConfig {
+    fn default() -> Self {
+        Self {
+            diffusivity: DEFAULT_CELL_DIFFUSIVITY,
+        }
+    }
+}
+
+impl CellMotionConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.diffusivity.is_finite() || self.diffusivity < 0.0 {
+            return Err(ConfigError::InvalidNonnegative(
+                "cell_motion.diffusivity",
+                f64::from(self.diffusivity),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SurfaceConfig {
+    pub contact_gap: f32,
+}
+
+impl Default for SurfaceConfig {
+    fn default() -> Self {
+        Self {
+            contact_gap: DEFAULT_SURFACE_CONTACT_GAP,
+        }
+    }
+}
+
+impl SurfaceConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.contact_gap.is_finite() || self.contact_gap <= 0.0 {
+            return Err(ConfigError::InvalidPositive(
+                "surface.contact_gap",
+                f64::from(self.contact_gap),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CellBodyConfig {
     pub body_density: f32,
     pub boundary_density: f32,
@@ -228,7 +280,8 @@ pub struct Config {
     pub catalyst_upkeep_per_sec: f64,
     pub enval_sources: EnvalSourceConfig,
     pub enval_recharge: EnvalRechargeConfig,
-    pub predation_enabled: bool,
+    pub cell_motion: CellMotionConfig,
+    pub surface: SurfaceConfig,
 }
 
 impl Default for Config {
@@ -247,7 +300,8 @@ impl Default for Config {
             catalyst_upkeep_per_sec: DEFAULT_CATALYST_UPKEEP_PER_SEC,
             enval_sources: EnvalSourceConfig::default(),
             enval_recharge: EnvalRechargeConfig::default(),
-            predation_enabled: true,
+            cell_motion: CellMotionConfig::default(),
+            surface: SurfaceConfig::default(),
         }
     }
 }
@@ -299,6 +353,8 @@ impl Config {
         }
         self.enval_sources.validate()?;
         self.enval_recharge.validate()?;
+        self.cell_motion.validate()?;
+        self.surface.validate()?;
         self.element_fields.validate()
     }
 }
@@ -436,6 +492,32 @@ mod tests {
         let mut config = Config::default();
         config.catalyst_upkeep_per_sec = -1.0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn drift_and_surface_config_is_validated() {
+        let config = Config::default();
+        assert_eq!(config.cell_motion.diffusivity, 0.2);
+        assert_eq!(config.surface.contact_gap, 0.1);
+        let mut still = Config::default();
+        still.cell_motion.diffusivity = 0.0;
+        still.validate().unwrap();
+        for diffusivity in [-0.1, f32::NAN, f32::INFINITY] {
+            let mut config = Config::default();
+            config.cell_motion.diffusivity = diffusivity;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidNonnegative("cell_motion.diffusivity", _))
+            ));
+        }
+        for contact_gap in [0.0, -0.1, f32::NAN] {
+            let mut config = Config::default();
+            config.surface.contact_gap = contact_gap;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidPositive("surface.contact_gap", _))
+            ));
+        }
     }
 
     #[test]

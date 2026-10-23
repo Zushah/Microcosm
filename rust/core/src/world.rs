@@ -6,13 +6,14 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::bio::{self, GenomeReactionContext, ReactionEnv};
-use crate::cell::{Cell, CellFluxLog, CellId, CellStore, FluxRecord};
+use crate::cell::{Cell, CellFluxLog, CellId, CellStore, FluxRecord, ReactionSite};
 use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError};
 use crate::config::{Config, ConfigError};
 use crate::environment::{self, EnvalSources};
 use crate::genome::{
-    Enzyme, EnzymeType, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+    Enzyme, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
+use crate::interaction::{self, Contact};
 use crate::render_buffers::{RenderBuffers, RenderVisualState};
 use crate::rng::Rng;
 use crate::spatial::{
@@ -20,7 +21,8 @@ use crate::spatial::{
     minimum_image_displacement, toroidal_distance_squared, wrap_coordinate,
 };
 use crate::stats::{
-    ENZYME_COUNT_HISTOGRAM_LEN, EnergyLedger, EnvalLedger, EnzymeTypeCounts, OperationCounters,
+    ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger,
+    InteractionCounters, OperationCounters,
     ReactionCounters, StepProfile, WorldStats, renewable_coverage,
 };
 
@@ -34,7 +36,7 @@ const FOUNDER_PLACEMENT_ATTEMPTS: usize = 64;
 pub const MIN_DAUGHTER_BODY: f64 = 0.05;
 const OVERLAP_RELAXATION_PASSES: usize = 2;
 const GEOMETRY_TOLERANCE: f32 = 1.0e-5;
-const PREDATION_CONTACT_GAP: f32 = 0.514;
+pub const LYSIS_ATTRIBUTION_TICKS: u64 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TileId(pub usize);
@@ -92,19 +94,24 @@ pub struct CellInspection {
     pub lineage_id: LineageId,
     pub enzyme_count: usize,
     pub total_internal_elements: f32,
-    pub combat_attack_total: u32,
-    pub combat_defense_total: u32,
     pub age_seconds: f64,
     pub optimal_enval: f32,
     pub local_enval_average: f32,
+    pub field_share: f64,
+    pub contacts: Vec<ContactInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ContactInspection {
+    pub cell_id: usize,
+    pub lineage_id: LineageId,
+    pub distance: f64,
+    pub share: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EnzymeDetailInspection {
     pub index: usize,
-    pub enzyme_type: &'static str,
-    pub is_metabolic: bool,
-    pub is_combat: bool,
     pub reactants: [f32; ELEMENT_COUNT],
     pub products: [f32; ELEMENT_COUNT],
     pub rate: f32,
@@ -118,7 +125,7 @@ pub struct EnzymeDetailInspection {
     pub enval_energy_fraction: f32,
     pub enval_release_fraction: f32,
     pub enval_pump: f32,
-    pub combat_level: u32,
+    pub exposure: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -187,12 +194,7 @@ pub struct LineageSummaryInspection {
     pub share: f64,
     pub average_energy: f64,
     pub average_enzyme_count: f64,
-    pub average_attack_total: f64,
-    pub average_defense_total: f64,
-    pub max_attack_total: u32,
-    pub max_defense_total: u32,
-    pub cells_with_attackase: u64,
-    pub cells_with_defensase: u64,
+    pub mean_exposure: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -204,10 +206,14 @@ pub struct LineageListInspection {
     pub lineages: Vec<LineageSummaryInspection>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PredationOutcome {
-    winner: CellId,
-    loser: CellId,
+#[derive(Clone, Copy, Debug)]
+struct CellReactionContext {
+    cell_id: CellId,
+    slot: usize,
+    position: Position,
+    local_enval: f32,
+    cell_area: f32,
+    genome: GenomeReactionContext,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -238,7 +244,7 @@ pub struct World {
     #[serde(skip, default)]
     pair_scratch: Vec<(CellId, CellId)>,
     #[serde(skip, default)]
-    enzyme_scratch: Vec<Enzyme>,
+    contact_scratch: Vec<Contact>,
     #[serde(skip, default)]
     tile_cell_counts: Vec<u32>,
     lineage_counters: BTreeMap<LineageId, LineageCounters>,
@@ -246,13 +252,11 @@ pub struct World {
     death_count: u64,
     energy_death_count: u64,
     lysis_count: u64,
-    predation_event_count: u64,
-    cells_consumed_count: u64,
-    predator_energy_gained: f64,
-    predation_enzyme_transfer_count: u64,
-    predation_enzyme_replacement_count: u64,
     reaction_counters: ReactionCounters,
     operation_counters: OperationCounters,
+    interaction_counters: InteractionCounters,
+    contact_pair_count: u64,
+    cross_lineage_contact_pair_count: u64,
     energy_ledger: EnergyLedger,
     enval_ledger: EnvalLedger,
     neighbors: Vec<NeighborIndices>,
@@ -299,20 +303,18 @@ impl World {
             cell_phase_scratch: Vec::new(),
             mechanics_corrections: Vec::new(),
             pair_scratch: Vec::new(),
-            enzyme_scratch: Vec::new(),
+            contact_scratch: Vec::new(),
             tile_cell_counts: vec![0; tile_count],
             lineage_counters: BTreeMap::new(),
             birth_count: 0,
             death_count: 0,
             energy_death_count: 0,
             lysis_count: 0,
-            predation_event_count: 0,
-            cells_consumed_count: 0,
-            predator_energy_gained: 0.0,
-            predation_enzyme_transfer_count: 0,
-            predation_enzyme_replacement_count: 0,
             reaction_counters: ReactionCounters::default(),
             operation_counters: OperationCounters::default(),
+            interaction_counters: InteractionCounters::default(),
+            contact_pair_count: 0,
+            cross_lineage_contact_pair_count: 0,
             energy_ledger: EnergyLedger::default(),
             enval_ledger: EnvalLedger {
                 initial_total: enval_sum,
@@ -379,12 +381,8 @@ impl World {
         self.reaction_counters
     }
 
-    pub fn predation_enabled(&self) -> bool {
-        self.config.predation_enabled
-    }
-
-    pub fn set_predation_enabled(&mut self, enabled: bool) {
-        self.config.predation_enabled = enabled;
+    pub fn interaction_counters(&self) -> InteractionCounters {
+        self.interaction_counters
     }
 
     pub fn lineage_counters(&self) -> &BTreeMap<LineageId, LineageCounters> {
@@ -927,8 +925,8 @@ impl World {
     pub fn step(&mut self) {
         self.diffuse_element_fields();
         self.step_cells();
+        self.drift_cells();
         self.resolve_overlaps();
-        self.resolve_predation();
         self.enval_phase();
         self.advance_time();
     }
@@ -952,12 +950,9 @@ impl World {
         let cell_step = start.elapsed();
 
         let start = Instant::now();
+        self.drift_cells();
         self.resolve_overlaps();
         let cell_mechanics = start.elapsed();
-
-        let start = Instant::now();
-        self.resolve_predation();
-        let predation = start.elapsed();
 
         let start = Instant::now();
         self.enval_phase();
@@ -969,7 +964,6 @@ impl World {
             element_field_diffusion,
             cell_step,
             cell_mechanics,
-            predation,
             enval_diffusion,
             total: total_start.elapsed(),
             counters: self.operation_counters.saturating_delta(counters_before),
@@ -1217,13 +1211,9 @@ impl World {
         let mut max_enzyme_count = 0_usize;
         let mut enzyme_count_histogram = [0_u64; ENZYME_COUNT_HISTOGRAM_LEN];
         let mut cells_at_enzyme_cap = 0_usize;
-        let mut cells_with_attackase = 0_usize;
-        let mut cells_with_defensase = 0_usize;
-        let mut attack_sum = 0_u64;
-        let mut defense_sum = 0_u64;
-        let mut max_attack_total = 0_u32;
-        let mut max_defense_total = 0_u32;
-        let mut enzyme_type_totals = EnzymeTypeCounts::default();
+        let mut exposure_sum = 0.0_f64;
+        let mut max_exposure = 0.0_f32;
+        let mut exposed_cell_count = 0_usize;
 
         for cell in self.cells.iter() {
             live_cell_count += 1;
@@ -1244,28 +1234,15 @@ impl World {
             if enzyme_count >= MAX_CELL_ENZYMES {
                 cells_at_enzyme_cap += 1;
             }
-
-            let mut has_attackase = false;
-            let mut has_defensase = false;
+            let mut cell_max_exposure = 0.0_f32;
             for enzyme in &cell.genome.enzymes {
-                enzyme_type_totals.increment(enzyme.enzyme_type);
-                match enzyme.enzyme_type {
-                    EnzymeType::Attackase => has_attackase = true,
-                    EnzymeType::Defensase => has_defensase = true,
-                    EnzymeType::Metabolic => {}
-                }
+                exposure_sum += f64::from(enzyme.exposure);
+                cell_max_exposure = cell_max_exposure.max(enzyme.exposure);
             }
-            if has_attackase {
-                cells_with_attackase += 1;
+            max_exposure = max_exposure.max(cell_max_exposure);
+            if cell_max_exposure >= EXPOSED_CELL_THRESHOLD {
+                exposed_cell_count += 1;
             }
-            if has_defensase {
-                cells_with_defensase += 1;
-            }
-
-            attack_sum = attack_sum.saturating_add(u64::from(cell.combat_attack_total));
-            defense_sum = defense_sum.saturating_add(u64::from(cell.combat_defense_total));
-            max_attack_total = max_attack_total.max(cell.combat_attack_total);
-            max_defense_total = max_defense_total.max(cell.combat_defense_total);
         }
 
         if live_cell_count == 0 {
@@ -1350,16 +1327,6 @@ impl World {
             radius_p95,
             radius_max,
             mean_strain,
-            predation_events: self.predation_event_count,
-            cells_consumed: self.cells_consumed_count,
-            predator_energy_gained: self.predator_energy_gained,
-            average_energy_gained_per_predation: if self.predation_event_count > 0 {
-                self.predator_energy_gained / self.predation_event_count as f64
-            } else {
-                0.0
-            },
-            predation_enzyme_transfers: self.predation_enzyme_transfer_count,
-            predation_enzyme_replacements: self.predation_enzyme_replacement_count,
             lineage_count: extant_lineage_count,
             extant_lineage_count,
             total_lineage_records,
@@ -1396,21 +1363,17 @@ impl World {
             } else {
                 0.0
             },
-            cells_with_attackase,
-            cells_with_defensase,
-            average_attack_total: if live_cell_count > 0 {
-                attack_sum as f64 / live_cell_count_f64
+            total_enzyme_count: enzyme_sum as u64,
+            mean_exposure: if enzyme_sum > 0 {
+                exposure_sum / enzyme_sum as f64
             } else {
                 0.0
             },
-            max_attack_total,
-            average_defense_total: if live_cell_count > 0 {
-                defense_sum as f64 / live_cell_count_f64
-            } else {
-                0.0
-            },
-            max_defense_total,
-            enzyme_type_totals,
+            max_exposure,
+            exposed_cell_count,
+            contact_pairs: self.contact_pair_count,
+            cross_lineage_contact_pairs: self.cross_lineage_contact_pair_count,
+            interaction: self.interaction_counters,
             reaction_counters: self.reaction_counters,
             operation_counters: self.operation_counters,
             energy_ledger: self.energy_ledger,
@@ -1425,11 +1388,8 @@ impl World {
         self.cell_phase_scratch.clear();
         self.mechanics_corrections.clear();
         self.pair_scratch.clear();
-        self.enzyme_scratch.clear();
+        self.contact_scratch.clear();
         self.cells.rebuild_index();
-        for cell in self.cells.iter_mut() {
-            cell.refresh_combat_totals();
-        }
         self.rebuild_spatial_index();
     }
 
@@ -1548,8 +1508,6 @@ impl World {
         buffers.cell_flags.reserve(self.cells.len());
         buffers.cell_enzyme_count.reserve(self.cells.len());
         buffers.cell_age_seconds.reserve(self.cells.len());
-        buffers.cell_attack.reserve(self.cells.len());
-        buffers.cell_defense.reserve(self.cells.len());
 
         buffers.tile_enval.extend_from_slice(&self.enval);
 
@@ -1597,8 +1555,6 @@ impl World {
             buffers
                 .cell_age_seconds
                 .push((self.sim_time_seconds - cell.birth_sim_time).max(0.0) as f32);
-            buffers.cell_attack.push(cell.combat_attack_total);
-            buffers.cell_defense.push(cell.combat_defense_total);
         }
         buffers.refresh_lattice_rgba(visual);
     }
@@ -1629,6 +1585,8 @@ impl World {
 
     pub fn inspect_cell(&self, cell_id: CellId) -> Option<CellInspection> {
         let cell = self.cells.get(cell_id)?;
+        let mut contacts = Vec::new();
+        let field_share = self.collect_contacts(cell_id, cell.position, cell.radius, &mut contacts);
         Some(CellInspection {
             cell_id,
             x: cell.position.x,
@@ -1643,13 +1601,21 @@ impl World {
             lineage_id: cell.lineage_id,
             enzyme_count: cell.genome.enzymes.len(),
             total_internal_elements: cell.internal_elements.total() as f32,
-            combat_attack_total: cell.combat_attack_total,
-            combat_defense_total: cell.combat_defense_total,
             age_seconds: (self.sim_time_seconds - cell.birth_sim_time).max(0.0),
             optimal_enval: cell.genome.optimal_enval,
             local_enval_average: self
                 .local_enval_average_at(cell.position, LOCAL_ENVAL_RADIUS)
                 .unwrap_or(0.0),
+            field_share,
+            contacts: contacts
+                .iter()
+                .map(|contact| ContactInspection {
+                    cell_id: contact.cell_id.index(),
+                    lineage_id: self.cells[contact.cell_id].lineage_id,
+                    distance: contact.distance,
+                    share: contact.share,
+                })
+                .collect(),
         })
     }
 
@@ -1827,7 +1793,6 @@ impl World {
         cell.genome = genome;
         cell.lineage_id = original_lineage;
         cell.maintenance_cost_per_area = cell.genome.maintenance_cost_per_area;
-        cell.refresh_combat_totals();
         Ok(changed_fields)
     }
 
@@ -1839,12 +1804,7 @@ impl World {
         let mut live_count = 0_u64;
         let mut energy_sum = 0.0_f64;
         let mut enzyme_sum = 0_u64;
-        let mut attack_sum = 0_u64;
-        let mut defense_sum = 0_u64;
-        let mut max_attack_total = 0_u32;
-        let mut max_defense_total = 0_u32;
-        let mut cells_with_attackase = 0_u64;
-        let mut cells_with_defensase = 0_u64;
+        let mut exposure_sum = 0.0_f64;
         for cell in self.cells.iter() {
             if cell.lineage_id != lineage_id {
                 continue;
@@ -1852,26 +1812,12 @@ impl World {
             live_count = live_count.saturating_add(1);
             energy_sum += cell.energy;
             enzyme_sum = enzyme_sum.saturating_add(cell.genome.enzymes.len() as u64);
-            attack_sum = attack_sum.saturating_add(u64::from(cell.combat_attack_total));
-            defense_sum = defense_sum.saturating_add(u64::from(cell.combat_defense_total));
-            max_attack_total = max_attack_total.max(cell.combat_attack_total);
-            max_defense_total = max_defense_total.max(cell.combat_defense_total);
-            if cell
+            exposure_sum += cell
                 .genome
                 .enzymes
                 .iter()
-                .any(|enzyme| enzyme.enzyme_type == EnzymeType::Attackase)
-            {
-                cells_with_attackase = cells_with_attackase.saturating_add(1);
-            }
-            if cell
-                .genome
-                .enzymes
-                .iter()
-                .any(|enzyme| enzyme.enzyme_type == EnzymeType::Defensase)
-            {
-                cells_with_defensase = cells_with_defensase.saturating_add(1);
-            }
+                .map(|enzyme| f64::from(enzyme.exposure))
+                .sum::<f64>();
         }
         let denominator = live_count.max(1) as f64;
         let total_live_cells = self.cells.len().max(1) as f64;
@@ -1892,20 +1838,11 @@ impl World {
             } else {
                 0.0
             },
-            average_attack_total: if live_count > 0 {
-                attack_sum as f64 / denominator
+            mean_exposure: if enzyme_sum > 0 {
+                exposure_sum / enzyme_sum as f64
             } else {
                 0.0
             },
-            average_defense_total: if live_count > 0 {
-                defense_sum as f64 / denominator
-            } else {
-                0.0
-            },
-            max_attack_total,
-            max_defense_total,
-            cells_with_attackase,
-            cells_with_defensase,
         }
     }
 
@@ -1989,11 +1926,6 @@ impl World {
                     return Err(InvariantError::InvalidCatalyst(cell_id));
                 }
             }
-            if cell.combat_attack_total != cell.genome.attack_total()
-                || cell.combat_defense_total != cell.genome.defense_total()
-            {
-                return Err(InvariantError::CombatTotalsMismatch(cell_id));
-            }
 
             for element in ELEMENT_ORDER {
                 let amount = cell.internal_elements[element];
@@ -2059,10 +1991,6 @@ impl World {
             });
         }
 
-        if !self.predator_energy_gained.is_finite() {
-            return Err(InvariantError::NonFinitePredationEnergy);
-        }
-
         for (term, value) in self.energy_ledger.terms() {
             if !value.is_finite() || value < 0.0 {
                 return Err(InvariantError::InvalidEnergyLedgerTerm { term, value });
@@ -2120,15 +2048,21 @@ impl World {
         let local_enval = self
             .local_enval_average_at(position, LOCAL_ENVAL_RADIUS)
             .unwrap_or(0.0);
-        let enzyme_count = self.cells.at_slot_mut(slot).genome.enzymes.len();
-        let genome_context = GenomeReactionContext::from(&self.cells.at_slot_mut(slot).genome);
-        let radius = self.cells.at_slot_mut(slot).radius;
-        let cell_area = std::f32::consts::PI * radius * radius;
+        let enzyme_count = self.cells.at_slot(slot).genome.enzymes.len();
+        let radius = self.cells.at_slot(slot).radius;
+        let context = CellReactionContext {
+            cell_id,
+            slot,
+            position,
+            local_enval,
+            cell_area: std::f32::consts::PI * radius * radius,
+            genome: GenomeReactionContext::from(&self.cells.at_slot(slot).genome),
+        };
 
         for catalyst_index in 0..enzyme_count {
             let Some(enzyme) = self
                 .cells
-                .at_slot_mut(slot)
+                .at_slot(slot)
                 .genome
                 .enzymes
                 .get(catalyst_index)
@@ -2140,134 +2074,49 @@ impl World {
                 .operation_counters
                 .enzyme_entries_seen
                 .saturating_add(1);
-            if !enzyme.enzyme_type.is_metabolic() {
-                self.operation_counters.combat_enzyme_skips = self
-                    .operation_counters
-                    .combat_enzyme_skips
-                    .saturating_add(1);
-                continue;
-            }
-            self.operation_counters.metabolic_enzyme_attempts = self
-                .operation_counters
-                .metabolic_enzyme_attempts
-                .saturating_add(1);
-            self.reaction_counters
-                .attempts_by_type
-                .increment(EnzymeType::Metabolic);
+            self.count_reaction_attempt();
             let env = ReactionEnv {
-                local_enval,
-                cell_area,
-                cell_body: self.config.cell_body,
+                capacity_fraction: 1.0 - f64::from(enzyme.exposure),
+                ..ReactionEnv::internal(local_enval, context.cell_area, self.config.cell_body)
             };
-            let reservoir = self.cells.at_slot_mut(slot).internal_elements;
-            let energy_before = self.cells.at_slot_mut(slot).energy;
+            let reservoir = self.cells.at_slot(slot).internal_elements;
+            let energy_before = self.cells.at_slot(slot).energy;
             let Some(outcome) = bio::compute_flux(
                 &enzyme,
                 reservoir,
                 energy_before,
                 self.config.dt_seconds,
-                genome_context,
+                context.genome,
                 env,
                 &mut self.rng,
             ) else {
-                self.reaction_counters
-                    .no_substrate_by_type
-                    .increment(EnzymeType::Metabolic);
+                self.reaction_counters.no_substrate =
+                    self.reaction_counters.no_substrate.saturating_add(1);
                 continue;
             };
 
+            let cell = self.cells.at_slot_mut(slot);
             for element in ELEMENT_ORDER {
-                let before = self.cells.at_slot_mut(slot).internal_elements[element];
+                let before = cell.internal_elements[element];
                 let consumed = outcome.consumed[element];
                 debug_assert!(consumed <= before + 1.0e-5);
-                let remaining = if consumed >= before {
+                cell.internal_elements[element] = if consumed >= before {
                     0.0
                 } else {
                     before - consumed
                 };
-                self.cells.at_slot_mut(slot).internal_elements[element] =
-                    remaining + outcome.retained_products[element];
-                self.cells.at_slot_mut(slot).body[element] += outcome.body_products[element];
-                self.cells.at_slot_mut(slot).boundary[element] +=
-                    outcome.boundary_products[element];
             }
-            if outcome.secreted_products != ElementAmounts::ZERO {
-                self.deposit_elements_at(position, outcome.secreted_products)
-                    .expect("active cell position must support conservative element deposition");
-            }
-            let energy_after = energy_before + outcome.energy_delta;
-            self.cells.at_slot_mut(slot).energy = if energy_after < 0.0 && energy_after > -1.0e-9 {
-                0.0
-            } else {
-                energy_after
-            };
-            if outcome.chemical_energy_delta >= 0.0 {
-                self.energy_ledger.chemical_harvest += outcome.chemical_energy_delta;
-            } else {
-                self.energy_ledger.chemical_cost -= outcome.chemical_energy_delta;
-            }
-            self.energy_ledger.enval_harvest += outcome.enval_energy;
-            self.energy_ledger.pump_cost += outcome.pump_cost;
-            self.energy_ledger.assembly_cost += outcome.assembly_cost;
-            debug_assert!(self.cells.at_slot_mut(slot).energy >= 0.0);
-            if outcome.enval_input != 0.0 {
-                if let Ok(applied) = self.adjust_enval_at(position, -outcome.enval_input) {
-                    self.enval_ledger.cell_uptake += applied;
-                }
-            }
-            if outcome.enval_output != 0.0 {
-                if let Ok(applied) = self.add_enval_around(position, outcome.enval_output) {
-                    self.enval_ledger.cell_emission += applied;
-                }
-            }
-
-            self.operation_counters.reactions_succeeded = self
-                .operation_counters
-                .reactions_succeeded
-                .saturating_add(1);
-            self.reaction_counters
-                .successes_by_type
-                .increment(EnzymeType::Metabolic);
-            self.reaction_counters
-                .energy_delta_by_type
-                .add(EnzymeType::Metabolic, outcome.energy_delta);
-            self.reaction_counters
-                .enval_input_by_type
-                .add(EnzymeType::Metabolic, f64::from(outcome.enval_input));
-            self.reaction_counters
-                .enval_output_by_type
-                .add(EnzymeType::Metabolic, f64::from(outcome.enval_output));
-            self.reaction_counters.executed_metabolic_flux += f64::from(outcome.executed_extent);
-            self.reaction_counters.secretion_flux += outcome.secreted_products.total();
-
-            let energy_after = self.cells.at_slot_mut(slot).energy;
-            if self.watched_cell_id == Some(cell_id) {
-                self.flux_log.push_flux_record(FluxRecord {
-                    tick_count: self.tick_count,
-                    sim_time_seconds: self.sim_time_seconds,
-                    cell_id: cell_id.index(),
-                    x: position.x,
-                    y: position.y,
-                    catalyst_index,
-                    catalyst_type: enzyme.enzyme_type,
-                    reactants: *enzyme.reactants.as_array(),
-                    products: *enzyme.products.as_array(),
-                    requested_extent: outcome.requested_extent,
-                    executed_extent: outcome.executed_extent,
-                    element_deltas: outcome.element_deltas,
-                    secreted_elements: *outcome.secreted_products.as_array(),
-                    energy_before,
-                    energy_after,
-                    delta_cell_energy: outcome.energy_delta,
-                    raw_chemical_energy: outcome.raw_chemical_energy,
-                    enval_energy: outcome.enval_energy,
-                    enval_input: outcome.enval_input,
-                    enval_output: outcome.enval_output,
-                    local_enval: env.local_enval,
-                    optimal_enval: genome_context.optimal_enval,
-                });
-            }
+            self.apply_reaction_outcome(
+                context,
+                catalyst_index,
+                &enzyme,
+                ReactionSite::Internal,
+                &outcome,
+                energy_before,
+            );
         }
+
+        self.step_surface_catalysis(context, enzyme_count);
 
         self.cells
             .at_slot_mut(slot)
@@ -2299,10 +2148,353 @@ impl World {
         let strain = self.cells[cell_id].strain(self.config.cell_body.boundary_density);
         if strain < self.config.cell_body.lysis_strain {
             self.lysis_count += 1;
+            if self.cells[cell_id].last_digested_tick.is_some_and(|tick| {
+                self.tick_count.saturating_sub(tick) <= LYSIS_ATTRIBUTION_TICKS
+            }) {
+                self.interaction_counters.lyses_after_digestion += 1;
+            }
             self.kill_cell_and_release(cell_id);
         } else if strain >= self.config.cell_body.fission_strain {
             self.fission_cell(cell_id, local_enval);
         }
+    }
+
+    fn count_reaction_attempt(&mut self) {
+        self.operation_counters.metabolic_enzyme_attempts = self
+            .operation_counters
+            .metabolic_enzyme_attempts
+            .saturating_add(1);
+        self.reaction_counters.attempts = self.reaction_counters.attempts.saturating_add(1);
+    }
+
+    fn apply_reaction_outcome(
+        &mut self,
+        context: CellReactionContext,
+        catalyst_index: usize,
+        enzyme: &Enzyme,
+        site: ReactionSite,
+        outcome: &bio::FluxOutcome,
+        energy_before: f64,
+    ) {
+        let position = context.position;
+        let cell = self.cells.at_slot_mut(context.slot);
+        for element in ELEMENT_ORDER {
+            cell.internal_elements[element] += outcome.retained_products[element];
+            cell.body[element] += outcome.body_products[element];
+            cell.boundary[element] += outcome.boundary_products[element];
+        }
+        let energy_after = energy_before + outcome.energy_delta;
+        cell.energy = if energy_after < 0.0 && energy_after > -1.0e-9 {
+            0.0
+        } else {
+            energy_after
+        };
+        debug_assert!(cell.energy >= 0.0);
+        let energy_after = cell.energy;
+        if outcome.secreted_products != ElementAmounts::ZERO {
+            self.deposit_elements_at(position, outcome.secreted_products)
+                .expect("active cell position must support conservative element deposition");
+        }
+        if outcome.chemical_energy_delta >= 0.0 {
+            self.energy_ledger.chemical_harvest += outcome.chemical_energy_delta;
+        } else {
+            self.energy_ledger.chemical_cost -= outcome.chemical_energy_delta;
+        }
+        self.energy_ledger.enval_harvest += outcome.enval_energy;
+        self.energy_ledger.pump_cost += outcome.pump_cost;
+        self.energy_ledger.assembly_cost += outcome.assembly_cost;
+        if outcome.enval_input != 0.0 {
+            if let Ok(applied) = self.adjust_enval_at(position, -outcome.enval_input) {
+                self.enval_ledger.cell_uptake += applied;
+            }
+        }
+        if outcome.enval_output != 0.0 {
+            if let Ok(applied) = self.add_enval_around(position, outcome.enval_output) {
+                self.enval_ledger.cell_emission += applied;
+            }
+        }
+
+        self.operation_counters.reactions_succeeded = self
+            .operation_counters
+            .reactions_succeeded
+            .saturating_add(1);
+        self.reaction_counters.successes = self.reaction_counters.successes.saturating_add(1);
+        self.reaction_counters.energy_delta += outcome.energy_delta;
+        self.reaction_counters.enval_input += f64::from(outcome.enval_input);
+        self.reaction_counters.enval_output += f64::from(outcome.enval_output);
+        self.reaction_counters.executed_metabolic_flux += f64::from(outcome.executed_extent);
+        self.reaction_counters.secretion_flux += outcome.secreted_products.total();
+
+        if self.watched_cell_id == Some(context.cell_id) {
+            self.flux_log.push_flux_record(FluxRecord {
+                tick_count: self.tick_count,
+                sim_time_seconds: self.sim_time_seconds,
+                cell_id: context.cell_id.index(),
+                x: position.x,
+                y: position.y,
+                catalyst_index,
+                site,
+                reactants: *enzyme.reactants.as_array(),
+                products: *enzyme.products.as_array(),
+                requested_extent: outcome.requested_extent,
+                executed_extent: outcome.executed_extent,
+                element_deltas: outcome.element_deltas,
+                secreted_elements: *outcome.secreted_products.as_array(),
+                energy_before,
+                energy_after,
+                delta_cell_energy: outcome.energy_delta,
+                raw_chemical_energy: outcome.raw_chemical_energy,
+                enval_energy: outcome.enval_energy,
+                enval_input: outcome.enval_input,
+                enval_output: outcome.enval_output,
+                local_enval: context.local_enval,
+                optimal_enval: context.genome.optimal_enval,
+            });
+        }
+    }
+
+    fn collect_contacts(
+        &self,
+        cell_id: CellId,
+        position: Position,
+        radius: f32,
+        contacts: &mut Vec<Contact>,
+    ) -> f64 {
+        contacts.clear();
+        let gap = self.config.surface.contact_gap;
+        let (width, height) = (self.width as f32, self.height as f32);
+        let cells = &self.cells;
+        self.spatial_index.find_within(
+            position,
+            radius + self.max_cell_radius + gap,
+            |other_id, other_position| {
+                if other_id == cell_id {
+                    return false;
+                }
+                let other_radius = f64::from(cells[other_id].radius);
+                let delta = minimum_image_displacement(position, other_position, width, height);
+                let distance = f64::from(delta.x).hypot(f64::from(delta.y));
+                if distance <= f64::from(radius) + other_radius + f64::from(gap) {
+                    contacts.push(Contact {
+                        cell_id: other_id,
+                        distance,
+                        share: interaction::perimeter_share(
+                            f64::from(radius),
+                            other_radius,
+                            distance,
+                            f64::from(gap),
+                        ),
+                    });
+                }
+                false
+            },
+        );
+        contacts.sort_unstable_by_key(|contact| contact.cell_id.index());
+        interaction::normalize_shares(contacts)
+    }
+
+    fn step_surface_catalysis(&mut self, context: CellReactionContext, enzyme_count: usize) {
+        let cell = self.cells.at_slot(context.slot);
+        if !cell.genome.enzymes.iter().any(|enzyme| enzyme.exposure > 0.0) {
+            return;
+        }
+        let radius = cell.radius;
+        self.operation_counters.surface_contact_queries = self
+            .operation_counters
+            .surface_contact_queries
+            .saturating_add(1);
+        let mut contacts = std::mem::take(&mut self.contact_scratch);
+        let field_share =
+            self.collect_contacts(context.cell_id, context.position, radius, &mut contacts);
+        for catalyst_index in 0..enzyme_count {
+            let Some(enzyme) = self
+                .cells
+                .at_slot(context.slot)
+                .genome
+                .enzymes
+                .get(catalyst_index)
+                .copied()
+            else {
+                break;
+            };
+            if !(enzyme.exposure > 0.0) {
+                continue;
+            }
+            let exposure = f64::from(enzyme.exposure);
+            if field_share > 0.0 {
+                self.surface_reaction_on_field(
+                    context,
+                    catalyst_index,
+                    &enzyme,
+                    exposure * field_share,
+                );
+            }
+            for contact in &contacts {
+                if contact.share > 0.0 {
+                    self.surface_reaction_on_cell(
+                        context,
+                        catalyst_index,
+                        &enzyme,
+                        exposure * contact.share,
+                        contact.cell_id,
+                    );
+                }
+            }
+        }
+        self.contact_scratch = contacts;
+    }
+
+    fn surface_reaction_on_field(
+        &mut self,
+        context: CellReactionContext,
+        catalyst_index: usize,
+        enzyme: &Enzyme,
+        capacity_fraction: f64,
+    ) {
+        let Some(stencil) = BilinearStencil::new(context.position, self.width, self.height) else {
+            return;
+        };
+        let tile_indices = stencil
+            .samples
+            .map(|sample| self.index_xy(sample.x, sample.y));
+        let mut weighted = [[0.0_f64; 4]; ELEMENT_COUNT];
+        let mut pool = ElementAmounts::ZERO;
+        for element in ELEMENT_ORDER {
+            let mut total = 0.0_f64;
+            for (corner, sample) in stencil.samples.iter().enumerate() {
+                let amount = f64::from(sample.weight)
+                    * f64::from(self.element_fields[tile_indices[corner]][element]);
+                weighted[element.index()][corner] = amount;
+                total += amount;
+            }
+            pool[element] = total as f32;
+        }
+
+        self.count_reaction_attempt();
+        let env = ReactionEnv {
+            capacity_fraction,
+            pool_extent: Some(1.0),
+            ..ReactionEnv::internal(context.local_enval, context.cell_area, self.config.cell_body)
+        };
+        let energy_before = self.cells.at_slot(context.slot).energy;
+        let Some(outcome) = bio::compute_flux(
+            enzyme,
+            pool,
+            energy_before,
+            self.config.dt_seconds,
+            context.genome,
+            env,
+            &mut self.rng,
+        ) else {
+            self.reaction_counters.no_substrate =
+                self.reaction_counters.no_substrate.saturating_add(1);
+            return;
+        };
+
+        for element in ELEMENT_ORDER {
+            let consumed = f64::from(outcome.consumed[element]);
+            let shares = weighted[element.index()];
+            let total = shares.iter().sum::<f64>();
+            if consumed <= 0.0 || total <= 0.0 {
+                continue;
+            }
+            let last = (0..4)
+                .rev()
+                .find(|corner| shares[*corner] > 0.0)
+                .expect("a positive pool has a contributing tile");
+            let mut remaining = consumed;
+            for corner in 0..4 {
+                if shares[corner] <= 0.0 {
+                    continue;
+                }
+                let wanted = if corner == last {
+                    remaining
+                } else {
+                    consumed * shares[corner] / total
+                };
+                let tile = &mut self.element_fields[tile_indices[corner]][element];
+                let amount = (wanted as f32).min(*tile).max(0.0);
+                *tile -= amount;
+                remaining -= f64::from(amount);
+            }
+        }
+        self.interaction_counters.field_surface_extent += f64::from(outcome.executed_extent);
+        self.apply_reaction_outcome(
+            context,
+            catalyst_index,
+            enzyme,
+            ReactionSite::Field,
+            &outcome,
+            energy_before,
+        );
+    }
+
+    fn surface_reaction_on_cell(
+        &mut self,
+        context: CellReactionContext,
+        catalyst_index: usize,
+        enzyme: &Enzyme,
+        capacity_fraction: f64,
+        target: CellId,
+    ) {
+        let Some(target_slot) = self.cells.slot(target) else {
+            return;
+        };
+        debug_assert_ne!(target, context.cell_id);
+        let target_cell = self.cells.at_slot(target_slot);
+        let pool = target_cell.boundary;
+        let perimeter = std::f32::consts::TAU * target_cell.radius;
+
+        self.count_reaction_attempt();
+        let env = ReactionEnv {
+            capacity_fraction,
+            pool_extent: Some(perimeter),
+            ..ReactionEnv::internal(context.local_enval, context.cell_area, self.config.cell_body)
+        };
+        let energy_before = self.cells.at_slot(context.slot).energy;
+        let Some(outcome) = bio::compute_flux(
+            enzyme,
+            pool,
+            energy_before,
+            self.config.dt_seconds,
+            context.genome,
+            env,
+            &mut self.rng,
+        ) else {
+            self.reaction_counters.no_substrate =
+                self.reaction_counters.no_substrate.saturating_add(1);
+            return;
+        };
+
+        let tick_count = self.tick_count;
+        let target_cell = self.cells.at_slot_mut(target_slot);
+        let mut digested = 0.0_f64;
+        for element in ELEMENT_ORDER {
+            let before = target_cell.boundary[element];
+            let consumed = outcome.consumed[element];
+            debug_assert!(consumed <= before + 1.0e-5);
+            target_cell.boundary[element] = if consumed >= before {
+                0.0
+            } else {
+                before - consumed
+            };
+            digested += f64::from(consumed.min(before));
+        }
+        target_cell.last_digested_tick = Some(tick_count);
+        let target_lineage = target_cell.lineage_id;
+        self.interaction_counters.cell_surface_extent += f64::from(outcome.executed_extent);
+        self.interaction_counters.boundary_digested += digested;
+        if target_lineage != self.cells.at_slot(context.slot).lineage_id {
+            self.interaction_counters.cross_lineage_boundary_digested += digested;
+        }
+        self.apply_reaction_outcome(
+            context,
+            catalyst_index,
+            enzyme,
+            ReactionSite::Cell(target),
+            &outcome,
+            energy_before,
+        );
     }
 
     fn transport_elements(&mut self, slot: usize, position: Position) -> (f64, f64) {
@@ -2577,14 +2769,48 @@ impl World {
         pairs.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
     }
 
+    fn drift_cells(&mut self) {
+        let diffusivity = f64::from(self.config.cell_motion.diffusivity);
+        if !(diffusivity > 0.0) {
+            return;
+        }
+        let reference_radius = (f64::from(REFERENCE_CELL_AREA) / std::f64::consts::PI).sqrt();
+        let (width, height) = (self.width as f32, self.height as f32);
+        for slot in 0..self.cells.len() {
+            let cell = self.cells.at_slot(slot);
+            let (cell_id, position) = (cell.id, cell.position);
+            let cell_diffusivity = diffusivity * reference_radius / f64::from(cell.radius);
+            let sigma = (2.0 * cell_diffusivity * self.config.dt_seconds).sqrt();
+            let dx = self.rng.gaussian(0.0, 1.0) * sigma;
+            let dy = self.rng.gaussian(0.0, 1.0) * sigma;
+            let Some(moved) =
+                Position::new(position.x + dx as f32, position.y + dy as f32).wrapped(width, height)
+            else {
+                continue;
+            };
+            self.update_cell_position(cell_id, moved);
+        }
+    }
+
     fn resolve_overlaps(&mut self) {
         self.refresh_max_cell_radius();
+        self.contact_pair_count = 0;
+        self.cross_lineage_contact_pair_count = 0;
         if self.cells.len() < 2 {
             return;
         }
-        for _ in 0..OVERLAP_RELAXATION_PASSES {
+        for pass in 0..OVERLAP_RELAXATION_PASSES {
             let mut pairs = std::mem::take(&mut self.pair_scratch);
-            self.collect_contact_pairs(0.0, &mut pairs);
+            if pass == 0 {
+                self.collect_contact_pairs(self.config.surface.contact_gap, &mut pairs);
+                self.contact_pair_count = pairs.len() as u64;
+                self.cross_lineage_contact_pair_count = pairs
+                    .iter()
+                    .filter(|(a, b)| self.cells[*a].lineage_id != self.cells[*b].lineage_id)
+                    .count() as u64;
+            } else {
+                self.collect_contact_pairs(0.0, &mut pairs);
+            }
             self.operation_counters.spatial_candidate_checks = self
                 .operation_counters
                 .spatial_candidate_checks
@@ -2688,174 +2914,6 @@ impl World {
             }
         }
     }
-
-    fn resolve_predation(&mut self) {
-        if !self.config.predation_enabled || self.cells.len() < 2 {
-            return;
-        }
-
-        let mut pairs = std::mem::take(&mut self.pair_scratch);
-        self.collect_contact_pairs(PREDATION_CONTACT_GAP, &mut pairs);
-        self.operation_counters.spatial_candidate_checks = self
-            .operation_counters
-            .spatial_candidate_checks
-            .saturating_add(pairs.len() as u64);
-        self.operation_counters.predation_cells_considered = self
-            .operation_counters
-            .predation_cells_considered
-            .saturating_add(self.cells.len() as u64);
-        self.operation_counters.predation_candidate_pairs = self
-            .operation_counters
-            .predation_candidate_pairs
-            .saturating_add(pairs.len() as u64);
-        for &(cell_a, cell_b) in &pairs {
-            self.operation_counters.predation_pairs_checked = self
-                .operation_counters
-                .predation_pairs_checked
-                .saturating_add(1);
-            if !self.is_active_cross_lineage_pair(cell_a, cell_b) {
-                continue;
-            }
-            self.operation_counters.predation_cross_lineage_pairs = self
-                .operation_counters
-                .predation_cross_lineage_pairs
-                .saturating_add(1);
-            if self.cells[cell_a].combat_attack_total == 0
-                && self.cells[cell_b].combat_attack_total == 0
-            {
-                continue;
-            }
-            let Some(outcome) = self.resolve_predation_between_cells(cell_a, cell_b) else {
-                continue;
-            };
-            self.execute_predation_outcome(outcome);
-        }
-        self.pair_scratch = pairs;
-    }
-
-    fn is_active_cross_lineage_pair(&self, cell_a: CellId, cell_b: CellId) -> bool {
-        if cell_a == cell_b {
-            return false;
-        }
-        match (self.cells.get(cell_a), self.cells.get(cell_b)) {
-            (Some(a), Some(b)) => a.lineage_id != b.lineage_id,
-            _ => false,
-        }
-    }
-
-    fn resolve_predation_between_cells(
-        &self,
-        cell_a: CellId,
-        cell_b: CellId,
-    ) -> Option<PredationOutcome> {
-        if cell_a == cell_b {
-            return None;
-        }
-        let (a, b) = (self.cells.get(cell_a)?, self.cells.get(cell_b)?);
-        if a.lineage_id == b.lineage_id {
-            return None;
-        }
-
-        let a_attack = a.combat_attack_total;
-        let a_defense = a.combat_defense_total;
-        let b_attack = b.combat_attack_total;
-        let b_defense = b.combat_defense_total;
-        let a_can_kill = a_attack > 0 && a_attack > b_defense;
-        let b_can_kill = b_attack > 0 && b_attack > a_defense;
-        if !a_can_kill && !b_can_kill {
-            return None;
-        }
-
-        let a_margin = i64::from(a_attack) - i64::from(b_defense);
-        let b_margin = i64::from(b_attack) - i64::from(a_defense);
-        if a_can_kill && !b_can_kill {
-            return Some(PredationOutcome {
-                winner: cell_a,
-                loser: cell_b,
-            });
-        }
-        if b_can_kill && !a_can_kill {
-            return Some(PredationOutcome {
-                winner: cell_b,
-                loser: cell_a,
-            });
-        }
-        if a_margin == b_margin {
-            return None;
-        }
-        if a_margin > b_margin {
-            Some(PredationOutcome {
-                winner: cell_a,
-                loser: cell_b,
-            })
-        } else {
-            Some(PredationOutcome {
-                winner: cell_b,
-                loser: cell_a,
-            })
-        }
-    }
-
-    fn execute_predation_outcome(&mut self, outcome: PredationOutcome) {
-        let predator_id = outcome.winner;
-        let prey_id = outcome.loser;
-        if predator_id == prey_id
-            || !self.cells.contains(predator_id)
-            || !self.cells.contains(prey_id)
-        {
-            return;
-        }
-
-        self.enzyme_scratch.clear();
-        self.enzyme_scratch
-            .extend_from_slice(&self.cells[prey_id].genome.enzymes);
-        let transfer_stats = {
-            let predator = &mut self.cells[predator_id];
-            let transfer_stats = predator
-                .genome
-                .absorb_predation_enzymes(&self.enzyme_scratch, &mut self.rng);
-            predator.refresh_combat_totals();
-            if let Err(error) = predator.genome.validate() {
-                panic!("predation enzyme transfer produced an invalid genome: {error}");
-            }
-            transfer_stats
-        };
-
-        let prey = self.remove_live_cell(prey_id);
-        let mut structure = prey.body;
-        for element in ELEMENT_ORDER {
-            structure[element] += prey.boundary[element];
-        }
-        self.deposit_elements_at(prey.position, structure)
-            .expect("valid prey position");
-        let absorbed_energy = prey.energy.max(0.0);
-        if absorbed_energy > 0.0 {
-            self.cells[predator_id].energy += absorbed_energy;
-            self.energy_ledger.predation_transfer += absorbed_energy;
-        }
-        for element in ELEMENT_ORDER {
-            self.cells[predator_id].internal_elements[element] += prey.internal_elements[element];
-        }
-        self.record_lineage_death(prey.lineage_id);
-        self.death_count = self.death_count.saturating_add(1);
-        self.operation_counters.cell_deaths = self.operation_counters.cell_deaths.saturating_add(1);
-
-        self.predation_event_count = self.predation_event_count.saturating_add(1);
-        self.cells_consumed_count = self.cells_consumed_count.saturating_add(1);
-        self.operation_counters.predation_events =
-            self.operation_counters.predation_events.saturating_add(1);
-        self.operation_counters.predation_cells_consumed = self
-            .operation_counters
-            .predation_cells_consumed
-            .saturating_add(1);
-        self.predator_energy_gained += absorbed_energy;
-        self.predation_enzyme_transfer_count = self
-            .predation_enzyme_transfer_count
-            .saturating_add((transfer_stats.added + transfer_stats.replacements) as u64);
-        self.predation_enzyme_replacement_count = self
-            .predation_enzyme_replacement_count
-            .saturating_add(transfer_stats.replacements as u64);
-    }
 }
 
 fn inspect_genome(genome: &Genome) -> GenomeDetailInspection {
@@ -2880,9 +2938,6 @@ fn inspect_genome(genome: &Genome) -> GenomeDetailInspection {
 fn inspect_enzyme(index: usize, enzyme: &Enzyme) -> EnzymeDetailInspection {
     EnzymeDetailInspection {
         index,
-        enzyme_type: enzyme.enzyme_type.as_str(),
-        is_metabolic: enzyme.enzyme_type.is_metabolic(),
-        is_combat: enzyme.enzyme_type.is_combat(),
         reactants: *enzyme.reactants.as_array(),
         products: *enzyme.products.as_array(),
         rate: enzyme.rate,
@@ -2896,7 +2951,7 @@ fn inspect_enzyme(index: usize, enzyme: &Enzyme) -> EnzymeDetailInspection {
         enval_energy_fraction: enzyme.enval_energy_fraction,
         enval_release_fraction: enzyme.enval_release_fraction,
         enval_pump: enzyme.enval_pump,
-        combat_level: enzyme.combat_level,
+        exposure: enzyme.exposure,
     }
 }
 
@@ -3020,7 +3075,6 @@ pub enum InvariantError {
     },
     InvalidGenomeEnzymeCount(CellId),
     InvalidCatalyst(CellId),
-    CombatTotalsMismatch(CellId),
     CellElementReservoirMismatch {
         cell: CellId,
         element: Element,
@@ -3030,7 +3084,6 @@ pub enum InvariantError {
         expected: u64,
         actual: u64,
     },
-    NonFinitePredationEnergy,
     InvalidEnergyLedgerTerm {
         term: &'static str,
         value: f64,
@@ -3102,11 +3155,6 @@ impl fmt::Display for InvariantError {
                     cell.index()
                 )
             }
-            Self::CombatTotalsMismatch(cell) => write!(
-                f,
-                "cell {} cached combat totals do not match its genome",
-                cell.index()
-            ),
             Self::CellElementReservoirMismatch { cell, element } => write!(
                 f,
                 "cell {} has an invalid continuous {} reservoir",
@@ -3124,9 +3172,6 @@ impl fmt::Display for InvariantError {
                 expected,
                 actual
             ),
-            Self::NonFinitePredationEnergy => {
-                f.write_str("predation energy-gained counter is non-finite")
-            }
             Self::InvalidEnergyLedgerTerm { term, value } => write!(
                 f,
                 "energy ledger term {term} must be finite and nonnegative, got {value}"
@@ -3183,39 +3228,17 @@ mod tests {
         config
     }
 
-    fn combat_genome(
-        world: &mut World,
-        lineage: u64,
-        attack: u32,
-        defense: u32,
-        energy: f64,
-    ) -> Genome {
-        let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.lineage_id = LineageId(lineage);
-        world.config.founder_energy = energy;
-        genome.enzymes.clear();
-        if attack > 0 {
-            genome.enzymes.push(Enzyme::attackase(attack));
-        }
-        if defense > 0 {
-            genome.enzymes.push(Enzyme::defensase(defense));
-        }
-        if genome.enzymes.is_empty() {
-            genome.enzymes.push(Enzyme::founder_downhill());
-        }
-        genome
+    const INERT_OPTIMAL_ENVAL: f32 = 50.0;
+
+    fn inert_enzyme() -> Enzyme {
+        let mut enzyme = Enzyme::founder_downhill();
+        enzyme.enval_sigma = 1.0e-4;
+        enzyme
     }
 
-    fn spawn_combat_cell(
-        world: &mut World,
-        tile: TileId,
-        lineage: u64,
-        attack: u32,
-        defense: u32,
-        energy: f64,
-    ) -> crate::cell::CellId {
-        let genome = combat_genome(world, lineage, attack, defense, energy);
-        world.spawn_cell_with_genome_at(tile, genome).unwrap()
+    fn make_inert(genome: &mut Genome) {
+        genome.enzymes = vec![inert_enzyme()];
+        genome.optimal_enval = INERT_OPTIMAL_ENVAL;
     }
 
     fn assert_valid_reservoir(world: &World, cell_id: crate::cell::CellId) {
@@ -3323,7 +3346,7 @@ mod tests {
             cell.refresh_radius(world.config.cell_body.body_density);
         }
         world.rebuild_derived_caches();
-        for gap in [0.0, super::PREDATION_CONTACT_GAP] {
+        for gap in [0.0, 0.1, 0.5] {
             let mut actual = Vec::new();
             world.collect_contact_pairs(gap, &mut actual);
             let mut expected = Vec::new();
@@ -3369,38 +3392,6 @@ mod tests {
                 assert_eq!(world.position_is_clear(position, radius, None), clear);
             }
         }
-    }
-
-    #[test]
-    fn large_predator_uses_surface_contact_and_releases_prey_structure() {
-        let mut world = World::new(small_config("large-predation", 16, 12)).unwrap();
-        let a = world.tile_id(2, 3).unwrap();
-        let b = world.tile_id(5, 3).unwrap();
-        let predator = spawn_combat_cell(&mut world, a, 1, 50, 0, 2.0);
-        let prey = spawn_combat_cell(&mut world, b, 2, 0, 1, 2.0);
-        for element in ELEMENT_ORDER {
-            world.cells[predator].body[element] *= 25.0;
-        }
-        world.cells[predator].refresh_radius(world.config.cell_body.body_density);
-        world.refresh_max_cell_radius();
-        let structure = world.cells[prey].clone();
-        let before = world.element_field_totals();
-        let body_before = world.cells[predator].body;
-        world.resolve_predation();
-        assert!(world.cell(prey).is_none());
-        assert_eq!(world.cells[predator].body, body_before);
-        assert_eq!(world.cells[predator].energy, 4.0);
-        for element in ELEMENT_ORDER {
-            assert!(
-                (world.element_field_totals()[element.index()]
-                    - before[element.index()]
-                    - f64::from(structure.body[element])
-                    - f64::from(structure.boundary[element]))
-                .abs()
-                    < 1.0e-5
-            );
-        }
-        world.check_invariants().unwrap();
     }
 
     #[test]
@@ -3553,7 +3544,7 @@ mod tests {
         config.catalyst_upkeep_per_sec = 0.0;
         let mut world = World::new(config).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, 0.0);
-        genome.enzymes = vec![Enzyme::defensase(1)];
+        make_inert(&mut genome);
         genome.maintenance_cost_per_area = 0.0;
         let id = world
             .spawn_cell_with_genome_at_position(Position::new(2.5, 3.5), genome)
@@ -3600,10 +3591,8 @@ mod tests {
         world.spawn_founder_cells(8).unwrap();
         for cell in world.cells.iter_mut() {
             for enzyme in &mut cell.genome.enzymes {
-                if enzyme.enzyme_type.is_metabolic() {
-                    enzyme.body_fraction = 0.2;
-                    enzyme.boundary_fraction = 0.2;
-                }
+                enzyme.body_fraction = 0.2;
+                enzyme.boundary_fraction = 0.2;
             }
         }
         for _ in 0..2_000 {
@@ -4308,7 +4297,7 @@ mod tests {
         let mut world = World::new(only_a_config("maintenance-death", 4, 4)).unwrap();
         let tile = world.tile_id(1, 1).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.enzymes = vec![Enzyme::defensase(1)];
+        make_inert(&mut genome);
         world.config.founder_energy = 0.001;
         genome.maintenance_cost_per_area = 10.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
@@ -4350,7 +4339,7 @@ mod tests {
         let mut world = World::new(only_a_config("energy-only-death-exhaustion", 4, 4)).unwrap();
         let tile = world.tile_id(1, 1).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.enzymes = vec![Enzyme::defensase(1)];
+        make_inert(&mut genome);
         world.config.founder_energy = 0.0105;
         genome.maintenance_cost_per_area = 0.5 / f64::from(crate::spatial::REFERENCE_CELL_AREA);
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
@@ -4533,7 +4522,7 @@ mod tests {
         assert_eq!(record.x, 1.0);
         assert_eq!(record.y, 1.0);
         assert_eq!(record.catalyst_index, 0);
-        assert_eq!(record.catalyst_type, crate::genome::EnzymeType::Metabolic);
+        assert_eq!(record.site, crate::cell::ReactionSite::Internal);
         assert!(record.executed_extent > 0.0);
         assert!(record.secreted_elements[Element::A.index()] > 0.0);
         assert!(record.energy_after > record.energy_before);
@@ -4615,8 +4604,7 @@ mod tests {
                     index: None,
                     fields: None,
                     enzyme: Some(EnzymeFieldPatch {
-                        enzyme_type: Some("attackase".to_owned()),
-                        combat_level: Some(123),
+                        rate: Some(0.77),
                         ..EnzymeFieldPatch::default()
                     }),
                 },
@@ -4638,7 +4626,7 @@ mod tests {
         assert_eq!(cell.energy, energy_before);
         assert_eq!(cell.lineage_id, lineage_before);
         assert_eq!(cell.genome.lineage_id, lineage_before);
-        assert_eq!(cell.combat_attack_total, 123);
+        assert_eq!(cell.genome.enzymes.last().unwrap().rate, 0.77);
         assert!(cell.genome.enzymes.len() >= 2);
         world.check_invariants().unwrap();
     }
@@ -4692,7 +4680,7 @@ mod tests {
             world.cells[cell_id]
                 .genome
                 .enzymes
-                .push(Enzyme::defensase(1));
+                .push(Enzyme::founder_downhill());
         }
         let append_patch = GenomePatch {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
@@ -4702,8 +4690,7 @@ mod tests {
                 index: None,
                 fields: None,
                 enzyme: Some(EnzymeFieldPatch {
-                    enzyme_type: Some("defensase".to_owned()),
-                    combat_level: Some(1),
+                    rate: Some(0.5),
                     ..EnzymeFieldPatch::default()
                 }),
             }],
@@ -4821,226 +4808,9 @@ mod tests {
     }
 
     #[test]
-    fn predation_without_attack_does_nothing() {
-        let mut world = World::new(only_a_config("predation-no-attack", 4, 4)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 0).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 0, 0, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 2, 0, 0, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_some());
-        assert_eq!(world.stats().predation_events, 0);
-    }
-
-    #[test]
-    fn predation_requires_attack_to_exceed_defense() {
-        let mut world = World::new(only_a_config("predation-threshold", 4, 4)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 0).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 5, 0, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 2, 0, 5, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_some());
-        assert_eq!(world.stats().predation_events, 0);
-    }
-
-    #[test]
-    fn one_sided_predation_wins_and_assimilates_energy_and_elements() {
-        let mut world = World::new(only_a_config("predation-assimilate", 4, 4)).unwrap();
-        let predator_tile = world.tile_id(0, 0).unwrap();
-        let prey_tile = world.tile_id(1, 0).unwrap();
-        let predator = spawn_combat_cell(&mut world, predator_tile, 1, 20, 0, 1.0);
-        let prey = spawn_combat_cell(&mut world, prey_tile, 2, 0, 1, 3.0);
-        world.cells[prey].internal_elements[Element::B] = 1.0;
-        world.resolve_predation();
-
-        assert!(world.cell(predator).is_some());
-        assert!(world.cell(prey).is_none());
-        assert!(world.cells[predator].energy >= 4.0);
-        assert!(world.cells[predator].internal_elements[Element::B] >= 1.0);
-        assert_eq!(world.stats().predation_events, 1);
-        assert_eq!(world.stats().cells_consumed, 1);
-        assert_eq!(world.stats().deaths, 1);
-        assert_valid_reservoir(&world, predator);
-        assert_valid_reservoir(&world, prey);
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn stats_count_only_extant_lineages_after_predation() {
-        let mut world = World::new(only_a_config("lineage-extant-count", 4, 4)).unwrap();
-        let predator_tile = world.tile_id(0, 0).unwrap();
-        let prey_tile = world.tile_id(1, 0).unwrap();
-        let predator = spawn_combat_cell(&mut world, predator_tile, 1, 20, 0, 1.0);
-        let prey = spawn_combat_cell(&mut world, prey_tile, 2, 0, 1, 1.0);
-
-        assert_eq!(world.stats().lineage_count, 2);
-        assert_eq!(world.lineage_counters().len(), 2);
-
-        world.resolve_predation();
-
-        assert!(world.cell(predator).is_some());
-        assert!(world.cell(prey).is_none());
-        assert_eq!(world.stats().lineage_count, 1);
-        assert_eq!(
-            world
-                .lineage_counters()
-                .get(&LineageId(2))
-                .unwrap()
-                .population,
-            0
-        );
-        assert!(
-            !world
-                .top_lineages(10)
-                .iter()
-                .any(|(lineage, _)| *lineage == LineageId(2))
-        );
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn mutual_predation_larger_margin_wins_and_equal_margin_does_not() {
-        let mut world = World::new(only_a_config("predation-margin", 4, 4)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 0).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 30, 20, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 2, 25, 5, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_none());
-
-        let mut world = World::new(only_a_config("predation-margin-equal", 4, 4)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 0).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 20, 5, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 2, 20, 5, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_some());
-        assert_eq!(world.stats().predation_events, 0);
-    }
-
-    #[test]
-    fn same_lineage_and_non_neighbors_do_not_predate() {
-        let mut world = World::new(only_a_config("predation-same-lineage", 5, 5)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 0).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 50, 0, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 1, 0, 1, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_some());
-
-        let mut world = World::new(only_a_config("predation-nonneighbor", 5, 5)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(2, 2).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 50, 0, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 2, 0, 1, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_some());
-    }
-
-    #[test]
-    fn predation_obeys_the_specified_surface_gap_at_the_old_diagonal_limit() {
-        let mut world = World::new(only_a_config("predation-diagonal", 4, 4)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 1).unwrap();
-        let predator = spawn_combat_cell(&mut world, a_tile, 1, 50, 0, 1.0);
-        let prey = spawn_combat_cell(&mut world, b_tile, 2, 0, 1, 1.0);
-        world.resolve_predation();
-        assert!(world.cell(predator).is_some());
-        assert!(world.cell(prey).is_some());
-        world.update_cell_position(prey, Position::new(0.999, 0.999));
-        world.resolve_predation();
-        assert!(world.cell(prey).is_none());
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn occupied_neighbor_predation_checks_only_occupied_pairs_in_sparse_world() {
-        let mut world = World::new(only_a_config("predation-occupied-scan", 10, 10)).unwrap();
-        let predator_tile = world.tile_id(0, 0).unwrap();
-        let prey_tile = world.tile_id(1, 0).unwrap();
-        let predator = spawn_combat_cell(&mut world, predator_tile, 1, 50, 0, 1.0);
-        let prey = spawn_combat_cell(&mut world, prey_tile, 2, 0, 1, 1.0);
-
-        world.resolve_predation();
-        let counters = world.operation_counters();
-        assert!(world.cell(predator).is_some());
-        assert!(world.cell(prey).is_none());
-        assert_eq!(counters.predation_cells_considered, 2);
-        assert_eq!(counters.predation_candidate_pairs, 1);
-        assert_eq!(counters.predation_pairs_checked, 1);
-        assert_eq!(counters.predation_cross_lineage_pairs, 1);
-        assert_eq!(counters.predation_events, 1);
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn same_lineage_predation_pair_is_checked_but_not_cross_lineage() {
-        let mut world = World::new(only_a_config("predation-same-lineage-counters", 5, 5)).unwrap();
-        let a_tile = world.tile_id(0, 0).unwrap();
-        let b_tile = world.tile_id(1, 0).unwrap();
-        let a = spawn_combat_cell(&mut world, a_tile, 1, 50, 0, 1.0);
-        let b = spawn_combat_cell(&mut world, b_tile, 1, 0, 1, 1.0);
-
-        world.resolve_predation();
-        let counters = world.operation_counters();
-        assert!(world.cell(a).is_some());
-        assert!(world.cell(b).is_some());
-        assert_eq!(counters.predation_pairs_checked, 1);
-        assert_eq!(counters.predation_cross_lineage_pairs, 0);
-        assert_eq!(counters.predation_events, 0);
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn tiny_toroidal_world_predation_does_not_double_count_wrapped_pairs() {
-        let mut world = World::new(only_a_config("predation-tiny-dedupe", 1, 2)).unwrap();
-        let predator_tile = world.tile_id(0, 0).unwrap();
-        let prey_tile = world.tile_id(0, 1).unwrap();
-        let predator = spawn_combat_cell(&mut world, predator_tile, 1, 50, 0, 1.0);
-        let prey = spawn_combat_cell(&mut world, prey_tile, 2, 0, 1, 1.0);
-
-        world.resolve_predation();
-        let counters = world.operation_counters();
-        assert!(world.cell(predator).is_some());
-        assert!(world.cell(prey).is_none());
-        assert_eq!(counters.predation_candidate_pairs, 1);
-        assert_eq!(counters.predation_pairs_checked, 1);
-        assert_eq!(counters.predation_cross_lineage_pairs, 1);
-        assert_eq!(counters.predation_events, 1);
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn transferred_attackase_refreshes_combat_totals() {
-        let mut world = World::new(only_a_config("predation-transfer-combat", 4, 4)).unwrap();
-        let predator_tile = world.tile_id(0, 0).unwrap();
-        let prey_tile = world.tile_id(1, 0).unwrap();
-        let predator = spawn_combat_cell(&mut world, predator_tile, 1, 200, 200, 1.0);
-        let mut prey_genome = combat_genome(&mut world, 2, 0, 1, 1.0);
-        prey_genome.enzymes.push(Enzyme::attackase(99));
-        let prey = world
-            .spawn_cell_with_genome_at(prey_tile, prey_genome)
-            .unwrap();
-        world.resolve_predation();
-        assert!(world.cell(prey).is_none());
-        assert_eq!(
-            world.cells[predator].combat_attack_total,
-            world.cells[predator].genome.attack_total()
-        );
-        world.check_invariants().unwrap();
-    }
-
-    #[test]
-    fn deterministic_predation_runs_match() {
+    fn deterministic_runs_produce_identical_stats() {
         fn run_once() -> crate::stats::WorldStats {
-            let mut world = World::new(small_config("predation-golden", 16, 12)).unwrap();
+            let mut world = World::new(small_config("stats-golden", 16, 12)).unwrap();
             world.spawn_founder_cells(8).unwrap();
             for _ in 0..80 {
                 world.step();
@@ -5288,7 +5058,7 @@ mod tests {
             stats.live_cell_count as u64
         );
         assert_eq!(
-            stats.enzyme_type_totals.total(),
+            stats.total_enzyme_count,
             live_ids(&world)
                 .iter()
                 .map(|cell_id| world.cells[*cell_id].genome.enzymes.len() as u64)
@@ -5413,10 +5183,9 @@ mod tests {
     fn newborns_do_not_receive_a_cell_step_during_their_birth_phase() {
         let mut world = World::new(only_a_config("newborn-waits", 8, 8)).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.enzymes = vec![Enzyme::defensase(1)];
+        make_inert(&mut genome);
         world.config.founder_energy = 10.0;
         genome.maintenance_cost_per_area = 0.0;
-        genome.optimal_enval = world.avg_enval;
         let parent = world
             .spawn_cell_with_genome_at_position(Position::new(4.0, 4.0), genome)
             .unwrap();
@@ -5445,10 +5214,9 @@ mod tests {
             Position::new(3.0, 3.0),
         ] {
             let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-            genome.enzymes = vec![Enzyme::defensase(1)];
+            make_inert(&mut genome);
             world.config.founder_energy = 10.0;
             genome.maintenance_cost_per_area = 0.0;
-            genome.optimal_enval = world.avg_enval;
             world
                 .spawn_cell_with_genome_at_position(position, genome)
                 .unwrap();
@@ -5551,56 +5319,26 @@ mod tests {
     }
 
     #[test]
-    fn continuous_predation_honors_range_outside_and_toroidal_seam() {
-        let make_pair = |seed: &str, prey_position: Position| {
-            let mut world = World::new(only_a_config(seed, 10, 8)).unwrap();
-            let predator_genome = combat_genome(&mut world, 1, 10, 0, 5.0);
-            let prey_genome = combat_genome(&mut world, 2, 0, 0, 5.0);
-            let predator = world
-                .spawn_cell_with_genome_at_position(Position::new(0.2, 2.0), predator_genome)
-                .unwrap();
-            let prey = world
-                .spawn_cell_with_genome_at_position(prey_position, prey_genome)
-                .unwrap();
-            (world, predator, prey)
-        };
-        let (mut inside, _, inside_prey) = make_pair("predation-inside", Position::new(1.60, 2.0));
-        inside.resolve_predation();
-        assert!(inside.cell(inside_prey).is_none());
-        let (mut outside, _, outside_prey) =
-            make_pair("predation-outside", Position::new(1.63, 2.0));
-        outside.resolve_predation();
-        assert!(outside.cell(outside_prey).is_some());
-        let (mut seam, _, seam_prey) = make_pair("predation-seam", Position::new(9.0, 2.0));
-        seam.resolve_predation();
-        assert!(seam.cell(seam_prey).is_none());
-    }
-
-    #[test]
-    fn energy_ledger_closes_over_long_runs_with_and_without_predation() {
-        for predation_enabled in [true, false] {
-            let mut config = small_config("energy-ledger-closure", 32, 24);
-            config.predation_enabled = predation_enabled;
-            let mut world = World::new(config).unwrap();
-            world.spawn_founder_cells(12).unwrap();
-            world.set_all_live_cell_energy(4.0).unwrap();
-            world.set_all_live_cell_energy(3.0).unwrap();
-            for tick in 1..=2_400 {
-                world.step();
-                if tick % 200 == 0 {
-                    world.check_invariants().unwrap();
-                }
+    fn energy_ledger_closes_over_long_runs() {
+        let mut world = World::new(small_config("energy-ledger-closure", 32, 24)).unwrap();
+        world.spawn_founder_cells(12).unwrap();
+        world.set_all_live_cell_energy(4.0).unwrap();
+        world.set_all_live_cell_energy(3.0).unwrap();
+        for tick in 1..=2_400 {
+            world.step();
+            if tick % 200 == 0 {
+                world.check_invariants().unwrap();
             }
-            world.check_invariants().unwrap();
-            let ledger = world.energy_ledger();
-            assert!(world.energy_ledger_residual().abs() <= ledger.closure_tolerance());
-            assert!(ledger.founder_energy > 0.0);
-            assert!(ledger.injected_energy > 0.0);
-            assert!(ledger.extracted_energy > 0.0);
-            assert!(ledger.chemical_harvest > 0.0);
-            assert!(ledger.maintenance > 0.0);
-            assert_eq!(world.stats().energy_ledger, ledger);
         }
+        world.check_invariants().unwrap();
+        let ledger = world.energy_ledger();
+        assert!(world.energy_ledger_residual().abs() <= ledger.closure_tolerance());
+        assert!(ledger.founder_energy > 0.0);
+        assert!(ledger.injected_energy > 0.0);
+        assert!(ledger.extracted_energy > 0.0);
+        assert!(ledger.chemical_harvest > 0.0);
+        assert!(ledger.maintenance > 0.0);
+        assert_eq!(world.stats().energy_ledger, ledger);
     }
 
     #[test]
@@ -5676,7 +5414,6 @@ mod tests {
     fn paid_pumping_prevents_perpetual_motion_between_opposite_polarity_cells() {
         let mut config = closed_config("pump-no-perpetual-motion", 8, 8);
         config.catalyst_upkeep_per_sec = 0.0;
-        config.predation_enabled = false;
         config.element_fields.initial_amounts = ElementAmounts::new([0.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
         let mut world = World::new(config).unwrap();
         let positive = pump_engine_genome(&mut world, 1, 0.3);
@@ -5855,8 +5592,8 @@ mod tests {
             stepped.step();
             manual.diffuse_element_fields();
             manual.step_cells();
+            manual.drift_cells();
             manual.resolve_overlaps();
-            manual.resolve_predation();
             manual.diffuse_enval();
             manual.relax_enval_sources();
             manual.refresh_enval_sum();
@@ -5920,6 +5657,7 @@ mod tests {
             let mut world = World::new(closed_config("catalyst-upkeep", 6, 6)).unwrap();
             let mut genome = Genome::random_founder(&mut world.rng, 0.0);
             genome.enzymes = enzymes;
+            genome.optimal_enval = INERT_OPTIMAL_ENVAL;
             world.config.founder_energy = 10.0;
             genome.maintenance_cost_per_area = 0.05;
             let cell_id = world
@@ -5939,17 +5677,12 @@ mod tests {
             paid
         };
         let dt = Config::default().dt_seconds;
-        let one = drain_with(vec![Enzyme::defensase(5)]);
+        let one = drain_with(vec![inert_enzyme()]);
         assert!(
             (one - (0.05 * f64::from(crate::spatial::REFERENCE_CELL_AREA) + 0.01) * dt).abs()
                 <= 1.0e-10
         );
-        let four = drain_with(vec![
-            Enzyme::defensase(5),
-            Enzyme::attackase(5),
-            Enzyme::defensase(7),
-            Enzyme::attackase(9),
-        ]);
+        let four = drain_with(vec![inert_enzyme(); 4]);
         assert!(
             (four - (0.05 * f64::from(crate::spatial::REFERENCE_CELL_AREA) + 0.04) * dt).abs()
                 <= 1.0e-10
@@ -6077,6 +5810,695 @@ mod tests {
         assert!(churned.cells.issued_ids() >= 20_100);
     }
 
+    fn surface_enzyme(reactants: [f32; 6], products: [f32; 6], rate: f32, exposure: f32) -> Enzyme {
+        let mut enzyme = Enzyme::metabolic(
+            ElementAmounts::new(reactants),
+            ElementAmounts::new(products),
+            rate,
+            0.5,
+            0.0,
+        );
+        enzyme.enval_sigma = 1000.0;
+        enzyme.enval_throughput = 0.0;
+        enzyme.enval_pump = 0.0;
+        enzyme.exposure = exposure;
+        enzyme
+    }
+
+    const E_ONLY: [f32; 6] = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    const A_ONLY: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+    fn spawn_with(
+        world: &mut World,
+        position: Position,
+        lineage: u64,
+        enzymes: Vec<Enzyme>,
+    ) -> crate::cell::CellId {
+        let mut genome = Genome::random_founder(&mut world.rng, 0.0);
+        genome.enzymes = enzymes;
+        genome.lineage_id = LineageId(lineage);
+        genome.maintenance_cost_per_area = 0.0;
+        world
+            .spawn_cell_with_genome_at_position(position, genome)
+            .unwrap()
+    }
+
+    fn reaction_context(world: &World, cell_id: crate::cell::CellId) -> super::CellReactionContext {
+        let slot = world.cells.slot(cell_id).unwrap();
+        let cell = world.cells.at_slot(slot);
+        super::CellReactionContext {
+            cell_id,
+            slot,
+            position: cell.position,
+            local_enval: world
+                .local_enval_average_at(cell.position, super::LOCAL_ENVAL_RADIUS)
+                .unwrap(),
+            cell_area: std::f32::consts::PI * cell.radius * cell.radius,
+            genome: crate::bio::GenomeReactionContext::from(&cell.genome),
+        }
+    }
+
+    fn contacts_of(world: &World, cell_id: crate::cell::CellId) -> (Vec<super::Contact>, f64) {
+        let cell = &world.cells[cell_id];
+        let mut contacts = Vec::new();
+        let field = world.collect_contacts(cell_id, cell.position, cell.radius, &mut contacts);
+        (contacts, field)
+    }
+
+    fn strain_of(world: &World, cell_id: crate::cell::CellId) -> f64 {
+        world.cells[cell_id].strain(world.config.cell_body.boundary_density)
+    }
+
+    #[test]
+    fn exposed_enzyme_digests_a_matching_neighbour_boundary_until_it_lyses() {
+        let mut config = only_a_config("surface-digestion", 8, 8);
+        config.catalyst_upkeep_per_sec = 0.0;
+        config.founder_energy = 50.0;
+        let mut world = World::new(config).unwrap();
+        let digester = spawn_with(
+            &mut world,
+            Position::new(3.0, 4.0),
+            1,
+            vec![surface_enzyme(E_ONLY, A_ONLY, 2.0, 1.0)],
+        );
+        let prey = spawn_with(&mut world, Position::new(3.9, 4.0), 2, vec![inert_enzyme()]);
+        world.cells[prey].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
+        let boundary = world.cells[prey].boundary.total() as f32;
+        world.cells[prey].boundary = ElementAmounts::new([0.0, 0.0, 0.0, 0.0, boundary * 0.8, 0.0]);
+        let digester_boundary = world.cells[digester].boundary;
+        let initial_total = world.stats().total_element_amount;
+        world.inspect_cell_fluxes(digester, 64).unwrap();
+
+        let mut previous = strain_of(&world, prey);
+        assert!(previous > world.config.cell_body.lysis_strain);
+        let mut lysed = false;
+        for _ in 0..2_000 {
+            world.step_cell(digester);
+            let Some(_) = world.cell(prey) else { break };
+            let strain = strain_of(&world, prey);
+            assert!(strain <= previous);
+            previous = strain;
+            world.step_cell(prey);
+            world.advance_time();
+            world.check_invariants().unwrap();
+            if world.cell(prey).is_none() {
+                lysed = true;
+                break;
+            }
+        }
+
+        assert!(lysed, "prey never lysed; strain {previous}");
+        assert!(previous < world.config.cell_body.lysis_strain);
+        assert_eq!(world.lysis_count, 1);
+        assert_eq!(world.energy_death_count, 0);
+        let counters = world.interaction_counters();
+        assert_eq!(counters.lyses_after_digestion, 1);
+        assert!(counters.boundary_digested > 0.0);
+        assert_eq!(counters.cross_lineage_boundary_digested, counters.boundary_digested);
+        assert!(counters.cell_surface_extent > 0.0);
+        assert_eq!(world.cells[digester].boundary, digester_boundary);
+        assert!(
+            world
+                .flux_log
+                .fluxes_newest_first()
+                .any(|record| record.site == crate::cell::ReactionSite::Cell(prey))
+        );
+        let total = world.stats().total_element_amount;
+        assert!((total - initial_total).abs() <= 1.0e-5 * initial_total);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn lyses_count_as_digestion_only_within_the_attribution_window() {
+        for (since, attributed) in [(None, 0), (Some(100), 1), (Some(101), 0)] {
+            let mut config = only_a_config("lysis-attribution", 8, 8);
+            config.catalyst_upkeep_per_sec = 0.0;
+            let mut world = World::new(config).unwrap();
+            for _ in 0..200 {
+                world.advance_time();
+            }
+            let id = spawn_with(&mut world, Position::new(2.5, 3.5), 1, vec![inert_enzyme()]);
+            world.cells[id].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
+            for element in ELEMENT_ORDER {
+                world.cells[id].boundary[element] *= 0.6;
+            }
+            world.cells[id].last_digested_tick = since.map(|ago| world.tick_count - ago);
+            world.step_cell(id);
+            assert_eq!(world.lysis_count, 1);
+            assert_eq!(
+                world.interaction_counters().lyses_after_digestion,
+                attributed,
+                "{since:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn surface_catalysts_never_digest_their_own_boundary() {
+        let mut config = only_a_config("surface-self", 8, 8);
+        config.catalyst_upkeep_per_sec = 0.0;
+        config.founder_energy = 50.0;
+        let mut world = World::new(config).unwrap();
+        let cell = spawn_with(
+            &mut world,
+            Position::new(3.0, 4.0),
+            1,
+            vec![surface_enzyme(E_ONLY, A_ONLY, 5.0, 1.0)],
+        );
+        let neighbour = spawn_with(&mut world, Position::new(3.9, 4.0), 1, vec![inert_enzyme()]);
+        world.cells[neighbour].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
+        let total = world.cells[cell].boundary.total() as f32;
+        world.cells[cell].boundary = ElementAmounts::new([0.0, 0.0, 0.0, 0.0, total, 0.0]);
+        let own_boundary = world.cells[cell].boundary;
+        let neighbour_boundary = world.cells[neighbour].boundary;
+        let (contacts, _) = contacts_of(&world, cell);
+        assert_eq!(contacts.len(), 1);
+        assert!(contacts.iter().all(|contact| contact.cell_id != cell));
+        world.inspect_cell_fluxes(cell, 64).unwrap();
+
+        for _ in 0..500 {
+            world.step_cell(cell);
+            world.advance_time();
+        }
+
+        assert_eq!(world.cells[cell].boundary, own_boundary);
+        assert_eq!(world.cells[neighbour].boundary, neighbour_boundary);
+        assert_eq!(world.cells[cell].last_digested_tick, None);
+        let counters = world.interaction_counters();
+        assert_eq!(counters.boundary_digested, 0.0);
+        assert_eq!(counters.cell_surface_extent, 0.0);
+        assert_eq!(counters.field_surface_extent, 0.0);
+        assert!(world.reaction_counters().no_substrate >= 1_000);
+        assert_eq!(world.flux_log.flux_count(), 0);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn isolated_surface_catalysis_draws_exactly_on_the_field_and_conserves_matter() {
+        let mut config = small_config("surface-field", 12, 10);
+        config.founder_energy = 20.0;
+        let mut world = World::new(config).unwrap();
+        let mut enzyme = Enzyme::founder_downhill();
+        enzyme.rate = 5.0;
+        enzyme.secretion_fraction = 0.0;
+        enzyme.body_fraction = 0.0;
+        enzyme.boundary_fraction = 0.0;
+        enzyme.enval_sigma = 1000.0;
+        enzyme.exposure = 1.0;
+        let cell = spawn_with(&mut world, Position::new(5.3, 4.7), 1, vec![enzyme]);
+        let (contacts, field_share) = contacts_of(&world, cell);
+        assert!(contacts.is_empty());
+        assert_eq!(field_share, 1.0);
+
+        let stencil =
+            crate::spatial::BilinearStencil::new(Position::new(5.3, 4.7), 12, 10).unwrap();
+        let tiles = stencil
+            .samples
+            .map(|sample| world.index_xy(sample.x, sample.y));
+        let tiles_before = tiles.map(|tile| world.element_fields[tile]);
+        let field_before = world.element_field_totals();
+        let internal_before = world.cells[cell].internal_elements;
+        let system_before = world.stats().system_element_amounts;
+        world.inspect_cell_fluxes(cell, 4).unwrap();
+        let context = reaction_context(&world, cell);
+        world.surface_reaction_on_field(context, 0, &enzyme, 1.0);
+
+        let record = world.flux_log.latest_flux().unwrap().clone();
+        assert_eq!(record.site, crate::cell::ReactionSite::Field);
+        let consumed = f64::from(record.executed_extent);
+        assert!(consumed > 0.0);
+        let field_after = world.element_field_totals();
+        let d = Element::D.index();
+        assert!(
+            (field_before[d] - field_after[d] - consumed).abs() <= 1.0e-6,
+            "{} vs {consumed}",
+            field_before[d] - field_after[d]
+        );
+        for element in ELEMENT_ORDER {
+            if element != Element::D {
+                assert_eq!(field_after[element.index()], field_before[element.index()]);
+            }
+        }
+        let weighted = (0..4)
+            .map(|corner| {
+                f64::from(stencil.samples[corner].weight) * f64::from(tiles_before[corner][Element::D])
+            })
+            .collect::<Vec<_>>();
+        let pool = weighted.iter().sum::<f64>();
+        for corner in 0..4 {
+            let taken = f64::from(tiles_before[corner][Element::D])
+                - f64::from(world.element_fields[tiles[corner]][Element::D]);
+            assert!((taken - consumed * weighted[corner] / pool).abs() <= 1.0e-6);
+        }
+        let gained = f64::from(world.cells[cell].internal_elements[Element::A])
+            - f64::from(internal_before[Element::A]);
+        assert!((gained - consumed).abs() <= 1.0e-6);
+        let system_after = world.stats().system_element_amounts;
+        for element in ELEMENT_ORDER {
+            let index = element.index();
+            let expected = if element == Element::D {
+                -consumed
+            } else if element == Element::A {
+                consumed
+            } else {
+                0.0
+            };
+            assert!((system_after[index] - system_before[index] - expected).abs() <= 1.0e-5);
+        }
+        assert!(world.interaction_counters().field_surface_extent > 0.0);
+        assert_eq!(world.stats().interaction, world.interaction_counters());
+        world.check_invariants().unwrap();
+
+        let initial_total = world.stats().total_element_amount;
+        for tick in 1..=1_000 {
+            world.step();
+            if tick % 100 == 0 {
+                world.check_invariants().unwrap();
+            }
+        }
+        let total = world.stats().total_element_amount;
+        assert!((total - initial_total).abs() <= 1.0e-6 * initial_total);
+        assert!(world.interaction_counters().field_surface_extent > consumed);
+        assert_eq!(world.interaction_counters().boundary_digested, 0.0);
+        assert!(world.energy_ledger_residual().abs() <= world.energy_ledger().closure_tolerance());
+    }
+
+    #[test]
+    fn contact_shares_follow_the_formula_sum_to_at_most_one_and_wrap_symmetrically() {
+        let mut world = World::new(only_a_config("contact-shares", 20, 16)).unwrap();
+        let gap = f64::from(world.config.surface.contact_gap);
+        let isolated = spawn_with(&mut world, Position::new(15.0, 12.0), 1, vec![inert_enzyme()]);
+        let (contacts, field) = contacts_of(&world, isolated);
+        assert!(contacts.is_empty());
+        assert_eq!(field, 1.0);
+
+        let mut pair_shares = Vec::new();
+        for (a, b) in [(Position::new(5.0, 5.0), Position::new(5.95, 5.0)), (Position::new(0.2, 9.0), Position::new(19.25, 9.0))] {
+            let first = spawn_with(&mut world, a, 1, vec![inert_enzyme()]);
+            let second = spawn_with(&mut world, b, 2, vec![inert_enzyme()]);
+            let (contacts, field) = contacts_of(&world, first);
+            assert_eq!(contacts.len(), 1);
+            let contact = contacts[0];
+            assert_eq!(contact.cell_id, second);
+            let ra = f64::from(world.cells[first].radius);
+            let rb = f64::from(world.cells[second].radius);
+            let closeness = ((ra + rb + gap - contact.distance) / gap).clamp(0.0, 1.0);
+            assert!(closeness > 0.0 && closeness < 1.0);
+            let expected = closeness * (rb / contact.distance).asin() / std::f64::consts::PI;
+            assert!((contact.share - expected).abs() <= 1.0e-12);
+            assert!((field + contact.share - 1.0).abs() <= 1.0e-12);
+            let (reverse, _) = contacts_of(&world, second);
+            assert_eq!(reverse[0].cell_id, first);
+            assert!((reverse[0].distance - contact.distance).abs() <= 1.0e-5);
+            assert!((reverse[0].share - contact.share).abs() <= 1.0e-5);
+            pair_shares.push(contact.share);
+        }
+        assert!((pair_shares[0] - pair_shares[1]).abs() <= 1.0e-5, "{pair_shares:?}");
+        assert!(pair_shares[0] > 0.0 && pair_shares[0] < 1.0 / 6.0);
+
+        let hub = spawn_with(&mut world, Position::new(10.0, 4.0), 1, vec![inert_enzyme()]);
+        for index in 0..8 {
+            let angle = index as f32 * std::f32::consts::TAU / 8.0;
+            let position = Position::new(10.0 + 0.9 * angle.cos(), 4.0 + 0.9 * angle.sin());
+            let id = spawn_with(&mut world, Position::new(1.0 + index as f32 * 2.0, 14.0), 3, vec![inert_enzyme()]);
+            world.update_cell_position(id, position);
+        }
+        let (contacts, field) = contacts_of(&world, hub);
+        assert_eq!(contacts.len(), 8);
+        let total = contacts.iter().map(|contact| contact.share).sum::<f64>();
+        assert!((total - 1.0).abs() <= 1.0e-12);
+        assert_eq!(field, 0.0);
+        assert!(
+            contacts
+                .windows(2)
+                .all(|pair| pair[0].cell_id.index() < pair[1].cell_id.index())
+        );
+    }
+
+    #[test]
+    fn internal_and_surface_reactions_of_one_enzyme_never_exceed_its_capacity() {
+        let mut config = small_config("surface-capacity", 12, 10);
+        config.founder_energy = 100.0;
+        let mut world = World::new(config).unwrap();
+        let mut enzyme = surface_enzyme([0.0, 0.0, 0.0, 1.0, 0.0, 0.0], A_ONLY, 3.0, 0.6);
+        enzyme.half_saturation = 1.0e-3;
+        let actor = spawn_with(&mut world, Position::new(5.0, 5.0), 1, vec![enzyme]);
+        for (index, offset) in [(0.0_f32, 0.9_f32), (0.95, 0.0), (0.0, -0.93)].into_iter().enumerate() {
+            let id = spawn_with(
+                &mut world,
+                Position::new(5.0 + offset.0, 5.0 + offset.1),
+                2 + index as u64,
+                vec![inert_enzyme()],
+            );
+            world.cells[id].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
+            world.cells[id].boundary[Element::D] += 2.0;
+        }
+        world.cells[actor].internal_elements[Element::D] = 5.0;
+        world.inspect_cell_fluxes(actor, 64).unwrap();
+        let radius = world.cells[actor].radius;
+        let area = std::f32::consts::PI * radius * radius;
+        world.step_cell(actor);
+
+        let records = world.flux_log.fluxes_newest_first().cloned().collect::<Vec<_>>();
+        assert!(records.iter().any(|record| record.site == crate::cell::ReactionSite::Internal));
+        assert!(records.iter().any(|record| record.site == crate::cell::ReactionSite::Field));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.site, crate::cell::ReactionSite::Cell(_)))
+                .count(),
+            3
+        );
+        let capacity = f64::from(enzyme.rate)
+            * world.config.dt_seconds
+            * f64::from(area / crate::spatial::REFERENCE_CELL_AREA);
+        let requested = records
+            .iter()
+            .map(|record| f64::from(record.requested_extent))
+            .sum::<f64>();
+        assert!(requested <= capacity * (1.0 + 1.0e-6), "{requested} > {capacity}");
+        assert!(requested >= 0.9 * capacity, "{requested} vs {capacity}");
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn lineage_labels_never_change_the_simulation() {
+        let run = |distinct_lineages: bool| {
+            let mut config = small_config("lineage-blind", 16, 12);
+            config.founder_energy = 4.0;
+            let mut world = World::new(config).unwrap();
+            let mut genome_rng = crate::rng::Rng::from_seed_str("lineage-blind-genomes");
+            for index in 0..12_u64 {
+                let mut genome = Genome::random_founder(&mut genome_rng, 0.0);
+                genome.enzymes[0].exposure = 0.5;
+                genome.mutation_rate = 0.5;
+                genome.lineage_id = LineageId(if distinct_lineages { 100 + index } else { 7 });
+                let position = Position::new(
+                    4.0 + (index % 4) as f32 * 0.92,
+                    4.0 + (index / 4) as f32 * 0.92,
+                );
+                let id = world
+                    .spawn_cell_with_genome_at_position(position, genome)
+                    .unwrap();
+                for element in ELEMENT_ORDER {
+                    world.cells[id].boundary[element] *= 1.6;
+                }
+            }
+            for _ in 0..600 {
+                world.step();
+            }
+            world.check_invariants().unwrap();
+            world
+        };
+        let same = run(false);
+        let distinct = run(true);
+        let physics = |world: &World| {
+            let mut cells = world.cells.iter().cloned().collect::<Vec<_>>();
+            for cell in &mut cells {
+                cell.lineage_id = LineageId(0);
+                cell.genome.lineage_id = LineageId(0);
+            }
+            let mut interaction = world.interaction_counters();
+            interaction.cross_lineage_boundary_digested = 0.0;
+            bincode::serialize(&(
+                cells,
+                &world.rng,
+                &world.element_fields,
+                &world.enval,
+                world.energy_ledger,
+                world.enval_ledger,
+                world.reaction_counters,
+                interaction,
+                world.contact_pair_count,
+                world.death_count,
+                world.birth_count,
+            ))
+            .unwrap()
+        };
+        assert!(same.interaction_counters().boundary_digested > 0.0);
+        assert_eq!(same.interaction_counters().cross_lineage_boundary_digested, 0.0);
+        assert!(distinct.interaction_counters().cross_lineage_boundary_digested > 0.0);
+        let stats = same.stats();
+        assert!(stats.fissions > 0, "{} cells, {} deaths, {} lyses", stats.live_cell_count, stats.deaths, stats.lyses);
+        assert_eq!(physics(&same), physics(&distinct));
+    }
+
+    fn drift_world(seed: &str, columns: usize, rows: usize) -> (World, Vec<crate::cell::CellId>) {
+        let mut world = World::new(small_config(seed, columns * 3, rows * 3)).unwrap();
+        let mut ids = Vec::new();
+        for column in 0..columns {
+            for row in 0..rows {
+                let position = Position::new(column as f32 * 3.0 + 1.5, row as f32 * 3.0 + 1.5);
+                ids.push(spawn_with(&mut world, position, 1, vec![inert_enzyme()]));
+            }
+        }
+        (world, ids)
+    }
+
+    fn mean_squared_displacement(
+        world: &mut World,
+        ids: &[crate::cell::CellId],
+        ticks: usize,
+    ) -> f64 {
+        let mut displacement = vec![(0.0_f64, 0.0_f64); ids.len()];
+        for _ in 0..ticks {
+            let before = ids.iter().map(|id| world.cells[*id].position).collect::<Vec<_>>();
+            world.drift_cells();
+            for (index, id) in ids.iter().enumerate() {
+                let step = minimum_image_displacement(
+                    before[index],
+                    world.cells[*id].position,
+                    world.width as f32,
+                    world.height as f32,
+                );
+                displacement[index].0 += f64::from(step.x);
+                displacement[index].1 += f64::from(step.y);
+            }
+        }
+        displacement
+            .iter()
+            .map(|(x, y)| x * x + y * y)
+            .sum::<f64>()
+            / ids.len() as f64
+    }
+
+    #[test]
+    fn drift_mean_squared_displacement_is_four_d_t_and_scales_inversely_with_radius() {
+        let (mut world, ids) = drift_world("drift-msd", 24, 24);
+        let (small, reference) = ids.split_at(ids.len() / 2);
+        for id in small {
+            let cell = &mut world.cells[*id];
+            for element in ELEMENT_ORDER {
+                cell.body[element] *= 0.25;
+            }
+            cell.refresh_radius(world.config.cell_body.body_density);
+        }
+        world.refresh_max_cell_radius();
+        let ticks = 1_000;
+        let elapsed = ticks as f64 * world.config.dt_seconds;
+        let diffusivity = f64::from(world.config.cell_motion.diffusivity);
+        let radius_ratio = f64::from(world.cells[reference[0]].radius)
+            / f64::from(world.cells[small[0]].radius);
+        assert!((radius_ratio - 2.0).abs() < 1.0e-3);
+
+        let mut reference_world = world.clone();
+        let reference_msd = mean_squared_displacement(&mut reference_world, reference, ticks);
+        let small_msd = mean_squared_displacement(&mut world, small, ticks);
+        let expected = 4.0 * diffusivity * elapsed;
+        assert!(
+            (reference_msd / expected - 1.0).abs() <= 0.15,
+            "reference MSD {reference_msd} vs {expected}"
+        );
+        let ratio = small_msd / reference_msd;
+        assert!((ratio - 2.0).abs() <= 0.35, "half-radius MSD ratio {ratio}");
+        world.check_invariants().unwrap();
+        reference_world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn drift_draws_two_normals_per_cell_and_nothing_when_disabled() {
+        let (mut world, ids) = drift_world("drift-rng", 4, 3);
+        let positions = |world: &World| {
+            ids.iter()
+                .map(|id| world.cells[*id].position)
+                .collect::<Vec<_>>()
+        };
+
+        let mut still = world.clone();
+        still.config.cell_motion.diffusivity = 0.0;
+        let before = positions(&still);
+        let mut untouched = still.rng.clone();
+        for _ in 0..10 {
+            still.drift_cells();
+        }
+        assert_eq!(positions(&still), before);
+        assert_eq!(still.rng.next_f64().to_bits(), untouched.next_f64().to_bits());
+
+        let mut expected = world.rng.clone();
+        for _ in 0..2 * ids.len() {
+            expected.gaussian(0.0, 1.0);
+        }
+        world.drift_cells();
+        assert_ne!(positions(&world), before);
+        assert_eq!(world.rng.next_f64().to_bits(), expected.next_f64().to_bits());
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn zero_drift_reproduces_the_motionless_world() {
+        let mut config = small_config("drift-off", 24, 18);
+        config.cell_motion.diffusivity = 0.0;
+        let mut stepped = World::new(config).unwrap();
+        stepped.spawn_founder_cells(8).unwrap();
+        let mut manual = stepped.clone();
+        for _ in 0..300 {
+            stepped.step();
+            manual.diffuse_element_fields();
+            manual.step_cells();
+            manual.resolve_overlaps();
+            manual.enval_phase();
+            manual.advance_time();
+        }
+        assert_eq!(
+            bincode::serialize(&stepped).unwrap(),
+            bincode::serialize(&manual).unwrap()
+        );
+    }
+
+    #[test]
+    fn drift_wraps_across_seams_and_keeps_spatial_caches_consistent() {
+        let (mut world, ids) = drift_world("drift-seam", 2, 2);
+        world.config.cell_motion.diffusivity = 1.0;
+        for (index, id) in ids.iter().enumerate() {
+            let corner = Position::new(
+                if index % 2 == 0 { 0.001 } else { 5.999 },
+                if index / 2 == 0 { 0.001 } else { 5.999 },
+            );
+            world.update_cell_position(*id, corner);
+        }
+        world.check_invariants().unwrap();
+        let mut crossings = 0;
+        for _ in 0..500 {
+            let before = ids.iter().map(|id| world.cells[*id].position).collect::<Vec<_>>();
+            world.drift_cells();
+            for (index, id) in ids.iter().enumerate() {
+                let after = world.cells[*id].position;
+                assert!(after.x >= 0.0 && after.x < 6.0 && after.y >= 0.0 && after.y < 6.0);
+                if (after.x - before[index].x).abs() > 3.0 || (after.y - before[index].y).abs() > 3.0 {
+                    crossings += 1;
+                }
+            }
+            world.check_invariants().unwrap();
+        }
+        assert!(crossings > 0);
+        world.rebuild_spatial_index();
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn interaction_stats_report_scripted_digestion_exposure_and_contacts() {
+        let mut config = only_a_config("interaction-stats", 12, 10);
+        config.catalyst_upkeep_per_sec = 0.0;
+        config.founder_energy = 50.0;
+        config.cell_motion.diffusivity = 0.0;
+        let mut world = World::new(config).unwrap();
+        let digester = spawn_with(
+            &mut world,
+            Position::new(3.0, 4.0),
+            1,
+            vec![surface_enzyme(E_ONLY, A_ONLY, 2.0, 1.0)],
+        );
+        let prey = spawn_with(&mut world, Position::new(3.9, 4.0), 2, vec![inert_enzyme()]);
+        let sibling = spawn_with(&mut world, Position::new(3.0, 4.9), 1, vec![inert_enzyme()]);
+        let mut low = inert_enzyme();
+        low.exposure = 0.04;
+        let mut lower = inert_enzyme();
+        lower.exposure = 0.02;
+        let loner = spawn_with(&mut world, Position::new(9.0, 8.0), 3, vec![low, lower]);
+        for id in [prey, sibling, loner] {
+            world.cells[id].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
+        }
+        let boundary = world.cells[prey].boundary.total() as f32;
+        world.cells[prey].boundary = ElementAmounts::new([0.0, 0.0, 0.0, 0.0, boundary * 0.8, 0.0]);
+        world.cells[sibling].boundary =
+            ElementAmounts::new([boundary * 0.6, 0.0, 0.0, 0.0, boundary * 0.6, 0.0]);
+
+        let fresh = world.stats();
+        assert_eq!(fresh.interaction, crate::stats::InteractionCounters::default());
+        assert_eq!(fresh.exposed_cell_count, 1);
+        assert_eq!(fresh.max_exposure, 1.0);
+        assert!((fresh.mean_exposure - 1.06 / 5.0).abs() <= 1.0e-6);
+        world.resolve_overlaps();
+        let stats = world.compact_stats();
+        assert_eq!(stats.contact_pairs, 2);
+        assert_eq!(stats.cross_lineage_contact_pairs, 1);
+
+        let inspection = world.inspect_cell(digester).unwrap();
+        assert_eq!(
+            inspection
+                .contacts
+                .iter()
+                .map(|contact| contact.cell_id)
+                .collect::<Vec<_>>(),
+            vec![prey.index(), sibling.index()]
+        );
+        assert_eq!(inspection.contacts[0].lineage_id, LineageId(2));
+        assert!(inspection.contacts.iter().all(|contact| contact.share > 0.0));
+        let shares = inspection.contacts.iter().map(|contact| contact.share).sum::<f64>();
+        assert!((inspection.field_share + shares - 1.0).abs() <= 1.0e-12);
+        assert!(world.inspect_cell(loner).unwrap().contacts.is_empty());
+        assert_eq!(world.inspect_cell(loner).unwrap().field_share, 1.0);
+        assert!((world.inspect_lineage(LineageId(1)).unwrap().mean_exposure - 0.5).abs() <= 1.0e-9);
+        assert!((world.inspect_lineage(LineageId(3)).unwrap().mean_exposure - 0.03).abs() <= 1.0e-6);
+
+        for _ in 0..2_000 {
+            for id in [digester, prey, sibling] {
+                world.step_cell(id);
+            }
+            world.advance_time();
+            if world.cell(prey).is_none() {
+                break;
+            }
+        }
+        assert!(world.cell(prey).is_none());
+        world.resolve_overlaps();
+        let full = world.stats();
+        let compact = world.compact_stats();
+        let counters = full.interaction;
+        assert_eq!(counters, world.interaction_counters());
+        assert_eq!(compact.interaction, counters);
+        assert_eq!(counters.lyses_after_digestion, 1);
+        assert_eq!(counters.field_surface_extent, 0.0);
+        assert!(counters.cell_surface_extent > 0.0);
+        assert!(counters.cross_lineage_boundary_digested > 0.0);
+        assert!(counters.boundary_digested > counters.cross_lineage_boundary_digested);
+        assert_eq!(full.contact_pairs, 1);
+        assert_eq!(full.cross_lineage_contact_pairs, 0);
+        assert_eq!(full.exposed_cell_count, 1);
+        assert_eq!(compact.mean_exposure, full.mean_exposure);
+        assert!((full.mean_exposure - 1.06 / 4.0).abs() <= 1.0e-6);
+        world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn cells_without_exposed_enzymes_never_compute_contact_shares() {
+        let mut world = World::new(small_config("unexposed-skip", 24, 18)).unwrap();
+        world.spawn_founder_cells(12).unwrap();
+        world.step_many(200);
+        let counters = world.operation_counters();
+        assert!(counters.cell_steps > 2_000);
+        assert_eq!(counters.surface_contact_queries, 0);
+        assert_eq!(world.interaction_counters(), crate::stats::InteractionCounters::default());
+
+        let exposed = live_ids(&world)[0];
+        world.cells[exposed].genome.enzymes[0].exposure = 0.2;
+        let steps_before = world.operation_counters().cell_steps;
+        world.step();
+        let counters = world.operation_counters();
+        assert!(counters.cell_steps - steps_before > 1);
+        assert_eq!(counters.surface_contact_queries, 1);
+    }
+
     mod allocation_counter {
         use std::alloc::{GlobalAlloc, Layout, System};
         use std::cell::Cell;
@@ -6138,6 +6560,7 @@ mod tests {
             let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
             world.config.founder_energy = 50.0;
             genome.maintenance_cost_per_area = 0.0;
+            genome.enzymes[0].exposure = 0.05;
             let position = Position::new(
                 (index % 10) as f32 * 4.3 + 1.0,
                 (index / 10) as f32 * 4.1 + 1.0,
@@ -6146,7 +6569,8 @@ mod tests {
                 .spawn_cell_with_genome_at_position(position, genome)
                 .unwrap();
             if index % 2 == 0 {
-                let mut genome = combat_genome(&mut world, 900 + index as u64, 0, 3, 50.0);
+                let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+                genome.lineage_id = LineageId(900 + index as u64);
                 genome.maintenance_cost_per_area = 0.0;
                 let neighbour = Position::new(position.x + 0.91, position.y);
                 let _ = world.spawn_cell_with_genome_at_position(neighbour, genome);
@@ -6155,12 +6579,18 @@ mod tests {
         world.step_many(150);
         let cells_before = world.cell_count();
         let counters_before = world.operation_counters();
+        let interaction_before = world.interaction_counters();
 
         let allocations = allocation_counter::count_allocations(|| world.step_many(100));
 
         let counters = world.operation_counters().saturating_delta(counters_before);
+        let interaction = world.interaction_counters();
         assert!(counters.reactions_succeeded > 10_000, "{counters:?}");
-        assert!(counters.predation_candidate_pairs > 1_000, "{counters:?}");
+        assert!(interaction.field_surface_extent > interaction_before.field_surface_extent);
+        assert!(interaction.cell_surface_extent > interaction_before.cell_surface_extent);
+        assert!(counters.surface_contact_queries > 0);
+        assert!(counters.surface_contact_queries < counters.cell_steps);
+        assert!(world.contact_pair_count > 0);
         assert!(counters.overlap_candidates > 0 || counters.spatial_candidate_checks > 0);
         assert_eq!(counters.cell_divisions, 0);
         assert_eq!(world.cell_count(), cells_before);

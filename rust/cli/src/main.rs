@@ -69,7 +69,6 @@ struct RunOptions {
     quiet: bool,
     stats_mode: StatsMode,
     json: bool,
-    predation_override: Option<bool>,
     until_cells: Option<usize>,
 }
 
@@ -91,7 +90,6 @@ impl Default for RunOptions {
             quiet: false,
             stats_mode: StatsMode::Compact,
             json: false,
-            predation_override: None,
             until_cells: None,
         }
     }
@@ -192,6 +190,13 @@ struct ViabilityResult {
     max_radius_seen: f32,
     min_median_seen: f32,
     max_median_seen: f32,
+    boundary_digested: f64,
+    cross_lineage_boundary_digested: f64,
+    lyses_after_digestion: u64,
+    mean_exposure: f64,
+    max_exposure: f32,
+    exposed_cells: usize,
+    peak_cross_lineage_contacts: u64,
     wall_seconds: f64,
 }
 
@@ -263,8 +268,6 @@ struct StatsInterval {
     population_delta: i64,
     births: u64,
     deaths: u64,
-    predation_events: u64,
-    cells_consumed: u64,
     divisions: u64,
     reaction_attempts: u64,
     reaction_successes: u64,
@@ -304,12 +307,6 @@ impl StatsInterval {
             population_delta: current.live_cell_count as i64 - previous.live_cell_count as i64,
             births: current.births.saturating_sub(previous.births),
             deaths: current.deaths.saturating_sub(previous.deaths),
-            predation_events: current
-                .predation_events
-                .saturating_sub(previous.predation_events),
-            cells_consumed: current
-                .cells_consumed
-                .saturating_sub(previous.cells_consumed),
             divisions: reactions.divisions,
             reaction_attempts,
             reaction_successes,
@@ -711,6 +708,9 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
             result.max_radius_seen = result.max_radius_seen.max(stats.radius_max);
             result.min_median_seen = result.min_median_seen.min(stats.radius_median);
             result.max_median_seen = result.max_median_seen.max(stats.radius_median);
+            result.peak_cross_lineage_contacts = result
+                .peak_cross_lineage_contacts
+                .max(stats.cross_lineage_contact_pairs);
             if live > 0 && (!(0.2..=1.0).contains(&stats.radius_median) || stats.radius_max > 4.0) {
                 result.failures.push(format!(
                     "sizes out of bounds at tick {tick}: median={} max={}",
@@ -790,6 +790,12 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
     result.radius_median = stats.radius_median;
     result.radius_p95 = stats.radius_p95;
     result.radius_max = stats.radius_max;
+    result.boundary_digested = stats.interaction.boundary_digested;
+    result.cross_lineage_boundary_digested = stats.interaction.cross_lineage_boundary_digested;
+    result.lyses_after_digestion = stats.interaction.lyses_after_digestion;
+    result.mean_exposure = stats.mean_exposure;
+    result.max_exposure = stats.max_exposure;
+    result.exposed_cells = stats.exposed_cell_count;
     if stats.fissions < 200 {
         result
             .failures
@@ -817,11 +823,11 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
 
 fn print_viability_table(results: &[ViabilityResult], steps: u64) {
     println!(
-        "seed pass final peak coverage fissions energy_deaths lyses/all_deaths radius_median radius_p95 max_radius_seen median_range max_resid AF_total_drift wall_s"
+        "seed pass final peak coverage fissions energy_deaths lyses/all_deaths radius_median radius_p95 max_radius_seen median_range max_resid AF_total_drift digested cross_digested lyses_after_digestion mean_exposure max_exposure exposed_cells peak_cross_contacts wall_s"
     );
     for result in results {
         println!(
-            "{} {} {} {} {:.3} {} {} {}/{} {:.3} {:.3} {:.3} {:.3}..{:.3} {:.2e} {:.2e} {:.1}",
+            "{} {} {} {} {:.3} {} {} {}/{} {:.3} {:.3} {:.3} {:.3}..{:.3} {:.2e} {:.2e} {:.3} {:.3} {} {:.4} {:.3} {} {} {:.1}",
             result.seed,
             if result.passed { "yes" } else { "NO" },
             result.final_live,
@@ -838,6 +844,13 @@ fn print_viability_table(results: &[ViabilityResult], steps: u64) {
             result.max_median_seen,
             result.max_ledger_residual,
             result.relative_total_drift(),
+            result.boundary_digested,
+            result.cross_lineage_boundary_digested,
+            result.lyses_after_digestion,
+            result.mean_exposure,
+            result.max_exposure,
+            result.exposed_cells,
+            result.peak_cross_lineage_contacts,
             result.wall_seconds
         );
         for failure in &result.failures {
@@ -890,6 +903,13 @@ fn print_viability_json(results: &[ViabilityResult], steps: u64) {
                 "max_radius_seen": result.max_radius_seen,
                 "min_median_seen": result.min_median_seen,
                 "max_median_seen": result.max_median_seen,
+                "boundary_digested": result.boundary_digested,
+                "cross_lineage_boundary_digested": result.cross_lineage_boundary_digested,
+                "lyses_after_digestion": result.lyses_after_digestion,
+                "mean_exposure": result.mean_exposure,
+                "max_exposure": result.max_exposure,
+                "exposed_cells": result.exposed_cells,
+                "peak_cross_lineage_contacts": result.peak_cross_lineage_contacts,
                 "wall_seconds": result.wall_seconds,
             })
         })
@@ -932,11 +952,10 @@ fn print_inspect_summary(world: &World, stats: &WorldStats) {
     print_full_stats(stats, &StatsInterval::default());
     println!("config:");
     println!(
-        "  seed={} size={}x{} predation_enabled={} dt_seconds={:.6}",
+        "  seed={} size={}x{} dt_seconds={:.6}",
         world.config().seed,
         world.width(),
         world.height(),
-        world.predation_enabled(),
         world.config().dt_seconds,
     );
     println!("enzyme_histogram:");
@@ -972,10 +991,6 @@ fn initialize_run_world(options: &RunOptions) -> Result<World, String> {
         World::new(options.config.clone())
             .map_err(|err| format!("failed to initialize world: {err}"))?
     };
-
-    if let Some(enabled) = options.predation_override {
-        world.set_predation_enabled(enabled);
-    }
 
     if options.snapshot_in.is_none() {
         let target = options
@@ -1135,14 +1150,6 @@ where
             "--until-cells" => {
                 options.until_cells = Some(parse_value(&mut args, "--until-cells")?);
             }
-            "--predation" => {
-                options.config.predation_enabled = true;
-                options.predation_override = Some(true);
-            }
-            "--no-predation" => {
-                options.config.predation_enabled = false;
-                options.predation_override = Some(false);
-            }
             "--trace" => parse_trace_mode(&next_value(&mut args, "--trace")?)?,
             other => {
                 if !parse_environment_flag(other, &mut args, &mut options.config)? {
@@ -1197,8 +1204,6 @@ where
             "--verbose-stats" => options.stats_mode = StatsMode::Full,
             "--json" => options.json = true,
             "--quiet" => options.quiet = true,
-            "--predation" => options.config.predation_enabled = true,
-            "--no-predation" => options.config.predation_enabled = false,
             "--trace" => parse_trace_mode(&next_value(&mut args, "--trace")?)?,
             other => {
                 if !parse_environment_flag(other, &mut args, &mut options.config)? {
@@ -1250,8 +1255,6 @@ where
             "--enval-alpha" => {
                 options.config.enval_diffusion_alpha = parse_value(&mut args, "--enval-alpha")?;
             }
-            "--predation" => options.config.predation_enabled = true,
-            "--no-predation" => options.config.predation_enabled = false,
             other => {
                 if !parse_environment_flag(other, &mut args, &mut options.config)? {
                     return Err(format!("unrecognized argument '{other}'"));
@@ -1284,6 +1287,8 @@ where
         "--heterogeneity-scale" => {
             config.element_fields.heterogeneity_scale = parse_value(args, arg)?;
         }
+        "--drift" => config.cell_motion.diffusivity = parse_value(args, arg)?,
+        "--contact-gap" => config.surface.contact_gap = parse_value(args, arg)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -1437,7 +1442,7 @@ fn open_csv(path: Option<&PathBuf>) -> Result<Option<BufWriter<File>>, std::io::
 }
 
 fn csv_header() -> &'static str {
-    "tick,sim_time,population,live_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,predation_events,interval_predation,cells_consumed,interval_consumed,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,cells_with_attackase,cells_with_defensase,avg_attack,max_attack,avg_defense,max_defense,enz_metabolic,enz_defensase,enz_attackase,rx_attempts,rx_successes,rx_no_substrate,rx_success_metabolic,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,leak_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_leak_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,predator_energy_gained,avg_energy_gained_per_predation,enzyme_transfers,enzyme_replacements,energy_founder,energy_injected,energy_extracted,energy_chemical_harvest,energy_chemical_cost,energy_enval_harvest,energy_pump_cost,energy_maintenance,energy_death_loss,energy_predation_transfer,energy_ledger_residual,renewable_coverage,enval_source_inflow,enval_cell_uptake,enval_cell_emission,enval_recharge,enval_edits,recharge_amount,recharge_energy,fissions,energy_deaths,lyses,radius_median,radius_p95,radius_max,mean_strain,assembly_cost"
+    "tick,sim_time,population,live_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,total_enzymes,rx_attempts,rx_successes,rx_no_substrate,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,leak_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_leak_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,energy_founder,energy_injected,energy_extracted,energy_chemical_harvest,energy_chemical_cost,energy_enval_harvest,energy_pump_cost,energy_maintenance,energy_death_loss,energy_ledger_residual,renewable_coverage,enval_source_inflow,enval_cell_uptake,enval_cell_emission,enval_recharge,enval_edits,recharge_amount,recharge_energy,fissions,energy_deaths,lyses,radius_median,radius_p95,radius_max,mean_strain,assembly_cost,mean_exposure,max_exposure,exposed_cells,contact_pairs,cross_lineage_contact_pairs,field_surface_extent,cell_surface_extent,boundary_digested,cross_lineage_boundary_digested,lyses_after_digestion"
 }
 
 fn emit_world_stats_profiled(
@@ -1525,10 +1530,6 @@ fn write_csv_record<W: Write>(
         interval.births.to_string(),
         interval.deaths.to_string(),
         interval.population_delta.to_string(),
-        stats.predation_events.to_string(),
-        interval.predation_events.to_string(),
-        stats.cells_consumed.to_string(),
-        interval.cells_consumed.to_string(),
         stats.lineage_count.to_string(),
         stats.total_lineage_records.to_string(),
         stats.extinct_lineage_count.to_string(),
@@ -1566,36 +1567,13 @@ fn write_csv_record<W: Write>(
         stats.max_enzyme_count.to_string(),
         stats.cells_at_enzyme_cap.to_string(),
         format!("{:.8}", stats.fraction_cells_at_enzyme_cap),
-        stats.cells_with_attackase.to_string(),
-        stats.cells_with_defensase.to_string(),
-        format!("{:.6}", stats.average_attack_total),
-        stats.max_attack_total.to_string(),
-        format!("{:.6}", stats.average_defense_total),
-        stats.max_defense_total.to_string(),
-        stats.enzyme_type_totals.metabolic.to_string(),
-        stats.enzyme_type_totals.defensase.to_string(),
-        stats.enzyme_type_totals.attackase.to_string(),
+        stats.total_enzyme_count.to_string(),
         stats.reaction_counters.total_attempts().to_string(),
         stats.reaction_counters.total_successes().to_string(),
-        stats
-            .reaction_counters
-            .no_substrate_by_type
-            .total()
-            .to_string(),
-        stats
-            .reaction_counters
-            .successes_by_type
-            .metabolic
-            .to_string(),
-        format!(
-            "{:.6}",
-            stats.reaction_counters.energy_delta_by_type.total()
-        ),
-        format!("{:.6}", stats.reaction_counters.enval_input_by_type.total()),
-        format!(
-            "{:.6}",
-            stats.reaction_counters.enval_output_by_type.total()
-        ),
+        stats.reaction_counters.no_substrate.to_string(),
+        format!("{:.6}", stats.reaction_counters.energy_delta),
+        format!("{:.6}", stats.reaction_counters.enval_input),
+        format!("{:.6}", stats.reaction_counters.enval_output),
         format!("{:.8}", stats.reaction_counters.executed_metabolic_flux),
         format!("{:.8}", stats.reaction_counters.uptake_flux),
         format!("{:.8}", stats.reaction_counters.leak_flux),
@@ -1626,10 +1604,6 @@ fn write_csv_record<W: Write>(
         stats.positive_enval_tile_count.to_string(),
         stats.negative_enval_tile_count.to_string(),
         stats.near_zero_enval_tile_count.to_string(),
-        format!("{:.6}", stats.predator_energy_gained),
-        format!("{:.6}", stats.average_energy_gained_per_predation),
-        stats.predation_enzyme_transfers.to_string(),
-        stats.predation_enzyme_replacements.to_string(),
         format!("{:.9}", stats.energy_ledger.founder_energy),
         format!("{:.9}", stats.energy_ledger.injected_energy),
         format!("{:.9}", stats.energy_ledger.extracted_energy),
@@ -1639,7 +1613,6 @@ fn write_csv_record<W: Write>(
         format!("{:.9}", stats.energy_ledger.pump_cost),
         format!("{:.9}", stats.energy_ledger.maintenance),
         format!("{:.9}", stats.energy_ledger.death_loss),
-        format!("{:.9}", stats.energy_ledger.predation_transfer),
         format!("{:.6e}", stats.energy_ledger_residual),
         format!("{:.8}", stats.renewable_coverage),
         format!("{:.9}", stats.enval_ledger.source_inflow),
@@ -1657,6 +1630,16 @@ fn write_csv_record<W: Write>(
         stats.radius_max.to_string(),
         stats.mean_strain.to_string(),
         stats.energy_ledger.assembly_cost.to_string(),
+        format!("{:.8}", stats.mean_exposure),
+        format!("{:.6}", stats.max_exposure),
+        stats.exposed_cell_count.to_string(),
+        stats.contact_pairs.to_string(),
+        stats.cross_lineage_contact_pairs.to_string(),
+        format!("{:.9}", stats.interaction.field_surface_extent),
+        format!("{:.9}", stats.interaction.cell_surface_extent),
+        format!("{:.9}", stats.interaction.boundary_digested),
+        format!("{:.9}", stats.interaction.cross_lineage_boundary_digested),
+        stats.interaction.lyses_after_digestion.to_string(),
     ];
     assert_eq!(fields.len(), csv_header().split(',').count());
     writeln!(writer, "{}", fields.join(","))
@@ -1677,7 +1660,7 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
     let extracellular = stats.extracellular_element_amounts.iter().sum::<f64>();
     let intracellular = stats.intracellular_element_amounts.iter().sum::<f64>();
     println!(
-        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} predation={} d_predation={} consumed={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4} energy=founder:{:.3} injected:{:.3} extracted:{:.3} chem_harvest:{:.3} chem_cost:{:.3} enval_harvest:{:.3} pump:{:.3} maintenance:{:.3} death_loss:{:.3} predation:{:.3} residual:{:.3e} coverage={:.4} fissions={} energy_deaths={} lyses={} radius_median={:.4} radius_p95={:.4} radius_max={:.4} mean_strain={:.4} assembly_cost={:.6}",
+        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4} energy=founder:{:.3} injected:{:.3} extracted:{:.3} chem_harvest:{:.3} chem_cost:{:.3} enval_harvest:{:.3} pump:{:.3} maintenance:{:.3} death_loss:{:.3} residual:{:.3e} coverage={:.4} fissions={} energy_deaths={} lyses={} radius_median={:.4} radius_p95={:.4} radius_max={:.4} mean_strain={:.4} assembly_cost={:.6} exposure_mean={:.4} exposure_max={:.3} exposed_cells={} contacts={} cross_contacts={} field_extent={:.6} cell_extent={:.6} digested={:.6} cross_digested={:.6} lyses_after_digestion={}",
         stats.tick_count,
         stats.sim_time_seconds,
         stats.width,
@@ -1690,9 +1673,6 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
         interval.births,
         stats.deaths,
         interval.deaths,
-        stats.predation_events,
-        interval.predation_events,
-        stats.cells_consumed,
         stats.lineage_count,
         stats.total_element_amount,
         extracellular,
@@ -1727,7 +1707,6 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.energy_ledger.pump_cost,
         stats.energy_ledger.maintenance,
         stats.energy_ledger.death_loss,
-        stats.energy_ledger.predation_transfer,
         stats.energy_ledger_residual,
         stats.renewable_coverage,
         stats.fissions,
@@ -1738,6 +1717,16 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.radius_max,
         stats.mean_strain,
         stats.energy_ledger.assembly_cost,
+        stats.mean_exposure,
+        stats.max_exposure,
+        stats.exposed_cell_count,
+        stats.contact_pairs,
+        stats.cross_lineage_contact_pairs,
+        stats.interaction.field_surface_extent,
+        stats.interaction.cell_surface_extent,
+        stats.interaction.boundary_digested,
+        stats.interaction.cross_lineage_boundary_digested,
+        stats.interaction.lyses_after_digestion,
     );
 }
 
@@ -1790,22 +1779,27 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.max_cell_age,
     );
     println!(
-        "  enzymes avg={:.2} min={} max={} cap={} cap_frac={:.3} hist_1_10={:?} attack_cells={} defense_cells={} avg_attack={:.2} max_attack={} avg_defense={:.2} max_defense={} totals=Met:{} Def:{} Atk:{}",
+        "  enzymes avg={:.2} min={} max={} cap={} cap_frac={:.3} hist_1_10={:?} total={}",
         stats.average_enzyme_count,
         stats.min_enzyme_count,
         stats.max_enzyme_count,
         stats.cells_at_enzyme_cap,
         stats.fraction_cells_at_enzyme_cap,
         &stats.enzyme_count_histogram[1..],
-        stats.cells_with_attackase,
-        stats.cells_with_defensase,
-        stats.average_attack_total,
-        stats.max_attack_total,
-        stats.average_defense_total,
-        stats.max_defense_total,
-        stats.enzyme_type_totals.metabolic,
-        stats.enzyme_type_totals.defensase,
-        stats.enzyme_type_totals.attackase,
+        stats.total_enzyme_count,
+    );
+    println!(
+        "  interaction exposure_mean={:.4} exposure_max={:.3} exposed_cells={} contacts={} cross_contacts={} field_extent={:.6} cell_extent={:.6} digested={:.6} cross_digested={:.6} lyses_after_digestion={}",
+        stats.mean_exposure,
+        stats.max_exposure,
+        stats.exposed_cell_count,
+        stats.contact_pairs,
+        stats.cross_lineage_contact_pairs,
+        stats.interaction.field_surface_extent,
+        stats.interaction.cell_surface_extent,
+        stats.interaction.boundary_digested,
+        stats.interaction.cross_lineage_boundary_digested,
+        stats.interaction.lyses_after_digestion,
     );
     println!(
         "  lineages extant={} total_records={} extinct={} dominant={} dominant_pop={} dominant_share={:.3} entropy={:.3}",
@@ -1818,32 +1812,21 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.lineage_entropy,
     );
     println!(
-        "  predation events={} (+{}) consumed={} (+{}) energy_gained={:.3} avg_gain={:.3} enzyme_transfers={} replacements={}",
-        stats.predation_events,
-        interval.predation_events,
-        stats.cells_consumed,
-        interval.cells_consumed,
-        stats.predator_energy_gained,
-        stats.average_energy_gained_per_predation,
-        stats.predation_enzyme_transfers,
-        stats.predation_enzyme_replacements,
-    );
-    println!(
         "  metabolism attempts={} (+{}) successes={} (+{}) no_substrate={} executed_flux={:.6} (+{:.6}) uptake_flux={:.6} (+{:.6}) secretion_flux={:.6} (+{:.6}) energy_delta={:.3} enval_in={:.3} enval_out={:.3}",
         stats.reaction_counters.total_attempts(),
         interval.reaction_attempts,
         stats.reaction_counters.total_successes(),
         interval.reaction_successes,
-        stats.reaction_counters.no_substrate_by_type.total(),
+        stats.reaction_counters.no_substrate,
         stats.reaction_counters.executed_metabolic_flux,
         interval.executed_metabolic_flux,
         stats.reaction_counters.uptake_flux,
         interval.uptake_flux,
         stats.reaction_counters.secretion_flux,
         interval.secretion_flux,
-        stats.reaction_counters.energy_delta_by_type.total(),
-        stats.reaction_counters.enval_input_by_type.total(),
-        stats.reaction_counters.enval_output_by_type.total(),
+        stats.reaction_counters.energy_delta,
+        stats.reaction_counters.enval_input,
+        stats.reaction_counters.enval_output,
     );
     println!(
         "  enval avg={:.6} min={:.6} p05={:.6} p50={:.6} p95={:.6} max={:.6} sd={:.6} pos={} neg={} near_zero={}",
@@ -1859,7 +1842,7 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.near_zero_enval_tile_count,
     );
     println!(
-        "  energy_ledger founder={:.6} injected={:.6} extracted={:.6} chemical_harvest={:.6} chemical_cost={:.6} enval_harvest={:.6} pump_cost={:.6} maintenance={:.6} death_loss={:.6} predation_transfer={:.6} residual={:.3e} renewable_coverage={:.6}",
+        "  energy_ledger founder={:.6} injected={:.6} extracted={:.6} chemical_harvest={:.6} chemical_cost={:.6} enval_harvest={:.6} pump_cost={:.6} maintenance={:.6} death_loss={:.6} residual={:.3e} renewable_coverage={:.6}",
         stats.energy_ledger.founder_energy,
         stats.energy_ledger.injected_energy,
         stats.energy_ledger.extracted_energy,
@@ -1869,7 +1852,6 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.energy_ledger.pump_cost,
         stats.energy_ledger.maintenance,
         stats.energy_ledger.death_loss,
-        stats.energy_ledger.predation_transfer,
         stats.energy_ledger_residual,
         stats.renewable_coverage,
     );
@@ -1905,8 +1887,6 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
         "occupancy_fraction": stats.occupancy_fraction,
         "births": stats.births,
         "deaths": stats.deaths,
-        "predation_events": stats.predation_events,
-        "cells_consumed": stats.cells_consumed,
         "lineages": stats.lineage_count,
         "total_lineage_records": stats.total_lineage_records,
         "extinct_lineages": stats.extinct_lineage_count,
@@ -1925,23 +1905,19 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
             "system": element_amounts_json(stats.system_element_amounts),
             "total_element_amount": stats.total_element_amount,
         },
-        "enzyme_type_totals": {
-            "metabolic": stats.enzyme_type_totals.metabolic,
-            "defensase": stats.enzyme_type_totals.defensase,
-            "attackase": stats.enzyme_type_totals.attackase,
-        },
+        "total_enzyme_count": stats.total_enzyme_count,
         "metabolism": {
             "attempts": stats.reaction_counters.total_attempts(),
             "successes": stats.reaction_counters.total_successes(),
-            "no_substrate": stats.reaction_counters.no_substrate_by_type.total(),
+            "no_substrate": stats.reaction_counters.no_substrate,
             "executed_metabolic_flux": stats.reaction_counters.executed_metabolic_flux,
             "uptake_flux": stats.reaction_counters.uptake_flux,
             "leak_flux": stats.reaction_counters.leak_flux,
             "secretion_flux": stats.reaction_counters.secretion_flux,
             "divisions": stats.reaction_counters.divisions,
-            "energy_delta": stats.reaction_counters.energy_delta_by_type.total(),
-            "enval_input": stats.reaction_counters.enval_input_by_type.total(),
-            "enval_output": stats.reaction_counters.enval_output_by_type.total(),
+            "energy_delta": stats.reaction_counters.energy_delta,
+            "enval_input": stats.reaction_counters.enval_input,
+            "enval_output": stats.reaction_counters.enval_output,
         },
         "fissions": stats.fissions,
         "energy_deaths": stats.energy_deaths,
@@ -1950,6 +1926,18 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
         "radius_p95": stats.radius_p95,
         "radius_max": stats.radius_max,
         "mean_strain": stats.mean_strain,
+        "interaction": {
+            "mean_exposure": stats.mean_exposure,
+            "max_exposure": stats.max_exposure,
+            "exposed_cells": stats.exposed_cell_count,
+            "contact_pairs": stats.contact_pairs,
+            "cross_lineage_contact_pairs": stats.cross_lineage_contact_pairs,
+            "field_surface_extent": stats.interaction.field_surface_extent,
+            "cell_surface_extent": stats.interaction.cell_surface_extent,
+            "boundary_digested": stats.interaction.boundary_digested,
+            "cross_lineage_boundary_digested": stats.interaction.cross_lineage_boundary_digested,
+            "lyses_after_digestion": stats.interaction.lyses_after_digestion,
+        },
         "energy_ledger": {
             "founder_energy": stats.energy_ledger.founder_energy,
             "injected_energy": stats.energy_ledger.injected_energy,
@@ -1961,7 +1949,6 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
             "assembly_cost": stats.energy_ledger.assembly_cost,
             "maintenance": stats.energy_ledger.maintenance,
             "death_loss": stats.energy_ledger.death_loss,
-            "predation_transfer": stats.energy_ledger.predation_transfer,
             "residual": stats.energy_ledger_residual,
             "renewable_coverage": stats.renewable_coverage,
         },
@@ -1990,7 +1977,6 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
             "population_delta": interval.population_delta,
             "births": interval.births,
             "deaths": interval.deaths,
-            "predation_events": interval.predation_events,
             "reaction_attempts": interval.reaction_attempts,
             "reaction_successes": interval.reaction_successes,
             "executed_metabolic_flux": interval.executed_metabolic_flux,
@@ -2024,7 +2010,6 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
     let element_ms = duration_ms(profile.step.element_field_diffusion);
     let cell_ms = duration_ms(profile.step.cell_step);
     let mechanics_ms = duration_ms(profile.step.cell_mechanics);
-    let predation_ms = duration_ms(profile.step.predation);
     let enval_ms = duration_ms(profile.step.enval_diffusion);
     let pct = |part_ms: f64| -> f64 {
         if measured_ms > 0.0 {
@@ -2048,7 +2033,6 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
                 "element_field_diffusion_ms_per_step": element_ms / steps,
                 "cells_ms_per_step": cell_ms / steps,
                 "cell_mechanics_ms_per_step": mechanics_ms / steps,
-                "predation_ms_per_step": predation_ms / steps,
                 "enval_ms_per_step": enval_ms / steps,
                 "cell_steps": counters.cell_steps,
                 "cell_steps_per_sec": counters.cell_steps as f64 / wall_seconds,
@@ -2056,14 +2040,10 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
                 "enzyme_attempts_per_sec": counters.metabolic_enzyme_attempts as f64 / wall_seconds,
                 "reactions_succeeded": counters.reactions_succeeded,
                 "reactions_per_sec": counters.reactions_succeeded as f64 / wall_seconds,
-                "predation_pairs_checked": counters.predation_pairs_checked,
-                "predation_cells_considered": counters.predation_cells_considered,
-                "predation_candidate_pairs": counters.predation_candidate_pairs,
-                "predation_cross_lineage_pairs": counters.predation_cross_lineage_pairs,
                 "spatial_candidate_checks": counters.spatial_candidate_checks,
                 "overlap_candidates": counters.overlap_candidates,
                 "overlap_corrections": counters.overlap_corrections,
-                "combat_enzyme_skips": counters.combat_enzyme_skips,
+                "surface_contact_queries": counters.surface_contact_queries,
                 "element_field_diffusion_tiles": counters.element_field_diffusion_tiles,
                 "element_uptake_events": counters.element_uptake_events,
                 "cell_divisions": counters.cell_divisions,
@@ -2074,7 +2054,7 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         return;
     }
     println!(
-        "profile wall_ms={:.3} avg_step_ms={:.6} min_step_ms={:.6} max_step_ms={:.6} p50_step_ms={:.6} p95_step_ms={:.6} element_field_ms={:.6} cells_ms={:.6} mechanics_ms={:.6} predation_ms={:.6} enval_ms={:.6} measured_total_ms={:.6} element_field_pct={:.2} cells_pct={:.2} mechanics_pct={:.2} predation_pct={:.2} enval_pct={:.2} stats_output_ms={:.6} invariants_ms={:.6} snapshot_io_ms={:.6} csv_flush_ms={:.6} cell_steps={} cell_steps_per_sec={:.3} enzyme_entries={} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reactions={} reactions_per_sec={:.3} element_field_tiles={} uptake_events={} divisions={} deaths={} predation_pairs={} predation_cells={} predation_candidates={} predation_cross_lineage={} predation_events={} consumed={} spatial_candidates={} overlap_candidates={} overlap_corrections={} combat_enzyme_skips={} enval_avg_calls={} enzyme_list_clones={} genome_clones={}",
+        "profile wall_ms={:.3} avg_step_ms={:.6} min_step_ms={:.6} max_step_ms={:.6} p50_step_ms={:.6} p95_step_ms={:.6} element_field_ms={:.6} cells_ms={:.6} mechanics_ms={:.6} enval_ms={:.6} measured_total_ms={:.6} element_field_pct={:.2} cells_pct={:.2} mechanics_pct={:.2} enval_pct={:.2} stats_output_ms={:.6} invariants_ms={:.6} snapshot_io_ms={:.6} csv_flush_ms={:.6} cell_steps={} cell_steps_per_sec={:.3} enzyme_entries={} enzyme_attempts={} enzyme_attempts_per_sec={:.3} reactions={} reactions_per_sec={:.3} element_field_tiles={} uptake_events={} divisions={} deaths={} spatial_candidates={} overlap_candidates={} overlap_corrections={} surface_contact_queries={} enval_avg_calls={} enzyme_list_clones={} genome_clones={}",
         duration_ms(wall),
         measured_ms / steps,
         profile.min_step.map(duration_ms).unwrap_or(0.0),
@@ -2084,13 +2064,11 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         element_ms / steps,
         cell_ms / steps,
         mechanics_ms / steps,
-        predation_ms / steps,
         enval_ms / steps,
         measured_ms / steps,
         pct(element_ms),
         pct(cell_ms),
         pct(mechanics_ms),
-        pct(predation_ms),
         pct(enval_ms),
         duration_ms(profile.stats_output),
         duration_ms(profile.invariants),
@@ -2107,16 +2085,10 @@ fn print_profile_summary(steps: u64, wall: Duration, mut profile: CliProfile, js
         counters.element_uptake_events,
         counters.cell_divisions,
         counters.cell_deaths,
-        counters.predation_pairs_checked,
-        counters.predation_cells_considered,
-        counters.predation_candidate_pairs,
-        counters.predation_cross_lineage_pairs,
-        counters.predation_events,
-        counters.predation_cells_consumed,
         counters.spatial_candidate_checks,
         counters.overlap_candidates,
         counters.overlap_corrections,
-        counters.combat_enzyme_skips,
+        counters.surface_contact_queries,
         counters.local_enval_average_calls,
         counters.enzyme_list_clones,
         counters.genome_clones,
@@ -2139,12 +2111,12 @@ fn duration_ms(duration: Duration) -> f64 {
 fn print_usage() {
     eprintln!(
         "usage:
-  microcosm run [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--until-cells N] [--stats-every N] [--stats-mode compact|full] [--json] [--check-invariants] [--check-invariants-every N] [--csv [path]] [--snapshot-in path] [--snapshot-out [path]] [--profile|--profile-json] [--no-predation] [--trace off]
-  microcosm bench [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--stats-every N] [--stats-mode compact|full] [--json] [--profile|--profile-json] [--no-predation] [--trace off]
+  microcosm run [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--until-cells N] [--stats-every N] [--stats-mode compact|full] [--json] [--check-invariants] [--check-invariants-every N] [--csv [path]] [--snapshot-in path] [--snapshot-out [path]] [--profile|--profile-json] [--trace off]
+  microcosm bench [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--stats-every N] [--stats-mode compact|full] [--json] [--profile|--profile-json] [--trace off]
   microcosm inspect snapshot.micosm
-  microcosm viability [--seeds 42,1,2,3,7] [--steps 60000] [--jobs N] [--json] [--quiet] [--width W] [--height H] [--initial-cells N] [--no-predation]
+  microcosm viability [--seeds 42,1,2,3,7] [--steps 60000] [--jobs N] [--json] [--quiet] [--width W] [--height H] [--initial-cells N]
 environment flags (run, bench, viability):
-  [--permeability P] [--catalyst-upkeep U] [--source-pairs N] [--source-radius R] [--source-magnitude M] [--source-relaxation K] [--recharge-rate K] [--heterogeneity H] [--heterogeneity-scale S]"
+  [--permeability P] [--catalyst-upkeep U] [--source-pairs N] [--source-radius R] [--source-magnitude M] [--source-relaxation K] [--recharge-rate K] [--heterogeneity H] [--heterogeneity-scale S] [--drift D] [--contact-gap G]"
     );
 }
 
@@ -2326,6 +2298,20 @@ mod tests {
         assert!(columns.contains(&"secretion_flux"));
         assert!(columns.contains(&"rx_successes"));
         assert!(columns.contains(&"interval_cell_steps"));
+        for column in [
+            "mean_exposure",
+            "max_exposure",
+            "exposed_cells",
+            "contact_pairs",
+            "cross_lineage_contact_pairs",
+            "field_surface_extent",
+            "cell_surface_extent",
+            "boundary_digested",
+            "cross_lineage_boundary_digested",
+            "lyses_after_digestion",
+        ] {
+            assert!(columns.contains(&column), "{column}");
+        }
         assert!(columns.len() > 80);
     }
 
@@ -2500,6 +2486,10 @@ mod tests {
                 "0.3",
                 "--heterogeneity-scale",
                 "32",
+                "--drift",
+                "0.5",
+                "--contact-gap",
+                "0.25",
             ]
             .map(str::to_owned);
             let config = match parse_args(args).unwrap().unwrap() {
@@ -2517,6 +2507,8 @@ mod tests {
             assert_eq!(config.enval_recharge.rate_per_second, 0.2);
             assert_eq!(config.element_fields.heterogeneity, 0.3);
             assert_eq!(config.element_fields.heterogeneity_scale, 32.0);
+            assert_eq!(config.cell_motion.diffusivity, 0.5);
+            assert_eq!(config.surface.contact_gap, 0.25);
         }
     }
 
@@ -2547,6 +2539,37 @@ mod tests {
             );
             assert_eq!(left.final_totals, right.final_totals);
         }
+    }
+
+    #[test]
+    fn drift_flag_reaches_the_world_and_zero_drift_is_reproducible() {
+        let parse = |drift: &str| {
+            let args = [
+                "viability",
+                "--width",
+                "24",
+                "--height",
+                "18",
+                "--initial-cells",
+                "6",
+                "--drift",
+                drift,
+            ]
+            .map(str::to_owned);
+            let Command::Viability(mut options) = parse_args(args).unwrap().unwrap() else {
+                panic!("expected viability command");
+            };
+            options.config.seed = "cli-drift".to_owned();
+            options.config
+        };
+        let still = parse("0");
+        assert_eq!(still.cell_motion.diffusivity, 0.0);
+        let first = run_viability_world(still.clone(), 300, true);
+        let second = run_viability_world(still, 300, true);
+        let moving = run_viability_world(parse("0.2"), 300, true);
+        assert_eq!(first.final_totals, second.final_totals);
+        assert_eq!(first.peak_cross_lineage_contacts, second.peak_cross_lineage_contacts);
+        assert_ne!(first.final_totals, moving.final_totals);
     }
 
     #[test]

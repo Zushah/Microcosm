@@ -1,9 +1,10 @@
+use std::fmt;
 use std::ops::{Index, IndexMut};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::chem::{ELEMENT_COUNT, ElementAmounts};
-use crate::genome::{EnzymeType, Genome, LineageId};
+use crate::genome::{Genome, LineageId};
 use crate::spatial::Position;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -17,6 +18,52 @@ impl CellId {
 
 pub const CELL_FLUX_LOG_CAPACITY: usize = 64;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionSite {
+    Internal,
+    Field,
+    Cell(CellId),
+}
+
+impl fmt::Display for ReactionSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Internal => f.write_str("internal"),
+            Self::Field => f.write_str("field"),
+            Self::Cell(cell_id) => write!(f, "cell:{}", cell_id.index()),
+        }
+    }
+}
+
+impl std::str::FromStr for ReactionSite {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "internal" => Ok(Self::Internal),
+            "field" => Ok(Self::Field),
+            other => other
+                .strip_prefix("cell:")
+                .and_then(|id| id.parse().ok())
+                .map(|id| Self::Cell(CellId(id)))
+                .ok_or_else(|| format!("unsupported reaction site '{other}'")),
+        }
+    }
+}
+
+impl Serialize for ReactionSite {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReactionSite {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FluxRecord {
     pub tick_count: u64,
@@ -25,8 +72,7 @@ pub struct FluxRecord {
     pub x: f32,
     pub y: f32,
     pub catalyst_index: usize,
-    #[serde(with = "enzyme_type_text")]
-    pub catalyst_type: EnzymeType,
+    pub site: ReactionSite,
     pub reactants: [f32; ELEMENT_COUNT],
     pub products: [f32; ELEMENT_COUNT],
     pub requested_extent: f32,
@@ -44,21 +90,6 @@ pub struct FluxRecord {
     pub optimal_enval: f32,
 }
 
-mod enzyme_type_text {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    use crate::genome::EnzymeType;
-
-    pub fn serialize<S: Serializer>(value: &EnzymeType, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(value.as_str())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<EnzymeType, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        text.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
     pub id: CellId,
@@ -72,8 +103,7 @@ pub struct Cell {
     pub boundary: ElementAmounts,
     pub birth_sim_time: f64,
     pub maintenance_cost_per_area: f64,
-    pub combat_attack_total: u32,
-    pub combat_defense_total: u32,
+    pub last_digested_tick: Option<u64>,
 }
 
 impl Cell {
@@ -88,8 +118,6 @@ impl Cell {
     ) -> Self {
         let lineage_id = genome.lineage_id;
         let maintenance_cost_per_area = genome.maintenance_cost_per_area;
-        let combat_attack_total = genome.attack_total();
-        let combat_defense_total = genome.defense_total();
         Self {
             id: CellId(usize::MAX),
             position,
@@ -102,8 +130,7 @@ impl Cell {
             internal_elements: ElementAmounts::ZERO,
             birth_sim_time,
             maintenance_cost_per_area,
-            combat_attack_total,
-            combat_defense_total,
+            last_digested_tick: None,
         }
     }
 
@@ -133,11 +160,6 @@ impl Cell {
         self.boundary.total()
             / f64::from(boundary_density)
             / (std::f64::consts::TAU * f64::from(self.radius))
-    }
-
-    pub fn refresh_combat_totals(&mut self) {
-        self.combat_attack_total = self.genome.attack_total();
-        self.combat_defense_total = self.genome.defense_total();
     }
 }
 
@@ -304,8 +326,8 @@ impl IndexMut<CellId> for CellStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{CELL_FLUX_LOG_CAPACITY, Cell, CellId, CellStore, FluxRecord};
-    use crate::genome::{EnzymeType, Genome};
+    use super::{CELL_FLUX_LOG_CAPACITY, Cell, CellId, CellStore, FluxRecord, ReactionSite};
+    use crate::genome::Genome;
     use crate::rng::Rng;
     use crate::spatial::Position;
 
@@ -330,7 +352,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             catalyst_index: 0,
-            catalyst_type: EnzymeType::Metabolic,
+            site: ReactionSite::Internal,
             reactants: [0.0; 6],
             products: [0.0; 6],
             requested_extent: 0.0,
@@ -376,6 +398,24 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ticks, expected);
         assert_eq!(cell.latest_flux().unwrap().tick_count, total - 1);
+    }
+
+    #[test]
+    fn reaction_sites_render_and_parse_as_text() {
+        for (site, text) in [
+            (ReactionSite::Internal, "internal"),
+            (ReactionSite::Field, "field"),
+            (ReactionSite::Cell(CellId(42)), "cell:42"),
+        ] {
+            assert_eq!(site.to_string(), text);
+            assert_eq!(text.parse::<ReactionSite>().unwrap(), site);
+        }
+        assert!("cell:".parse::<ReactionSite>().is_err());
+        assert!("surface".parse::<ReactionSite>().is_err());
+        let mut flux = record(3);
+        flux.site = ReactionSite::Cell(CellId(7));
+        let decoded: FluxRecord = bincode::deserialize(&bincode::serialize(&flux).unwrap()).unwrap();
+        assert_eq!(decoded, flux);
     }
 
     #[test]

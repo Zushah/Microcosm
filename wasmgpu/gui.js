@@ -19,10 +19,9 @@ const LINEAGE_REFRESH_INTERVAL_MS = 2500;
 const LINEAGE_LIST_REFRESH_INTERVAL_MS = 5000;
 const CELL_FLUX_LIMIT = 24;
 const LINEAGE_LIST_LIMIT = 32;
-const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v4";
-const COMBAT_ENZYME_TYPES = new Set(["attackase", "defensase"]);
+const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v5";
 const INTEGER_GENOME_FIELDS = new Set();
-const INTEGER_ENZYME_FIELDS = new Set(["combat_level"]);
+const INTEGER_ENZYME_FIELDS = new Set();
 
 const displayValue = (value) => {
     if (typeof value === "bigint") return value.toString();
@@ -75,6 +74,8 @@ const makeTable = (columns, rows, emptyMessage = "No records.") => { if (!rows |
 
 const buttonForLineage = (lineageId) => `<button class="inlineButton" type="button" data-lineage-id="${escapeHtml(displayValue(lineageId))}">Select</button>`;
 
+const contactsText = (cell) => { const contacts = cell && Array.isArray(cell.contacts) ? cell.contacts : null; if (!contacts) return "—"; if (contacts.length === 0) return "none"; return contacts.map((contact) => `#${displayValue(contact.cell_id)} (lineage ${displayValue(contact.lineage_id)}): ${displayValue(contact.share)}`).join("; "); };
+
 const genomePatchHasBrushRisk = (patch) => Boolean(patch && Array.isArray(patch.enzymes) && patch.enzymes.some((operation) => operation && (operation.op === "append" || operation.op === "remove")));
 
 export class MicrocosmGUI {
@@ -113,7 +114,6 @@ export class MicrocosmGUI {
             genomeEditValue: root.getElementById("genomeEditValue"),
             enzymeEditOp: root.getElementById("enzymeEditOp"),
             enzymeEditIndex: root.getElementById("enzymeEditIndex"),
-            enzymeEditType: root.getElementById("enzymeEditType"),
             enzymeEditReactants: root.getElementById("enzymeEditReactants"),
             enzymeEditProducts: root.getElementById("enzymeEditProducts"),
             enzymeEditField: root.getElementById("enzymeEditField"),
@@ -322,12 +322,10 @@ export class MicrocosmGUI {
         const index = this.elements.enzymeEditIndex ? parseEditNumber(this.elements.enzymeEditIndex.value, "enzyme index", true) : 0;
         if (index < 0) throw new Error("enzyme index must be >= 0.");
         if (op === "remove") return { op, index };
-        const enzymeType = this.elements.enzymeEditType ? this.elements.enzymeEditType.value : "metabolic";
-        const fields = { enzyme_type: enzymeType };
-        if (!COMBAT_ENZYME_TYPES.has(enzymeType)) {
-            fields.reactants = parseElementVector(this.elements.enzymeEditReactants ? this.elements.enzymeEditReactants.value : "", "Reactants");
-            fields.products = parseElementVector(this.elements.enzymeEditProducts ? this.elements.enzymeEditProducts.value : "", "Products");
-        }
+        const fields = {
+            reactants: parseElementVector(this.elements.enzymeEditReactants ? this.elements.enzymeEditReactants.value : "", "Reactants"),
+            products: parseElementVector(this.elements.enzymeEditProducts ? this.elements.enzymeEditProducts.value : "", "Products")
+        };
         const scalarField = this.elements.enzymeEditField ? this.elements.enzymeEditField.value : "";
         if (scalarField) fields[scalarField] = parseEditNumber(this.elements.enzymeEditValue ? this.elements.enzymeEditValue.value : "", scalarField, INTEGER_ENZYME_FIELDS.has(scalarField));
         if (op === "append") return { op, enzyme: fields };
@@ -345,11 +343,10 @@ export class MicrocosmGUI {
         const enzyme = enzymes[0] || null;
         if (this.elements.enzymeEditOp) this.elements.enzymeEditOp.value = "none";
         if (this.elements.enzymeEditIndex) this.elements.enzymeEditIndex.value = enzyme ? String(enzyme.index || 0) : "0";
-        if (this.elements.enzymeEditType && enzyme) this.elements.enzymeEditType.value = enzyme.enzyme_type || "metabolic";
         if (this.elements.enzymeEditReactants && enzyme) this.elements.enzymeEditReactants.value = elementVectorText(enzyme.reactants);
         if (this.elements.enzymeEditProducts && enzyme) this.elements.enzymeEditProducts.value = elementVectorText(enzyme.products);
-        if (this.elements.enzymeEditField) this.elements.enzymeEditField.value = enzyme && enzyme.is_combat ? "combat_level" : "enval_sigma";
-        if (this.elements.enzymeEditValue && enzyme) this.elements.enzymeEditValue.value = displayValue(enzyme.is_combat ? enzyme.combat_level : enzyme.enval_sigma);
+        if (this.elements.enzymeEditField) this.elements.enzymeEditField.value = "enval_sigma";
+        if (this.elements.enzymeEditValue && enzyme) this.elements.enzymeEditValue.value = displayValue(enzyme.enval_sigma);
         this.setGenomeEditResult({ message: "Loaded selected genome values into the draft controls. Choose an enzyme operation before applying enzyme edits." });
     }
 
@@ -411,6 +408,16 @@ export class MicrocosmGUI {
             ["Average enval", stats.average_enval],
             ["Metabolic flux", stats.executed_metabolic_flux]
         ];
+        const interactions = [
+            ["Mean exposure", stats.mean_exposure],
+            ["Max exposure", stats.max_exposure],
+            ["Exposed cells", stats.exposed_cell_count],
+            ["Contact pairs", stats.contact_pairs],
+            ["Cross-lineage contacts", stats.cross_lineage_contact_pairs],
+            ["Field surface extent", stats.field_surface_extent],
+            ["Cell surface extent", stats.cell_surface_extent],
+            ["Lyses after digestion", stats.lyses_after_digestion]
+        ];
         const energyBudget = [
             ["Enval harvest", stats.energy_enval_harvest],
             ["Chemical harvest", stats.energy_chemical_harvest],
@@ -429,7 +436,9 @@ export class MicrocosmGUI {
         `;
         if (this.elements.diagnostics) this.elements.diagnostics.innerHTML = diagnostics.map(datum).join("")
             + `<div class="smallNote" style="grid-column: 1 / -1;">Energy budget (cumulative)</div>`
-            + energyBudget.map(datum).join("");
+            + energyBudget.map(datum).join("")
+            + `<div class="smallNote" style="grid-column: 1 / -1;">Surface interactions</div>`
+            + interactions.map(datum).join("");
         if (this.elements.renderStats) {
             const rows = [
                 ["Display mode", renderStats.displayMode || "—"],
@@ -566,8 +575,8 @@ export class MicrocosmGUI {
                 ["Local enval average", cell.local_enval_average],
                 ["Enzymes", cell.enzyme_count],
                 ["Internal elements", cell.total_internal_elements],
-                ["Attack", cell.combat_attack_total],
-                ["Defense", cell.combat_defense_total],
+                ["Field share", cell.field_share ?? "—"],
+                ["Contacts", contactsText(cell)],
             ]) : (this._detail.cellError ? payloadMessage(`Selected cell detail unavailable: ${this._detail.cellError}`, "smallNote errorText") : payloadMessage("No active cell selected."));
         }
         if (this.elements.lineageInspector) {
@@ -634,8 +643,8 @@ export class MicrocosmGUI {
             ["Catalyst upkeep / sec", detail.catalyst_upkeep_per_sec],
             ["Enzyme count", cell.enzyme_count],
             ["Internal elements", cell.total_internal_elements],
-            ["Attack total", cell.combat_attack_total],
-            ["Defense total", cell.combat_defense_total],
+            ["Field share", cell.field_share ?? "—"],
+            ["Contacts", contactsText(cell)],
         ]);
     }
 
@@ -657,18 +666,17 @@ export class MicrocosmGUI {
         if (!this.elements.enzymeInspector) return;
         this.elements.enzymeInspector.innerHTML = makeTable([
             { label: "#", value: (enzyme) => enzyme.index },
-            { label: "Type", value: (enzyme) => enzyme.enzyme_type },
-            { label: "Reactants A-F", value: (enzyme) => enzyme.is_metabolic ? elementCountsText(enzyme.reactants) : "—" },
-            { label: "Products A-F", value: (enzyme) => enzyme.is_metabolic ? elementCountsText(enzyme.products) : "—" },
-            { label: "Rate", value: (enzyme) => enzyme.is_metabolic ? enzyme.rate : "—" },
-            { label: "K½", value: (enzyme) => enzyme.is_metabolic ? enzyme.half_saturation : "—" },
+            { label: "Reactants A-F", value: (enzyme) => elementCountsText(enzyme.reactants) },
+            { label: "Products A-F", value: (enzyme) => elementCountsText(enzyme.products) },
+            { label: "Rate", value: (enzyme) => enzyme.rate },
+            { label: "K½", value: (enzyme) => enzyme.half_saturation },
             { label: "σ", value: (enzyme) => enzyme.enval_sigma },
             { label: "Throughput", value: (enzyme) => enzyme.enval_throughput },
-            { label: "Harvest", value: (enzyme) => enzyme.is_metabolic ? enzyme.energy_harvest_fraction : "—" },
-            { label: "Secretion", value: (enzyme) => enzyme.is_metabolic ? enzyme.secretion_fraction : "—" },
-            { label: "Body fraction", value: (enzyme) => enzyme.is_metabolic ? enzyme.body_fraction : "—" },
-            { label: "Boundary fraction", value: (enzyme) => enzyme.is_metabolic ? enzyme.boundary_fraction : "—" },
-            { label: "Combat", value: (enzyme) => enzyme.is_combat ? `level ${displayValue(enzyme.combat_level)}` : "—" }
+            { label: "Harvest", value: (enzyme) => enzyme.energy_harvest_fraction },
+            { label: "Secretion", value: (enzyme) => enzyme.secretion_fraction },
+            { label: "Body fraction", value: (enzyme) => enzyme.body_fraction },
+            { label: "Boundary fraction", value: (enzyme) => enzyme.boundary_fraction },
+            { label: "Exposure", value: (enzyme) => enzyme.exposure }
         ], enzymes || [], "Select a live cell to inspect enzymes.");
     }
 
@@ -703,7 +711,8 @@ export class MicrocosmGUI {
         const table = makeTable([
             { label: "Tick", value: (record) => record.tick_count ?? "—" },
             { label: "Time", value: (record) => record.sim_time_seconds == null ? "—" : `${displayValue(record.sim_time_seconds)}s` },
-            { label: "Catalyst", value: (record) => `${record.catalyst_index ?? "—"}: ${record.catalyst_type || "—"}` },
+            { label: "Catalyst", value: (record) => record.catalyst_index ?? "—" },
+            { label: "Site", value: (record) => record.site || "—" },
             { label: "Reactants", value: (record) => elementCountsText(record.reactants) },
             { label: "Products", value: (record) => elementCountsText(record.products) },
             { label: "Extent", value: (record) => `${displayValue(record.executed_extent)} / ${displayValue(record.requested_extent)}` },
@@ -728,12 +737,7 @@ export class MicrocosmGUI {
             ["Live share", lineage.share],
             ["Average energy", lineage.average_energy],
             ["Average enzymes", lineage.average_enzyme_count],
-            ["Average attack", lineage.average_attack_total],
-            ["Average defense", lineage.average_defense_total],
-            ["Max attack", lineage.max_attack_total],
-            ["Max defense", lineage.max_defense_total],
-            ["Cells with attackase", lineage.cells_with_attackase],
-            ["Cells with defensase", lineage.cells_with_defensase]
+            ["Mean exposure", lineage.mean_exposure]
         ]);
     }
 

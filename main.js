@@ -36,7 +36,7 @@ const initialSeed = () => normalizeSeedValue(new URL(window.location.href).searc
 
 const seedUrl = (seed) => { const url = new URL(window.location.href); url.searchParams.set(SEED_QUERY_PARAM, seed); return url; };
 
-const buildConfig = () => ({ seed: normalizeSeedValue(gui.seed || initialSeed()), width: 320, height: 240, initial_cells: 32, predation_enabled: true });
+const buildConfig = () => ({ seed: normalizeSeedValue(gui.seed || initialSeed()), width: 320, height: 240, initial_cells: 32 });
 
 const updateGui = () => gui.update({ runtime, renderer, interaction, paused, fps: fpsValue, tps: tpsValue });
 
