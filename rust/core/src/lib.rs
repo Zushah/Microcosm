@@ -17,11 +17,11 @@ pub use chem::{
     ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError, ElementProperties,
 };
 pub use config::{
-    CellBodyConfig, CellMotionConfig, Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
-    DEFAULT_MEMBRANE_PERMEABILITY, ElementFieldConfig, EnvalRechargeConfig, EnvalSourceConfig,
-    SurfaceConfig,
+    CellBodyConfig, CellMotionConfig, Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS,
+    DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES, DEFAULT_MEMBRANE_PERMEABILITY, ElementFieldConfig,
+    EnvalLandscapeConfig, EnvalRechargeConfig, SurfaceConfig,
 };
-pub use environment::{ENVAL_PER_RECHARGE_ENERGY, EnvalSource, EnvalSources, RechargeOutcome};
+pub use environment::{ENVAL_PER_RECHARGE_ENERGY, RechargeOutcome};
 pub use genome::{
     CatalystError, Enzyme, EnzymeFieldPatch, EnzymePatchOperation, GENOME_PATCH_SCHEMA, Genome,
     GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,

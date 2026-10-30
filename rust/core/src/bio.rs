@@ -106,11 +106,15 @@ pub fn compute_flux(
         return None;
     }
 
+    let pool_extent = f64::from(env.pool_extent.unwrap_or(env.cell_area));
     let mut substrate_limit = f64::INFINITY;
+    let mut limiting = f64::INFINITY;
     for element in ELEMENT_ORDER {
         let coefficient = f64::from(enzyme.reactants[element]);
         if coefficient > 0.0 {
-            substrate_limit = substrate_limit.min(f64::from(reservoir[element]) / coefficient);
+            let available = f64::from(reservoir[element]);
+            substrate_limit = substrate_limit.min(available / coefficient);
+            limiting = limiting.min(available / pool_extent / coefficient);
         }
     }
     if !substrate_limit.is_finite() || substrate_limit <= 0.0 {
@@ -118,8 +122,15 @@ pub fn compute_flux(
     }
 
     let enval_factor = f64::from(compute_enval_factor(enzyme, genome, env));
-    let saturation =
-        compute_saturation(enzyme, reservoir, env.pool_extent.unwrap_or(env.cell_area));
+    let saturation = if !pool_extent.is_finite()
+        || pool_extent <= 0.0
+        || !limiting.is_finite()
+        || limiting <= 0.0
+    {
+        0.0
+    } else {
+        limiting / (f64::from(enzyme.half_saturation) + limiting)
+    };
     let nominal_extent = f64::from(enzyme.rate)
         * dt_seconds
         * enval_factor
@@ -148,27 +159,14 @@ pub fn compute_flux(
     let polarity = resolve_enval_polarity(genome.optimal_enval, rng);
     let aligned_available = f64::from((polarity * env.local_enval).max(0.0));
 
-    let supported = |extent: f64| {
-        let input_magnitude = aligned_available.min(f64::from(enzyme.enval_throughput) * extent);
-        let enval_energy = input_magnitude * f64::from(enzyme.enval_energy_fraction);
-        cost_per_extent * extent <= cell_energy + enval_energy
-    };
-
-    let executed_extent = if cost_per_extent > 0.0 && !supported(requested_extent) {
-        let mut low = 0.0;
-        let mut high = requested_extent;
-        for _ in 0..48 {
-            let midpoint = (low + high) * 0.5;
-            if supported(midpoint) {
-                low = midpoint;
-            } else {
-                high = midpoint;
-            }
-        }
-        low
-    } else {
-        requested_extent
-    };
+    let executed_extent = affordable_extent(
+        requested_extent,
+        cost_per_extent,
+        cell_energy,
+        aligned_available,
+        f64::from(enzyme.enval_throughput),
+        f64::from(enzyme.enval_energy_fraction),
+    );
     if executed_extent <= 1.0e-12 {
         return None;
     }
@@ -228,6 +226,36 @@ pub fn compute_flux(
     })
 }
 
+fn affordable_extent(
+    requested_extent: f64,
+    cost_per_extent: f64,
+    cell_energy: f64,
+    aligned_available: f64,
+    enval_throughput: f64,
+    enval_energy_fraction: f64,
+) -> f64 {
+    let supported = |extent: f64| {
+        let input_magnitude = aligned_available.min(enval_throughput * extent);
+        let enval_energy = input_magnitude * enval_energy_fraction;
+        cost_per_extent * extent <= cell_energy + enval_energy
+    };
+    if cost_per_extent > 0.0 && !supported(requested_extent) {
+        let mut extent =
+            (cell_energy + enval_energy_fraction * aligned_available) / cost_per_extent;
+        let net_cost_per_extent = cost_per_extent - enval_energy_fraction * enval_throughput;
+        if net_cost_per_extent > 0.0 {
+            extent = extent.min(cell_energy / net_cost_per_extent);
+        }
+        let mut extent = extent.clamp(0.0, requested_extent);
+        while extent > 0.0 && !supported(extent) {
+            extent = extent.next_down();
+        }
+        extent
+    } else {
+        requested_extent
+    }
+}
+
 fn resolve_enval_polarity(optimal_enval: f32, rng: &mut Rng) -> f32 {
     if optimal_enval > 0.0 {
         1.0
@@ -243,7 +271,8 @@ fn resolve_enval_polarity(optimal_enval: f32, rng: &mut Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        GenomeReactionContext, ReactionEnv, compute_enval_factor, compute_flux, compute_saturation,
+        ENVAL_PUMP_ENERGY_COST, GenomeReactionContext, ReactionEnv, affordable_extent,
+        compute_enval_factor, compute_flux, compute_saturation,
     };
     use crate::chem::{Element, ElementAmounts};
     use crate::genome::Enzyme;
@@ -537,6 +566,144 @@ mod tests {
         assert!(outcome.executed_extent < outcome.requested_extent);
         assert!(outcome.energy_delta < 0.0);
         assert!(0.1 + outcome.energy_delta >= -1.0e-10);
+    }
+
+    fn bisected_extent(
+        requested_extent: f64,
+        cost_per_extent: f64,
+        cell_energy: f64,
+        aligned_available: f64,
+        enval_throughput: f64,
+        enval_energy_fraction: f64,
+    ) -> f64 {
+        let supported = |extent: f64| {
+            let input_magnitude = aligned_available.min(enval_throughput * extent);
+            let enval_energy = input_magnitude * enval_energy_fraction;
+            cost_per_extent * extent <= cell_energy + enval_energy
+        };
+        if cost_per_extent > 0.0 && !supported(requested_extent) {
+            let mut low = 0.0;
+            let mut high = requested_extent;
+            for _ in 0..48 {
+                let midpoint = (low + high) * 0.5;
+                if supported(midpoint) {
+                    low = midpoint;
+                } else {
+                    high = midpoint;
+                }
+            }
+            low
+        } else {
+            requested_extent
+        }
+    }
+
+    #[test]
+    fn closed_form_extent_matches_the_bisection_and_never_overdraws_energy() {
+        let mut rng = Rng::from_seed_str("closed-form-extent");
+        let body = crate::config::CellBodyConfig::default();
+        let mut limited = 0;
+        for sample in 0..20_000 {
+            let mut enzyme = match sample % 4 {
+                0 => Enzyme::founder_engine_forward(),
+                1 => Enzyme::founder_engine_reverse(),
+                2 => Enzyme::founder_downhill(),
+                _ => Enzyme::random(&mut rng),
+            };
+            enzyme.rate *= rng.range(0.5, 40.0);
+            enzyme.enval_throughput = rng.range(0.0, 0.5);
+            enzyme.enval_energy_fraction = rng.range(0.0, 1.0);
+            enzyme.enval_pump = if rng.chance(0.5) {
+                rng.range(0.0, 0.5)
+            } else {
+                0.0
+            };
+            enzyme.body_fraction = rng.range(0.0, 0.3);
+            enzyme.boundary_fraction = rng.range(0.0, 0.3);
+            let energy = if rng.chance(0.2) {
+                0.0
+            } else {
+                10.0_f64.powf(f64::from(rng.range(-6.0, 1.5)))
+            };
+            let local_enval = rng.range(-2.0, 2.0);
+            let optimal_enval = rng.range(-1.0, 1.0);
+            let area = rng.range(0.2, 2.0);
+            let mut reservoir = ElementAmounts::ZERO;
+            for element in crate::chem::ELEMENT_ORDER {
+                reservoir[element] = rng.range(0.0, 3.0) * area;
+            }
+            let env = ReactionEnv::internal(local_enval, area, body);
+            let context = GenomeReactionContext { optimal_enval };
+            let mut flux_rng = Rng::from_seed_str(&format!("closed-form-extent-{sample}"));
+            let Some(outcome) = compute_flux(
+                &enzyme,
+                reservoir,
+                energy,
+                0.01,
+                context,
+                env,
+                &mut flux_rng,
+            ) else {
+                continue;
+            };
+
+            let requested = f64::from(outcome.requested_extent);
+            let deficit =
+                (enzyme.products.intrinsic_energy() - enzyme.reactants.intrinsic_energy()).max(0.0);
+            let density = energy / f64::from(area);
+            let saturation = density / (f64::from(body.assembly_half_saturation) + density);
+            let assembly = body.assembly_energy_per_unit
+                * enzyme.products.total()
+                * (f64::from(enzyme.body_fraction) + f64::from(enzyme.boundary_fraction))
+                * saturation;
+            let cost = deficit + ENVAL_PUMP_ENERGY_COST * f64::from(enzyme.enval_pump) + assembly;
+            let polarity = if optimal_enval > 0.0 { 1.0 } else { -1.0 };
+            let available = f64::from((polarity * local_enval).max(0.0));
+            let arguments = (
+                requested,
+                cost,
+                energy,
+                available,
+                f64::from(enzyme.enval_throughput),
+                f64::from(enzyme.enval_energy_fraction),
+            );
+            let closed = affordable_extent(
+                arguments.0,
+                arguments.1,
+                arguments.2,
+                arguments.3,
+                arguments.4,
+                arguments.5,
+            );
+            let bisected = bisected_extent(
+                arguments.0,
+                arguments.1,
+                arguments.2,
+                arguments.3,
+                arguments.4,
+                arguments.5,
+            );
+            let bisection_resolution = requested * 2.0_f64.powi(-48);
+            assert!(
+                (closed - bisected).abs() <= 1.0e-9 * bisected + bisection_resolution,
+                "sample {sample}: closed {closed} bisected {bisected} requested {requested}"
+            );
+            assert!(closed <= requested);
+            let supported = |extent: f64| {
+                cost * extent <= energy + available.min(arguments.4 * extent) * arguments.5
+            };
+            assert!(supported(closed));
+            if closed < requested {
+                limited += 1;
+                assert!(!supported(closed * (1.0 + 1.0e-12)));
+            }
+            assert!(
+                energy + outcome.energy_delta >= -1.0e-12,
+                "sample {sample} overdrew {}",
+                energy + outcome.energy_delta
+            );
+        }
+        assert!(limited > 1_000, "only {limited} energy-limited samples");
     }
 
     #[test]

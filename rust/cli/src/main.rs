@@ -25,6 +25,7 @@ const VIABILITY_PROGRESS_EVERY: u64 = 5_000;
 const VIABILITY_MIN_LIVE_AFTER_TICK: u64 = 1_000;
 const VIABILITY_POPULATION_CAP: usize = 60_000;
 const VIABILITY_MIN_RENEWABLE_COVERAGE: f64 = 0.25;
+const VIABILITY_POPULATION_MILESTONES: [(u64, usize); 2] = [(20_000, 5_000), (60_000, 10_000)];
 
 #[derive(Debug, Clone)]
 enum Command {
@@ -197,6 +198,7 @@ struct ViabilityResult {
     max_exposure: f32,
     exposed_cells: usize,
     peak_cross_lineage_contacts: u64,
+    milestone_cells: [Option<usize>; 2],
     wall_seconds: f64,
 }
 
@@ -703,6 +705,15 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
             continue;
         }
         let live = world.cell_count();
+        for (cells, (milestone, _)) in result
+            .milestone_cells
+            .iter_mut()
+            .zip(VIABILITY_POPULATION_MILESTONES)
+        {
+            if tick == milestone {
+                *cells = Some(live);
+            }
+        }
         if sample {
             let stats = world.compact_stats();
             result.max_radius_seen = result.max_radius_seen.max(stats.radius_max);
@@ -816,22 +827,43 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
             result.renewable_coverage
         ));
     }
+    result
+        .failures
+        .extend(population_milestone_failures(&result.milestone_cells));
     result.passed = result.failures.is_empty() && result.final_tick == steps;
     result.wall_seconds = wall_start.elapsed().as_secs_f64();
     result
 }
 
+fn population_milestone_failures(milestone_cells: &[Option<usize>; 2]) -> Vec<String> {
+    milestone_cells
+        .iter()
+        .zip(VIABILITY_POPULATION_MILESTONES)
+        .filter_map(|(cells, (tick, minimum))| {
+            cells
+                .filter(|cells| *cells < minimum)
+                .map(|cells| format!("{cells} live cells at tick {tick} is below {minimum}"))
+        })
+        .collect()
+}
+
+fn milestone_column(cells: Option<usize>) -> String {
+    cells.map_or_else(|| "-".to_owned(), |cells| cells.to_string())
+}
+
 fn print_viability_table(results: &[ViabilityResult], steps: u64) {
     println!(
-        "seed pass final peak coverage fissions energy_deaths lyses/all_deaths radius_median radius_p95 max_radius_seen median_range max_resid AF_total_drift digested cross_digested lyses_after_digestion mean_exposure max_exposure exposed_cells peak_cross_contacts wall_s"
+        "seed pass final peak cells_20k cells_60k coverage fissions energy_deaths lyses/all_deaths radius_median radius_p95 max_radius_seen median_range max_resid AF_total_drift digested cross_digested lyses_after_digestion mean_exposure max_exposure exposed_cells peak_cross_contacts wall_s"
     );
     for result in results {
         println!(
-            "{} {} {} {} {:.3} {} {} {}/{} {:.3} {:.3} {:.3} {:.3}..{:.3} {:.2e} {:.2e} {:.3} {:.3} {} {:.4} {:.3} {} {} {:.1}",
+            "{} {} {} {} {} {} {:.3} {} {} {}/{} {:.3} {:.3} {:.3} {:.3}..{:.3} {:.2e} {:.2e} {:.3} {:.3} {} {:.4} {:.3} {} {} {:.1}",
             result.seed,
             if result.passed { "yes" } else { "NO" },
             result.final_live,
             result.peak_live,
+            milestone_column(result.milestone_cells[0]),
+            milestone_column(result.milestone_cells[1]),
             result.renewable_coverage,
             result.fissions,
             result.energy_deaths,
@@ -885,6 +917,8 @@ fn print_viability_json(results: &[ViabilityResult], steps: u64) {
                 "peak_live": result.peak_live,
                 "peak_tick": result.peak_tick,
                 "final_live": result.final_live,
+                "cells_20k": result.milestone_cells[0],
+                "cells_60k": result.milestone_cells[1],
                 "enval_harvest": result.enval_harvest,
                 "chemical_harvest": result.chemical_harvest,
                 "recharge_energy": result.recharge_energy,
@@ -1112,8 +1146,9 @@ where
             "--steps" => options.steps = parse_value(&mut args, "--steps")?,
             "--stats-every" => options.stats_every = parse_value(&mut args, "--stats-every")?,
             "--dt-seconds" => options.config.dt_seconds = parse_value(&mut args, "--dt-seconds")?,
-            "--enval-alpha" => {
-                options.config.enval_diffusion_alpha = parse_value(&mut args, "--enval-alpha")?;
+            "--enval-diffusivity" => {
+                options.config.enval_diffusivity_per_second =
+                    parse_value(&mut args, "--enval-diffusivity")?;
             }
             "--check-invariants" => options.check_invariants = true,
             "--check-invariants-every" => {
@@ -1185,8 +1220,9 @@ where
             "--steps" => options.steps = parse_value(&mut args, "--steps")?,
             "--stats-every" => options.stats_every = parse_value(&mut args, "--stats-every")?,
             "--dt-seconds" => options.config.dt_seconds = parse_value(&mut args, "--dt-seconds")?,
-            "--enval-alpha" => {
-                options.config.enval_diffusion_alpha = parse_value(&mut args, "--enval-alpha")?;
+            "--enval-diffusivity" => {
+                options.config.enval_diffusivity_per_second =
+                    parse_value(&mut args, "--enval-diffusivity")?;
             }
             "--check-invariants-every" => {
                 options.check_invariants_every =
@@ -1252,8 +1288,9 @@ where
                 options.config.initial_founder_count = parse_value(&mut args, "--initial-cells")?;
             }
             "--dt-seconds" => options.config.dt_seconds = parse_value(&mut args, "--dt-seconds")?,
-            "--enval-alpha" => {
-                options.config.enval_diffusion_alpha = parse_value(&mut args, "--enval-alpha")?;
+            "--enval-diffusivity" => {
+                options.config.enval_diffusivity_per_second =
+                    parse_value(&mut args, "--enval-diffusivity")?;
             }
             other => {
                 if !parse_environment_flag(other, &mut args, &mut options.config)? {
@@ -1276,11 +1313,10 @@ where
     match arg {
         "--permeability" => config.membrane_permeability = parse_value(args, arg)?,
         "--catalyst-upkeep" => config.catalyst_upkeep_per_sec = parse_value(args, arg)?,
-        "--source-pairs" => config.enval_sources.pairs = parse_value(args, arg)?,
-        "--source-radius" => config.enval_sources.radius = parse_value(args, arg)?,
-        "--source-magnitude" => config.enval_sources.magnitude = parse_value(args, arg)?,
-        "--source-relaxation" => {
-            config.enval_sources.relaxation_per_second = parse_value(args, arg)?;
+        "--landscape-magnitude" => config.enval_landscape.magnitude = parse_value(args, arg)?,
+        "--landscape-scale" => config.enval_landscape.scale = parse_value(args, arg)?,
+        "--landscape-relaxation" => {
+            config.enval_landscape.relaxation_per_second = parse_value(args, arg)?;
         }
         "--recharge-rate" => config.enval_recharge.rate_per_second = parse_value(args, arg)?,
         "--heterogeneity" => config.element_fields.heterogeneity = parse_value(args, arg)?,
@@ -2116,7 +2152,7 @@ fn print_usage() {
   microcosm inspect snapshot.micosm
   microcosm viability [--seeds 42,1,2,3,7] [--steps 60000] [--jobs N] [--json] [--quiet] [--width W] [--height H] [--initial-cells N]
 environment flags (run, bench, viability):
-  [--permeability P] [--catalyst-upkeep U] [--source-pairs N] [--source-radius R] [--source-magnitude M] [--source-relaxation K] [--recharge-rate K] [--heterogeneity H] [--heterogeneity-scale S] [--drift D] [--contact-gap G]"
+  [--permeability P] [--catalyst-upkeep U] [--landscape-magnitude M] [--landscape-scale S] [--landscape-relaxation K] [--recharge-rate K] [--heterogeneity H] [--heterogeneity-scale S] [--drift D] [--contact-gap G]"
     );
 }
 
@@ -2472,14 +2508,14 @@ mod tests {
                 "6",
                 "--catalyst-upkeep",
                 "0.02",
-                "--source-pairs",
-                "2",
-                "--source-radius",
-                "5",
-                "--source-magnitude",
+                "--landscape-magnitude",
                 "1.5",
-                "--source-relaxation",
-                "8",
+                "--landscape-scale",
+                "30",
+                "--landscape-relaxation",
+                "0.4",
+                "--enval-diffusivity",
+                "12",
                 "--recharge-rate",
                 "0.2",
                 "--heterogeneity",
@@ -2500,10 +2536,10 @@ mod tests {
             };
             assert_eq!(config.membrane_permeability, 6.0);
             assert_eq!(config.catalyst_upkeep_per_sec, 0.02);
-            assert_eq!(config.enval_sources.pairs, 2);
-            assert_eq!(config.enval_sources.radius, 5.0);
-            assert_eq!(config.enval_sources.magnitude, 1.5);
-            assert_eq!(config.enval_sources.relaxation_per_second, 8.0);
+            assert_eq!(config.enval_landscape.magnitude, 1.5);
+            assert_eq!(config.enval_landscape.scale, 30.0);
+            assert_eq!(config.enval_landscape.relaxation_per_second, 0.4);
+            assert_eq!(config.enval_diffusivity_per_second, 12.0);
             assert_eq!(config.enval_recharge.rate_per_second, 0.2);
             assert_eq!(config.element_fields.heterogeneity, 0.3);
             assert_eq!(config.element_fields.heterogeneity_scale, 32.0);
@@ -2539,6 +2575,40 @@ mod tests {
             );
             assert_eq!(left.final_totals, right.final_totals);
         }
+    }
+
+    #[test]
+    fn population_milestones_fail_runs_short_of_either_threshold_and_print() {
+        assert!(population_milestone_failures(&[None, None]).is_empty());
+        assert!(population_milestone_failures(&[Some(5_000), None]).is_empty());
+        assert!(population_milestone_failures(&[Some(5_000), Some(10_000)]).is_empty());
+        assert_eq!(
+            population_milestone_failures(&[Some(4_999), None]),
+            vec!["4999 live cells at tick 20000 is below 5000".to_owned()]
+        );
+        assert_eq!(
+            population_milestone_failures(&[Some(20_000), Some(9_999)]),
+            vec!["9999 live cells at tick 60000 is below 10000".to_owned()]
+        );
+        assert_eq!(population_milestone_failures(&[Some(1), Some(2)]).len(), 2);
+        assert_eq!(milestone_column(None), "-");
+        assert_eq!(milestone_column(Some(17_584)), "17584");
+
+        let config = Config {
+            seed: "milestones".to_owned(),
+            width: 24,
+            height: 18,
+            initial_founder_count: 6,
+            ..Config::default()
+        };
+        let short = run_viability_world(config, 200, true);
+        assert_eq!(short.milestone_cells, [None, None]);
+        assert!(
+            short
+                .failures
+                .iter()
+                .all(|failure| !failure.contains("live cells at tick"))
+        );
     }
 
     #[test]

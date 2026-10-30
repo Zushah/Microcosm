@@ -111,8 +111,8 @@ impl Enzyme {
             FOUNDER_ENGINE_HARVEST_FRACTION,
             0.0,
         );
-        enzyme.body_fraction = 0.02;
-        enzyme.boundary_fraction = 0.02;
+        enzyme.body_fraction = 0.12;
+        enzyme.boundary_fraction = 0.12;
         enzyme.enval_throughput = FOUNDER_ENGINE_ENVAL_THROUGHPUT;
         enzyme.enval_pump = 0.0;
         enzyme
@@ -891,8 +891,8 @@ mod tests {
             let engine = genome.enzymes[index + 1];
             assert_eq!(engine.reactants, reactants);
             assert_eq!(engine.products, products);
-            assert_eq!(engine.body_fraction, 0.02);
-            assert_eq!(engine.boundary_fraction, 0.02);
+            assert_eq!(engine.body_fraction, 0.12);
+            assert_eq!(engine.boundary_fraction, 0.12);
             assert_eq!(engine.rate, 0.8);
             assert_eq!(engine.energy_harvest_fraction, 0.65);
             assert_eq!(engine.secretion_fraction, 0.0);

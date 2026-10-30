@@ -1,130 +1,33 @@
-use serde::{Deserialize, Serialize};
-
 use crate::chem::{ELEMENT_ORDER, Element, ElementAmounts};
-use crate::config::{ElementFieldConfig, EnvalSourceConfig};
+use crate::config::{ElementFieldConfig, EnvalLandscapeConfig};
 use crate::rng::Rng;
-use crate::spatial::{Position, toroidal_distance_squared};
 
 pub const ENVAL_PER_RECHARGE_ENERGY: f64 = 1.0;
-const SOURCE_PLACEMENT_ATTEMPTS: usize = 64;
-const SOURCE_SEPARATION_RADII: f32 = 4.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct EnvalSource {
-    pub center: Position,
-    pub target: f32,
+pub fn enval_landscape(
+    config: &EnvalLandscapeConfig,
+    width: usize,
+    height: usize,
+    rng: &mut Rng,
+) -> Vec<f32> {
+    let mut targets = periodic_noise(width, height, config.scale, rng);
+    let peak = targets
+        .iter()
+        .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+    if peak > 0.0 {
+        for value in &mut targets {
+            *value = *value / peak * config.magnitude;
+        }
+    }
+    targets
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct EnvalSources {
-    pub sources: Vec<EnvalSource>,
-    tiles: Vec<u32>,
-    targets: Vec<f32>,
-}
-
-impl EnvalSources {
-    pub fn place(config: &EnvalSourceConfig, width: usize, height: usize, rng: &mut Rng) -> Self {
-        let mut placed = Self::default();
-        if config.pairs == 0 || width == 0 || height == 0 {
-            return placed;
-        }
-        let (world_width, world_height) = (width as f32, height as f32);
-        let min_separation_squared = (SOURCE_SEPARATION_RADII * config.radius).powi(2);
-        let mut claimed = vec![false; width * height];
-        for index in 0..config.pairs.saturating_mul(2) {
-            let mut center = Position::default();
-            for _ in 0..SOURCE_PLACEMENT_ATTEMPTS {
-                center = Position::new(rng.range(0.0, world_width), rng.range(0.0, world_height));
-                let separated = placed.sources.iter().all(|source| {
-                    toroidal_distance_squared(center, source.center, world_width, world_height)
-                        >= min_separation_squared
-                });
-                if separated {
-                    break;
-                }
-            }
-            let target = if index % 2 == 0 {
-                config.magnitude
-            } else {
-                -config.magnitude
-            };
-            placed.sources.push(EnvalSource { center, target });
-            placed.claim_disc(center, config.radius, target, width, height, &mut claimed);
-        }
-        placed
+pub fn relax_enval(enval: &mut [f32], targets: &[f32], kappa: f64) -> f64 {
+    let mut applied = 0.0;
+    for (value, target) in enval.iter_mut().zip(targets) {
+        applied += relax_value(value, *target, kappa);
     }
-
-    fn claim_disc(
-        &mut self,
-        center: Position,
-        radius: f32,
-        target: f32,
-        width: usize,
-        height: usize,
-        claimed: &mut [bool],
-    ) {
-        let (world_width, world_height) = (width as f32, height as f32);
-        let reach = radius.ceil() as isize + 1;
-        let radius_squared = radius * radius;
-        let center_x = center.x.floor() as isize;
-        let center_y = center.y.floor() as isize;
-        for dx in -reach..=reach {
-            for dy in -reach..=reach {
-                let x = (center_x + dx).rem_euclid(width as isize) as usize;
-                let y = (center_y + dy).rem_euclid(height as isize) as usize;
-                let tile = x * height + y;
-                if claimed[tile] {
-                    continue;
-                }
-                let tile_center = Position::new(x as f32, y as f32);
-                if toroidal_distance_squared(center, tile_center, world_width, world_height)
-                    <= radius_squared
-                {
-                    claimed[tile] = true;
-                    self.tiles.push(tile as u32);
-                    self.targets.push(target);
-                }
-            }
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tiles.is_empty()
-    }
-
-    pub fn tile_count(&self) -> usize {
-        self.tiles.len()
-    }
-
-    pub fn tiles(&self) -> impl Iterator<Item = (usize, f32)> + '_ {
-        self.tiles
-            .iter()
-            .zip(&self.targets)
-            .map(|(tile, target)| (*tile as usize, *target))
-    }
-
-    pub fn target_for_tile(&self, tile: usize) -> Option<f32> {
-        self.tiles()
-            .find(|(source_tile, _)| *source_tile == tile)
-            .map(|(_, target)| target)
-    }
-
-    pub fn write_targets(&self, enval: &mut [f32]) {
-        for (tile, target) in self.tiles() {
-            enval[tile] = target;
-        }
-    }
-
-    pub fn relax(&self, enval: &mut [f32], kappa: f64) -> f64 {
-        let mut applied = 0.0;
-        for (tile, target) in self.tiles() {
-            let old = enval[tile];
-            let value = (f64::from(old) + kappa * (f64::from(target) - f64::from(old))) as f32;
-            enval[tile] = value;
-            applied += f64::from(value) - f64::from(old);
-        }
-        applied
-    }
+    applied
 }
 
 const NOISE_OCTAVES: [(f32, usize); 2] = [(1.0, 1), (0.5, 2)];
@@ -209,6 +112,81 @@ pub struct RechargeOutcome {
     pub energy: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EnvalSweepOutcome {
+    pub recharge: RechargeOutcome,
+    pub relaxation: f64,
+    pub enval_sum: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Recharger {
+    rate_per_second: f64,
+    dt_seconds: f64,
+    lift_to_d: f64,
+    lift_to_e: f64,
+}
+
+impl Recharger {
+    fn new(rate_per_second: f64, dt_seconds: f64) -> Self {
+        let spent_energy = f64::from(Element::F.properties().energy);
+        Self {
+            rate_per_second,
+            dt_seconds,
+            lift_to_d: f64::from(Element::D.properties().energy) - spent_energy,
+            lift_to_e: f64::from(Element::E.properties().energy) - spent_energy,
+        }
+    }
+
+    #[inline]
+    fn apply(&self, value: &mut f32, amounts: &mut ElementAmounts, outcome: &mut RechargeOutcome) {
+        let field = f64::from(*value);
+        let levels = amounts.as_mut_array();
+        let spent = f64::from(levels[Element::F.index()]);
+        if field == 0.0 || spent <= 0.0 {
+            return;
+        }
+        let positive = field > 0.0;
+        let (target, lift) = if positive {
+            (Element::D.index(), self.lift_to_d)
+        } else {
+            (Element::E.index(), self.lift_to_e)
+        };
+        let magnitude = field.abs();
+        let wanted = self.rate_per_second * magnitude * spent * self.dt_seconds;
+        let capped = magnitude / (lift * ENVAL_PER_RECHARGE_ENERGY);
+        let amount = if wanted < spent { wanted } else { spent };
+        let amount = if capped < amount { capped } else { amount } as f32;
+        if amount <= 0.0 {
+            return;
+        }
+        let available = levels[Element::F.index()];
+        let amount = if available < amount {
+            available
+        } else {
+            amount
+        };
+        levels[Element::F.index()] -= amount;
+        levels[target] += amount;
+        let consumed = f64::from(amount) * lift * ENVAL_PER_RECHARGE_ENERGY;
+        let remaining = magnitude - consumed;
+        let remaining = if remaining > 0.0 { remaining } else { 0.0 };
+        let next = if positive { remaining } else { -remaining } as f32;
+        outcome.enval_delta += f64::from(next) - field;
+        outcome.amount += f64::from(amount);
+        outcome.energy += f64::from(amount) * lift;
+        *value = next;
+    }
+}
+
+#[inline]
+fn relax_value(value: &mut f32, target: f32, kappa: f64) -> f64 {
+    let old = *value;
+    let next = (f64::from(old) + kappa * (f64::from(target) - f64::from(old))) as f32;
+    *value = next;
+    f64::from(next) - f64::from(old)
+}
+
 pub fn recharge(
     enval: &mut [f32],
     fields: &mut [ElementAmounts],
@@ -219,157 +197,117 @@ pub fn recharge(
     if rate_per_second <= 0.0 {
         return outcome;
     }
-    let spent_energy = f64::from(Element::F.properties().energy);
-    let lift_to_d = f64::from(Element::D.properties().energy) - spent_energy;
-    let lift_to_e = f64::from(Element::E.properties().energy) - spent_energy;
+    let recharger = Recharger::new(rate_per_second, dt_seconds);
     for (value, amounts) in enval.iter_mut().zip(fields.iter_mut()) {
-        let field = f64::from(*value);
-        let spent = f64::from(amounts[Element::F]);
-        if field == 0.0 || spent <= 0.0 {
-            continue;
+        recharger.apply(value, amounts, &mut outcome);
+    }
+    outcome
+}
+
+pub fn recharge_and_relax(
+    enval: &mut [f32],
+    fields: &mut [ElementAmounts],
+    targets: &[f32],
+    rate_per_second: f64,
+    dt_seconds: f64,
+    kappa: f64,
+) -> EnvalSweepOutcome {
+    let mut outcome = EnvalSweepOutcome::default();
+    let recharger = Recharger::new(rate_per_second, dt_seconds);
+    let recharging = rate_per_second > 0.0;
+    let relaxing = kappa > 0.0;
+    for ((value, amounts), target) in enval.iter_mut().zip(fields.iter_mut()).zip(targets) {
+        if recharging {
+            recharger.apply(value, amounts, &mut outcome.recharge);
         }
-        let (target, lift) = if field > 0.0 {
-            (Element::D, lift_to_d)
-        } else {
-            (Element::E, lift_to_e)
-        };
-        let magnitude = field.abs();
-        let amount = spent
-            .min(rate_per_second * magnitude * spent * dt_seconds)
-            .min(magnitude / (lift * ENVAL_PER_RECHARGE_ENERGY)) as f32;
-        if amount <= 0.0 {
-            continue;
+        if relaxing {
+            outcome.relaxation += relax_value(value, *target, kappa);
         }
-        let amount = amount.min(amounts[Element::F]);
-        amounts[Element::F] -= amount;
-        amounts[target] += amount;
-        let consumed = f64::from(amount) * lift * ENVAL_PER_RECHARGE_ENERGY;
-        let remaining = (magnitude - consumed).max(0.0);
-        let next = (field.signum() * remaining) as f32;
-        let next = if next.signum() != value.signum() {
-            0.0
-        } else {
-            next
-        };
-        outcome.enval_delta += f64::from(next) - field;
-        outcome.amount += f64::from(amount);
-        outcome.energy += f64::from(amount) * lift;
-        *value = next;
+        outcome.enval_sum += f64::from(*value);
     }
     outcome
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EnvalSources, initial_element_fields, periodic_noise, recharge};
+    use super::{enval_landscape, initial_element_fields, periodic_noise, recharge, relax_enval};
     use crate::chem::{Element, ElementAmounts};
-    use crate::config::ElementFieldConfig;
-    use crate::config::EnvalSourceConfig;
+    use crate::config::{ElementFieldConfig, EnvalLandscapeConfig};
     use crate::rng::Rng;
-    use crate::spatial::toroidal_distance;
 
     #[test]
-    fn placement_is_seed_deterministic_alternates_sign_and_honours_separation() {
-        let config = EnvalSourceConfig::default();
-        let mut first_rng = Rng::from_seed_str("source-placement");
-        let mut second_rng = Rng::from_seed_str("source-placement");
-        let first = EnvalSources::place(&config, 320, 240, &mut first_rng);
-        let second = EnvalSources::place(&config, 320, 240, &mut second_rng);
-        assert_eq!(first, second);
-        assert_eq!(
-            first_rng.next_f64().to_bits(),
-            second_rng.next_f64().to_bits()
-        );
-        assert_eq!(first.sources.len(), 6);
-        for (index, source) in first.sources.iter().enumerate() {
-            let expected = if index % 2 == 0 { 1.0 } else { -1.0 };
-            assert_eq!(source.target, expected);
-        }
-        for (left_index, left) in first.sources.iter().enumerate() {
-            for right in &first.sources[left_index + 1..] {
-                assert!(
-                    toroidal_distance(left.center, right.center, 320.0, 240.0) >= 24.0,
-                    "sources too close"
-                );
-            }
-        }
-        let disc_tiles = first.tile_count() / first.sources.len();
+    fn landscape_is_seeded_bounded_peaks_at_the_magnitude_and_is_periodic() {
+        let (width, height) = (160, 120);
+        let config = EnvalLandscapeConfig {
+            magnitude: 1.3,
+            scale: 40.0,
+            relaxation_per_second: 0.2,
+        };
+        let mut rng = Rng::from_seed_str("landscape");
+        let targets = enval_landscape(&config, width, height, &mut rng);
+        assert_eq!(targets.len(), width * height);
+        assert!(targets.iter().all(|value| value.abs() <= 1.3));
+        let peak = targets
+            .iter()
+            .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+        assert_eq!(peak, 1.3);
+        assert!(targets.iter().any(|value| *value > 0.3));
+        assert!(targets.iter().any(|value| *value < -0.3));
+        let (interior, seam) = max_neighbour_step(&targets, width, height);
+        assert!(interior < 0.25, "landscape is not smooth: {interior}");
         assert!(
-            (100..=125).contains(&disc_tiles),
-            "{disc_tiles} tiles per disc"
+            seam <= interior,
+            "seam step {seam} exceeds interior step {interior}"
         );
 
-        let mut other_rng = Rng::from_seed_str("source-placement-other");
+        let mut same_rng = Rng::from_seed_str("landscape");
+        assert_eq!(
+            targets,
+            enval_landscape(&config, width, height, &mut same_rng)
+        );
+        assert_eq!(rng.next_f64().to_bits(), same_rng.next_f64().to_bits());
+        let mut other_rng = Rng::from_seed_str("landscape-other");
         assert_ne!(
-            EnvalSources::place(&config, 320, 240, &mut other_rng).sources,
-            first.sources
+            targets,
+            enval_landscape(&config, width, height, &mut other_rng)
         );
+
+        let mut rng = Rng::from_seed_str("landscape");
+        let mut unit = config;
+        unit.magnitude = 1.0;
+        let unit_targets = enval_landscape(&unit, width, height, &mut rng);
+        for (scaled, unit) in targets.iter().zip(&unit_targets) {
+            assert!((scaled - 1.3 * unit).abs() <= 1.0e-6);
+        }
     }
 
     #[test]
-    fn infeasible_separation_still_places_every_source_without_duplicate_tiles() {
-        let config = EnvalSourceConfig {
-            pairs: 4,
-            ..EnvalSourceConfig::default()
-        };
-        let mut rng = Rng::from_seed_str("source-crowded");
-        let sources = EnvalSources::place(&config, 10, 8, &mut rng);
-        assert_eq!(sources.sources.len(), 8);
-        let mut tiles = sources.tiles().map(|(tile, _)| tile).collect::<Vec<_>>();
-        let count = tiles.len();
-        tiles.sort_unstable();
-        tiles.dedup();
-        assert_eq!(tiles.len(), count);
-        assert!(count > 70 && count <= 80);
-        assert!(sources.tiles().all(|(_, target)| target.abs() == 1.0));
-        assert!(sources.tiles().filter(|(_, target)| *target == 1.0).count() > count / 2);
-    }
-
-    #[test]
-    fn zero_pairs_place_nothing_and_consume_no_rng() {
-        let config = EnvalSourceConfig {
-            pairs: 0,
-            ..EnvalSourceConfig::default()
-        };
-        let mut rng = Rng::from_seed_str("source-none");
-        let mut untouched = rng.clone();
-        let sources = EnvalSources::place(&config, 32, 24, &mut rng);
-        assert!(sources.is_empty());
-        assert_eq!(rng.next_f64().to_bits(), untouched.next_f64().to_bits());
-    }
-
-    #[test]
-    fn relaxation_converges_to_target_and_reports_the_applied_change() {
-        let config = EnvalSourceConfig {
-            pairs: 1,
-            radius: 2.0,
-            ..EnvalSourceConfig::default()
-        };
-        let mut rng = Rng::from_seed_str("source-relax");
-        let sources = EnvalSources::place(&config, 16, 12, &mut rng);
-        let mut enval = vec![0.0_f32; 16 * 12];
-        let kappa = 1.0 - (-0.05_f64).exp();
+    fn relaxation_moves_every_tile_by_kappa_and_reports_the_applied_change() {
+        let targets = vec![1.0_f32, -0.5, 0.25, 0.0];
+        let mut enval = vec![0.0_f32, 0.5, 0.25, -2.0];
+        let kappa = 1.0 - (-0.2_f64 * 0.01).exp();
         let mut total = 0.0;
-        for _ in 0..600 {
-            let before = enval.iter().map(|value| f64::from(*value)).sum::<f64>();
-            let applied = sources.relax(&mut enval, kappa);
-            let after = enval.iter().map(|value| f64::from(*value)).sum::<f64>();
-            assert!((after - before - applied).abs() <= 1.0e-9);
+        for _ in 0..10_000 {
+            let before = enval.clone();
+            let applied = relax_enval(&mut enval, &targets, kappa);
+            let mut expected_applied = 0.0;
+            for tile in 0..enval.len() {
+                let expected = f64::from(before[tile])
+                    + kappa * (f64::from(targets[tile]) - f64::from(before[tile]));
+                assert!((f64::from(enval[tile]) - expected).abs() <= 1.0e-7);
+                expected_applied += f64::from(enval[tile]) - f64::from(before[tile]);
+            }
+            assert!((applied - expected_applied).abs() <= 1.0e-12);
             total += applied;
         }
-        for (tile, target) in sources.tiles() {
-            assert!((enval[tile] - target).abs() <= 1.0e-6);
-            assert_eq!(sources.target_for_tile(tile), Some(target));
-        }
-        let expected_total = sources
-            .tiles()
-            .map(|(_, target)| f64::from(target))
-            .sum::<f64>();
-        assert!((total - expected_total).abs() <= 1.0e-4);
-        let off_source = (0..enval.len())
-            .find(|tile| sources.target_for_tile(*tile).is_none())
-            .unwrap();
-        assert_eq!(enval[off_source], 0.0);
+        assert_eq!(enval[2], 0.25);
+        let decay = (1.0 - kappa).powi(10_000);
+        assert!((f64::from(enval[0]) - (1.0 - decay)).abs() <= 1.0e-4);
+        let final_sum = enval.iter().map(|value| f64::from(*value)).sum::<f64>();
+        assert!((total - (final_sum + 1.25)).abs() <= 1.0e-5);
+        let mut frozen = enval.clone();
+        assert_eq!(relax_enval(&mut frozen, &targets, 0.0), 0.0);
+        assert_eq!(frozen, enval);
     }
 
     #[test]

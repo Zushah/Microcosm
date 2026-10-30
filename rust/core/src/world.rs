@@ -9,7 +9,7 @@ use crate::bio::{self, GenomeReactionContext, ReactionEnv};
 use crate::cell::{Cell, CellFluxLog, CellId, CellStore, FluxRecord, ReactionSite};
 use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError};
 use crate::config::{Config, ConfigError};
-use crate::environment::{self, EnvalSources};
+use crate::environment;
 use crate::genome::{
     Enzyme, Genome, GenomePatch, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
@@ -35,6 +35,8 @@ const MAX_TRANSPORT_FRACTION: f64 = 0.25;
 const FOUNDER_PLACEMENT_ATTEMPTS: usize = 64;
 pub const MIN_DAUGHTER_BODY: f64 = 0.05;
 const OVERLAP_RELAXATION_PASSES: usize = 2;
+const CONTACT_LIST_SKIN_GAPS: f32 = 1.0;
+const CONTACT_LIST_RANGE_EPSILON: f32 = 1.0e-3;
 const GEOMETRY_TOLERANCE: f32 = 1.0e-5;
 pub const LYSIS_ATTRIBUTION_TICKS: u64 = 100;
 
@@ -72,7 +74,7 @@ pub struct TileInspection {
     pub x: usize,
     pub y: usize,
     pub enval: f32,
-    pub enval_source_target: Option<f32>,
+    pub enval_landscape_target: f32,
     pub cell_center_count: u32,
     pub element_concentrations: [f32; ELEMENT_COUNT],
     pub total_element_concentration: f32,
@@ -206,11 +208,25 @@ pub struct LineageListInspection {
     pub lineages: Vec<LineageSummaryInspection>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BinnedCell {
+    position: Position,
+    radius: f32,
+    slot: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TileStencil {
+    tiles: [usize; 4],
+    weights: [f32; 4],
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CellReactionContext {
     cell_id: CellId,
     slot: usize,
     position: Position,
+    stencil: TileStencil,
     local_enval: f32,
     cell_area: f32,
     genome: GenomeReactionContext,
@@ -231,7 +247,7 @@ pub struct World {
     enval_next: Vec<f32>,
     element_fields: Vec<ElementAmounts>,
     element_fields_next: Vec<ElementAmounts>,
-    enval_sources: EnvalSources,
+    enval_landscape: Vec<f32>,
     cells: CellStore,
     #[serde(skip, default)]
     watched_cell_id: Option<CellId>,
@@ -242,11 +258,55 @@ pub struct World {
     #[serde(skip, default)]
     mechanics_corrections: Vec<Position>,
     #[serde(skip, default)]
-    pair_scratch: Vec<(CellId, CellId)>,
+    contact_pairs: Vec<(u32, u32)>,
+    #[serde(skip, default)]
+    indexed_positions: Vec<Position>,
+    #[serde(skip, default)]
+    spatial_sync_pending: bool,
+    #[serde(skip, default)]
+    contact_found: Vec<(u32, u32)>,
+    #[serde(skip, default)]
+    contact_tile_offsets: Vec<u32>,
+    #[serde(skip, default)]
+    contact_tile_cells: Vec<BinnedCell>,
+    #[serde(skip, default)]
+    contact_row_scratch: Vec<u32>,
+    #[serde(skip, default)]
+    contact_row_owners: Vec<CellId>,
+    #[serde(skip, default)]
+    contact_row_offsets: Vec<u32>,
+    #[serde(skip, default)]
+    contact_row_neighbors: Vec<u32>,
+    #[serde(skip, default)]
+    contact_displacements: Vec<f32>,
+    #[serde(skip, default)]
+    contact_loose_extras: Vec<(u32, CellId)>,
+    #[serde(skip, default)]
+    contact_loose_threshold: f32,
+    #[serde(skip, default)]
+    contact_list_current: bool,
+    #[serde(skip, default)]
+    cell_phase_row: Option<usize>,
     #[serde(skip, default)]
     contact_scratch: Vec<Contact>,
     #[serde(skip, default)]
     tile_cell_counts: Vec<u32>,
+    #[serde(skip, default)]
+    enval_row_sums: Vec<f32>,
+    #[serde(skip, default)]
+    element_row_sums: Vec<[f32; ELEMENT_COUNT]>,
+    #[serde(skip, default)]
+    enval_smoothed: Vec<f32>,
+    #[serde(skip, default)]
+    enval_smoothing_scratch: Vec<f64>,
+    #[serde(skip, default)]
+    enval_smoothed_current: bool,
+    #[serde(skip, default)]
+    pending_enval_uptake: f64,
+    #[serde(skip, default)]
+    pending_enval_emission: f64,
+    #[serde(skip, default)]
+    pending_secretion: ElementAmounts,
     lineage_counters: BTreeMap<LineageId, LineageCounters>,
     birth_count: u64,
     death_count: u64,
@@ -277,10 +337,13 @@ impl World {
             config.height,
             &mut rng,
         );
-        let enval_sources =
-            EnvalSources::place(&config.enval_sources, config.width, config.height, &mut rng);
-        let mut enval = vec![0.0_f32; tile_count];
-        enval_sources.write_targets(&mut enval);
+        let enval_landscape = environment::enval_landscape(
+            &config.enval_landscape,
+            config.width,
+            config.height,
+            &mut rng,
+        );
+        let enval = enval_landscape.clone();
         let enval_sum = enval.iter().map(|value| f64::from(*value)).sum::<f64>();
         let neighbors = build_neighbors(config.width, config.height);
 
@@ -296,15 +359,37 @@ impl World {
             enval,
             element_fields_next: element_fields.clone(),
             element_fields,
-            enval_sources,
+            enval_landscape,
             cells: CellStore::default(),
             watched_cell_id: None,
             flux_log: CellFluxLog::default(),
             cell_phase_scratch: Vec::new(),
             mechanics_corrections: Vec::new(),
-            pair_scratch: Vec::new(),
+            contact_pairs: Vec::new(),
+            indexed_positions: Vec::new(),
+            spatial_sync_pending: false,
+            contact_found: Vec::new(),
+            contact_tile_offsets: Vec::new(),
+            contact_tile_cells: Vec::new(),
+            contact_row_scratch: Vec::new(),
+            contact_row_owners: Vec::new(),
+            contact_row_offsets: Vec::new(),
+            contact_row_neighbors: Vec::new(),
+            contact_displacements: Vec::new(),
+            contact_loose_extras: Vec::new(),
+            contact_loose_threshold: 0.0,
+            contact_list_current: false,
+            cell_phase_row: None,
             contact_scratch: Vec::new(),
             tile_cell_counts: vec![0; tile_count],
+            enval_row_sums: Vec::new(),
+            element_row_sums: Vec::new(),
+            enval_smoothed: Vec::new(),
+            enval_smoothing_scratch: Vec::new(),
+            enval_smoothed_current: false,
+            pending_enval_uptake: 0.0,
+            pending_enval_emission: 0.0,
+            pending_secretion: ElementAmounts::ZERO,
             lineage_counters: BTreeMap::new(),
             birth_count: 0,
             death_count: 0,
@@ -365,8 +450,8 @@ impl World {
         self.sim_time_seconds
     }
 
-    pub fn enval_sources(&self) -> &EnvalSources {
-        &self.enval_sources
+    pub fn enval_landscape(&self) -> &[f32] {
+        &self.enval_landscape
     }
 
     pub fn average_enval(&self) -> f32 {
@@ -736,38 +821,93 @@ impl World {
         self.local_enval_average(tile_id, LOCAL_ENVAL_RADIUS)
     }
 
+    fn tile_stencil(&self, position: Position) -> Option<TileStencil> {
+        let position = position.wrapped(self.width as f32, self.height as f32)?;
+        Some(self.canonical_tile_stencil(position))
+    }
+
+    fn canonical_tile_stencil(&self, position: Position) -> TileStencil {
+        debug_assert_eq!(
+            position.wrapped(self.width as f32, self.height as f32),
+            Some(position)
+        );
+        let (x0, y0) = (position.x as usize, position.y as usize);
+        let x1 = if x0 + 1 == self.width { 0 } else { x0 + 1 };
+        let y1 = if y0 + 1 == self.height { 0 } else { y0 + 1 };
+        let fx = position.x - x0 as f32;
+        let fy = position.y - y0 as f32;
+        let one_minus_fx = 1.0 - fx;
+        let one_minus_fy = 1.0 - fy;
+        TileStencil {
+            tiles: [
+                self.index_xy(x0, y0),
+                self.index_xy(x1, y0),
+                self.index_xy(x0, y1),
+                self.index_xy(x1, y1),
+            ],
+            weights: [
+                one_minus_fx * one_minus_fy,
+                fx * one_minus_fy,
+                one_minus_fx * fy,
+                fx * fy,
+            ],
+        }
+    }
+
     fn deposit_elements_at(
         &mut self,
         position: Position,
         amounts: ElementAmounts,
     ) -> Result<(), WorldError> {
-        let stencil = BilinearStencil::new(position, self.width, self.height)
+        let stencil = self
+            .tile_stencil(position)
             .ok_or(WorldError::InvalidCellPosition(position))?;
-        for sample in stencil.samples {
-            let index = self.index_xy(sample.x, sample.y);
+        self.deposit_elements_with(&stencil, amounts);
+        Ok(())
+    }
+
+    fn deposit_elements_with(&mut self, stencil: &TileStencil, amounts: ElementAmounts) {
+        for (tile, weight) in stencil.tiles.into_iter().zip(stencil.weights) {
+            let field = &mut self.element_fields[tile];
             for element in ELEMENT_ORDER {
-                self.element_fields[index][element] += amounts[element] * sample.weight;
+                field[element] += amounts[element] * weight;
             }
         }
-        Ok(())
     }
 
     fn adjust_enval_at(&mut self, position: Position, delta: f32) -> Result<f64, WorldError> {
         if !delta.is_finite() || delta == 0.0 {
             return Ok(0.0);
         }
-        let stencil = BilinearStencil::new(position, self.width, self.height)
+        let stencil = self
+            .tile_stencil(position)
             .ok_or(WorldError::NonFiniteEnvalInput(delta))?;
+        self.adjust_enval_with(&stencil, delta)
+    }
+
+    fn adjust_enval_with(&mut self, stencil: &TileStencil, delta: f32) -> Result<f64, WorldError> {
+        if !delta.is_finite() || delta == 0.0 {
+            return Ok(0.0);
+        }
         let mut applied = 0.0;
-        for sample in stencil.samples {
-            if sample.weight == 0.0 {
+        let mut result = Ok(());
+        for (tile, weight) in stencil.tiles.into_iter().zip(stencil.weights) {
+            let tile_delta = delta * weight;
+            if tile_delta == 0.0 {
                 continue;
             }
-            let tile_id = TileId(self.index_xy(sample.x, sample.y));
-            applied += self.apply_tile_enval_delta(tile_id, delta * sample.weight)?;
+            let old = self.enval[tile];
+            let value = old + tile_delta;
+            if !value.is_finite() {
+                result = Err(WorldError::NonFiniteEnvalInput(value));
+                break;
+            }
+            self.enval[tile] = value;
+            applied += f64::from(value) - f64::from(old);
         }
+        self.enval_sum += applied;
         self.avg_enval = (self.enval_sum / self.tile_count as f64) as f32;
-        Ok(applied)
+        result.map(|()| applied)
     }
 
     pub fn spawn_founder_cells(&mut self, count: usize) -> Result<usize, WorldError> {
@@ -919,13 +1059,14 @@ impl World {
         let cell_id = self.cells.insert(cell);
         assert!(self.spatial_index.insert(cell_id, position));
         self.increment_tile_cell_count(position);
+        self.contact_list_current = false;
         Ok(cell_id)
     }
 
     pub fn step(&mut self) {
         self.diffuse_element_fields();
         self.step_cells();
-        self.drift_cells();
+        self.drift_cells_unsynced();
         self.resolve_overlaps();
         self.enval_phase();
         self.advance_time();
@@ -950,7 +1091,7 @@ impl World {
         let cell_step = start.elapsed();
 
         let start = Instant::now();
-        self.drift_cells();
+        self.drift_cells_unsynced();
         self.resolve_overlaps();
         let cell_mechanics = start.elapsed();
 
@@ -976,14 +1117,33 @@ impl World {
     }
 
     fn enval_phase(&mut self) {
-        self.diffuse_enval();
-        let recharged = self.apply_recharge();
-        let relaxed = self.relax_enval_sources();
-        if recharged || relaxed {
-            self.refresh_enval_sum();
-        }
+        self.diffuse_enval_field();
+        let kappa = self.landscape_kappa();
+        let outcome = environment::recharge_and_relax(
+            &mut self.enval,
+            &mut self.element_fields,
+            &self.enval_landscape,
+            f64::from(self.config.enval_recharge.rate_per_second),
+            self.config.dt_seconds,
+            kappa,
+        );
+        self.enval_ledger.recharge += outcome.recharge.enval_delta;
+        self.enval_ledger.recharge_amount += outcome.recharge.amount;
+        self.enval_ledger.recharge_energy += outcome.recharge.energy;
+        self.enval_ledger.source_inflow += outcome.relaxation;
+        self.enval_sum = outcome.enval_sum;
+        self.avg_enval = (outcome.enval_sum / self.tile_count as f64) as f32;
     }
 
+    fn landscape_kappa(&self) -> f64 {
+        let rate = f64::from(self.config.enval_landscape.relaxation_per_second);
+        if rate <= 0.0 {
+            return 0.0;
+        }
+        1.0 - (-rate * self.config.dt_seconds).exp()
+    }
+
+    #[cfg(test)]
     fn apply_recharge(&mut self) -> bool {
         let recharge_rate = f64::from(self.config.enval_recharge.rate_per_second);
         if recharge_rate <= 0.0 {
@@ -1001,15 +1161,14 @@ impl World {
         true
     }
 
-    fn relax_enval_sources(&mut self) -> bool {
-        if self.enval_sources.is_empty() {
+    #[cfg(test)]
+    fn relax_enval_landscape(&mut self) -> bool {
+        let kappa = self.landscape_kappa();
+        if kappa <= 0.0 {
             return false;
         }
-        let kappa = 1.0
-            - (-f64::from(self.config.enval_sources.relaxation_per_second)
-                * self.config.dt_seconds)
-                .exp();
-        self.enval_ledger.source_inflow += self.enval_sources.relax(&mut self.enval, kappa);
+        self.enval_ledger.source_inflow +=
+            environment::relax_enval(&mut self.enval, &self.enval_landscape, kappa);
         true
     }
 
@@ -1024,80 +1183,102 @@ impl World {
     }
 
     pub fn diffuse_enval(&mut self) {
-        let alpha = f64::from(self.config.enval_diffusion_alpha);
-        let one_minus_alpha = 1.0 - alpha;
-        let inv_9 = 1.0 / 9.0;
-        let (width, height) = (self.width, self.height);
+        self.diffuse_enval_field();
+        self.refresh_enval_sum();
+    }
 
+    fn diffuse_enval_field(&mut self) {
+        let mix = (f64::from(self.config.enval_diffusivity_per_second) * self.config.dt_seconds
+            / 9.0) as f32;
+        let (width, height) = (self.width, self.height);
+        let rows = &mut self.enval_row_sums;
+        rows.resize(self.tile_count, 0.0);
         for x in 0..width {
-            let here = x * height;
             let left = if x == 0 { width - 1 } else { x - 1 } * height;
             let right = if x + 1 == width { 0 } else { x + 1 } * height;
-            for y in 0..height {
-                let up = if y == 0 { height - 1 } else { y - 1 };
-                let down = if y + 1 == height { 0 } else { y + 1 };
-                let i = here + y;
-                let center = f64::from(self.enval[i]);
-                let sum = center
-                    + f64::from(self.enval[left + y])
-                    + f64::from(self.enval[right + y])
-                    + f64::from(self.enval[here + up])
-                    + f64::from(self.enval[here + down])
-                    + f64::from(self.enval[left + up])
-                    + f64::from(self.enval[right + up])
-                    + f64::from(self.enval[left + down])
-                    + f64::from(self.enval[right + down]);
-                let value = alpha * (sum * inv_9) + one_minus_alpha * center;
-                self.enval_next[i] = if value.is_finite() { value as f32 } else { 0.0 };
+            let here = x * height;
+            for (sum, ((l, c), r)) in rows[here..here + height].iter_mut().zip(
+                self.enval[left..left + height]
+                    .iter()
+                    .zip(&self.enval[here..here + height])
+                    .zip(&self.enval[right..right + height]),
+            ) {
+                *sum = l + c + r;
             }
         }
-
-        let mut sum = 0.0_f64;
-        for value in &self.enval_next {
-            sum += f64::from(*value);
+        let mix_tile = |center: f32, up: f32, row: f32, down: f32| {
+            let value = center + mix * (up + row + down - 9.0 * center);
+            if value.is_finite() { value } else { 0.0 }
+        };
+        for x in 0..width {
+            let here = x * height;
+            let rows = &rows[here..here + height];
+            let centers = &self.enval[here..here + height];
+            let next = &mut self.enval_next[here..here + height];
+            if height >= 3 {
+                for (y, value) in next[1..height - 1].iter_mut().enumerate() {
+                    *value = mix_tile(centers[y + 1], rows[y], rows[y + 1], rows[y + 2]);
+                }
+            }
+            for y in [0, height - 1] {
+                let up = if y == 0 { height - 1 } else { y - 1 };
+                let down = if y + 1 == height { 0 } else { y + 1 };
+                next[y] = mix_tile(centers[y], rows[up], rows[y], rows[down]);
+            }
         }
         std::mem::swap(&mut self.enval, &mut self.enval_next);
-        self.enval_sum = sum;
-        self.avg_enval = (sum / self.tile_count as f64) as f32;
     }
 
     pub fn diffuse_element_fields(&mut self) {
-        let inv_9 = 1.0 / 9.0;
         let (width, height) = (self.width, self.height);
-        let diffusivities = self.config.element_fields.diffusivities;
-        let fields = &self.element_fields;
-
+        let mut mix = [0.0_f32; ELEMENT_COUNT];
+        for element in ELEMENT_ORDER {
+            mix[element.index()] = (f64::from(self.config.element_fields.diffusivities[element])
+                * self.config.dt_seconds
+                / 9.0) as f32;
+        }
+        let rows = &mut self.element_row_sums;
+        rows.resize(self.tile_count, [0.0; ELEMENT_COUNT]);
         for x in 0..width {
-            let here = x * height;
             let left = if x == 0 { width - 1 } else { x - 1 } * height;
             let right = if x + 1 == width { 0 } else { x + 1 } * height;
-            for y in 0..height {
-                let up = if y == 0 { height - 1 } else { y - 1 };
-                let down = if y + 1 == height { 0 } else { y + 1 };
-                let i = here + y;
-                let neighborhood = [
-                    &fields[i],
-                    &fields[left + y],
-                    &fields[right + y],
-                    &fields[here + up],
-                    &fields[here + down],
-                    &fields[left + up],
-                    &fields[right + up],
-                    &fields[left + down],
-                    &fields[right + down],
-                ];
-                let mut next = ElementAmounts::ZERO;
-                for element in ELEMENT_ORDER {
-                    let center = f64::from(neighborhood[0][element]);
-                    let mut sum = center;
-                    for amounts in &neighborhood[1..] {
-                        sum += f64::from(amounts[element]);
-                    }
-                    let alpha = f64::from(diffusivities[element]);
-                    next[element] = ((1.0 - alpha) * center + alpha * sum * inv_9) as f32;
-                }
-                self.element_fields_next[i] = next;
+            let here = x * height;
+            for (sum, ((l, c), r)) in rows[here..here + height].iter_mut().zip(
+                self.element_fields[left..left + height]
+                    .iter()
+                    .zip(&self.element_fields[here..here + height])
+                    .zip(&self.element_fields[right..right + height]),
+            ) {
+                let (l, c, r) = (l.as_array(), c.as_array(), r.as_array());
+                *sum = std::array::from_fn(|element| l[element] + c[element] + r[element]);
             }
+        }
+        let mix_tile = |center: &ElementAmounts,
+                        up: &[f32; ELEMENT_COUNT],
+                        row: &[f32; ELEMENT_COUNT],
+                        down: &[f32; ELEMENT_COUNT]| {
+            let center = center.as_array();
+            let mut next = [0.0_f32; ELEMENT_COUNT];
+            for element in 0..ELEMENT_COUNT {
+                next[element] = center[element]
+                    + mix[element]
+                        * (up[element] + row[element] + down[element] - 9.0 * center[element]);
+            }
+            ElementAmounts::new(next)
+        };
+        for x in 0..width {
+            let here = x * height;
+            let rows = &rows[here..here + height];
+            let centers = &self.element_fields[here..here + height];
+            let next = &mut self.element_fields_next[here..here + height];
+            let mut up = rows[height - 1];
+            let mut row = rows[0];
+            for ((value, center), down) in next.iter_mut().zip(centers).zip(&rows[1..]) {
+                *value = mix_tile(center, &up, &row, down);
+                up = row;
+                row = *down;
+            }
+            next[height - 1] = mix_tile(&centers[height - 1], &up, &row, &rows[0]);
         }
 
         self.operation_counters.element_field_diffusion_tiles = self
@@ -1387,13 +1568,16 @@ impl World {
         self.neighbors = build_neighbors(self.width, self.height);
         self.cell_phase_scratch.clear();
         self.mechanics_corrections.clear();
-        self.pair_scratch.clear();
+        self.contact_pairs.clear();
+        self.contact_list_current = false;
         self.contact_scratch.clear();
         self.cells.rebuild_index();
         self.rebuild_spatial_index();
     }
 
     fn rebuild_spatial_index(&mut self) {
+        self.contact_list_current = false;
+        self.spatial_sync_pending = false;
         self.refresh_max_cell_radius();
         if !self
             .spatial_index
@@ -1441,17 +1625,25 @@ impl World {
         *count -= 1;
     }
 
+    fn canonical_tile_index(&self, position: Position) -> usize {
+        debug_assert_eq!(
+            position.wrapped(self.width as f32, self.height as f32),
+            Some(position)
+        );
+        (position.x as usize).min(self.width - 1) * self.height
+            + (position.y as usize).min(self.height - 1)
+    }
+
     fn update_cell_position(&mut self, cell_id: CellId, position: Position) {
+        debug_assert!(!self.spatial_sync_pending);
         let old_position = self.cells[cell_id].position;
-        let old_tile = self
-            .center_tile_id(old_position)
-            .expect("active cell position must map to a field tile");
-        let new_tile = self
-            .center_tile_id(position)
-            .expect("updated cell position must map to a field tile");
+        let old_tile = self.canonical_tile_index(old_position);
+        let new_tile = self.canonical_tile_index(position);
         if old_tile != new_tile {
-            self.decrement_tile_cell_count(old_position);
-            self.increment_tile_cell_count(position);
+            let count = &mut self.tile_cell_counts[old_tile];
+            assert!(*count > 0, "derived tile cell count underflow");
+            *count -= 1;
+            self.tile_cell_counts[new_tile] = self.tile_cell_counts[new_tile].saturating_add(1);
         }
         assert!(
             self.spatial_index
@@ -1570,7 +1762,7 @@ impl World {
             x,
             y,
             enval: self.enval[tile_id.index()],
-            enval_source_target: self.enval_sources.target_for_tile(tile_id.index()),
+            enval_landscape_target: self.enval_landscape[tile_id.index()],
             cell_center_count: self.tile_cell_counts[tile_id.index()],
             element_concentrations: *amounts.as_array(),
             total_element_concentration: amounts.total() as f32,
@@ -1850,6 +2042,7 @@ impl World {
         if self.neighbors.len() != self.tile_count
             || self.enval.len() != self.tile_count
             || self.enval_next.len() != self.tile_count
+            || self.enval_landscape.len() != self.tile_count
             || self.element_fields.len() != self.tile_count
             || self.element_fields_next.len() != self.tile_count
             || self.tile_cell_counts.len() != self.tile_count
@@ -2026,13 +2219,77 @@ impl World {
     fn step_cells(&mut self) {
         self.cell_phase_scratch.clear();
         self.cell_phase_scratch.extend(self.cells.ids());
+        if self.cell_phase_scratch.is_empty() {
+            return;
+        }
+        self.refresh_enval_smoothed();
         for phase_index in 0..self.cell_phase_scratch.len() {
             let cell_id = self.cell_phase_scratch[phase_index];
             if !self.cells.contains(cell_id) {
                 continue;
             }
+            self.cell_phase_row = Some(phase_index);
             self.step_cell(cell_id);
         }
+        self.cell_phase_row = None;
+        self.enval_smoothed_current = false;
+    }
+
+    fn refresh_enval_smoothed(&mut self) {
+        let (width, height) = (self.width, self.height);
+        let radius = LOCAL_ENVAL_RADIUS;
+        let padded_height = height + 2 * radius;
+        self.enval_smoothing_scratch
+            .resize(self.tile_count + padded_height, 0.0);
+        self.enval_smoothed.resize(self.tile_count, 0.0);
+        let (column_sums, padded) = self.enval_smoothing_scratch.split_at_mut(self.tile_count);
+        for x in 0..width {
+            let column = &self.enval[x * height..(x + 1) * height];
+            for (value, source) in padded[radius..radius + height].iter_mut().zip(column) {
+                *value = f64::from(*source);
+            }
+            for offset in 0..radius {
+                padded[offset] = f64::from(column[(offset + height * radius - radius) % height]);
+                padded[radius + height + offset] = f64::from(column[offset % height]);
+            }
+            let sums = &mut column_sums[x * height..(x + 1) * height];
+            for (y, sum) in sums.iter_mut().enumerate() {
+                *sum = padded[y] + padded[y + 1] + padded[y + 2] + padded[y + 3] + padded[y + 4];
+            }
+        }
+        let scale = 1.0 / LOCAL_ENVAL_WINDOW_AREA as f64;
+        for x in 0..width {
+            let columns: [usize; LOCAL_ENVAL_WINDOW_DIAMETER] = std::array::from_fn(|offset| {
+                (x + width * radius + offset - radius) % width * height
+            });
+            let smoothed = &mut self.enval_smoothed[x * height..(x + 1) * height];
+            for (y, value) in smoothed.iter_mut().enumerate() {
+                let sum = column_sums[columns[0] + y]
+                    + column_sums[columns[1] + y]
+                    + column_sums[columns[2] + y]
+                    + column_sums[columns[3] + y]
+                    + column_sums[columns[4] + y];
+                *value = (sum * scale) as f32;
+            }
+        }
+        self.enval_smoothed_current = true;
+    }
+
+    #[cfg(test)]
+    fn smoothed_local_enval_at(&self, position: Position) -> Option<f32> {
+        let stencil = self.tile_stencil(position)?;
+        self.smoothed_local_enval_with(position, &stencil)
+    }
+
+    fn smoothed_local_enval_with(&self, position: Position, stencil: &TileStencil) -> Option<f32> {
+        if !self.enval_smoothed_current {
+            return self.local_enval_average_at(position, LOCAL_ENVAL_RADIUS);
+        }
+        let mut value = 0.0_f64;
+        for (tile, weight) in stencil.tiles.into_iter().zip(stencil.weights) {
+            value += f64::from(self.enval_smoothed[tile]) * f64::from(weight);
+        }
+        Some(value as f32)
     }
 
     fn step_cell(&mut self, cell_id: CellId) {
@@ -2045,8 +2302,9 @@ impl World {
             .operation_counters
             .local_enval_average_calls
             .saturating_add(1);
+        let stencil = self.canonical_tile_stencil(position);
         let local_enval = self
-            .local_enval_average_at(position, LOCAL_ENVAL_RADIUS)
+            .smoothed_local_enval_with(position, &stencil)
             .unwrap_or(0.0);
         let enzyme_count = self.cells.at_slot(slot).genome.enzymes.len();
         let radius = self.cells.at_slot(slot).radius;
@@ -2054,6 +2312,7 @@ impl World {
             cell_id,
             slot,
             position,
+            stencil,
             local_enval,
             cell_area: std::f32::consts::PI * radius * radius,
             genome: GenomeReactionContext::from(&self.cells.at_slot(slot).genome),
@@ -2081,7 +2340,7 @@ impl World {
             };
             let reservoir = self.cells.at_slot(slot).internal_elements;
             let energy_before = self.cells.at_slot(slot).energy;
-            let Some(outcome) = bio::compute_flux(
+            let flux = bio::compute_flux(
                 &enzyme,
                 reservoir,
                 energy_before,
@@ -2089,7 +2348,8 @@ impl World {
                 context.genome,
                 env,
                 &mut self.rng,
-            ) else {
+            );
+            let Some(outcome) = flux.as_ref() else {
                 self.reaction_counters.no_substrate =
                     self.reaction_counters.no_substrate.saturating_add(1);
                 continue;
@@ -2111,12 +2371,17 @@ impl World {
                 catalyst_index,
                 &enzyme,
                 ReactionSite::Internal,
-                &outcome,
+                outcome,
                 energy_before,
             );
         }
 
+        let secretion = std::mem::replace(&mut self.pending_secretion, ElementAmounts::ZERO);
+        if secretion != ElementAmounts::ZERO {
+            self.deposit_elements_with(&stencil, secretion);
+        }
         self.step_surface_catalysis(context, enzyme_count);
+        self.apply_enval_exchange(&context);
 
         self.cells
             .at_slot_mut(slot)
@@ -2141,7 +2406,7 @@ impl World {
             return;
         }
 
-        let (inward, outward) = self.transport_elements(slot, position);
+        let (inward, outward) = self.transport_elements_with(slot, &stencil);
         self.reaction_counters.uptake_flux += inward;
         self.reaction_counters.leak_flux += outward;
 
@@ -2192,8 +2457,13 @@ impl World {
         debug_assert!(cell.energy >= 0.0);
         let energy_after = cell.energy;
         if outcome.secreted_products != ElementAmounts::ZERO {
-            self.deposit_elements_at(position, outcome.secreted_products)
-                .expect("active cell position must support conservative element deposition");
+            if site == ReactionSite::Internal {
+                for element in ELEMENT_ORDER {
+                    self.pending_secretion[element] += outcome.secreted_products[element];
+                }
+            } else {
+                self.deposit_elements_with(&context.stencil, outcome.secreted_products);
+            }
         }
         if outcome.chemical_energy_delta >= 0.0 {
             self.energy_ledger.chemical_harvest += outcome.chemical_energy_delta;
@@ -2203,16 +2473,8 @@ impl World {
         self.energy_ledger.enval_harvest += outcome.enval_energy;
         self.energy_ledger.pump_cost += outcome.pump_cost;
         self.energy_ledger.assembly_cost += outcome.assembly_cost;
-        if outcome.enval_input != 0.0 {
-            if let Ok(applied) = self.adjust_enval_at(position, -outcome.enval_input) {
-                self.enval_ledger.cell_uptake += applied;
-            }
-        }
-        if outcome.enval_output != 0.0 {
-            if let Ok(applied) = self.add_enval_around(position, outcome.enval_output) {
-                self.enval_ledger.cell_emission += applied;
-            }
-        }
+        self.pending_enval_uptake += f64::from(outcome.enval_input);
+        self.pending_enval_emission += f64::from(outcome.enval_output);
 
         self.operation_counters.reactions_succeeded = self
             .operation_counters
@@ -2264,33 +2526,73 @@ impl World {
         let gap = self.config.surface.contact_gap;
         let (width, height) = (self.width as f32, self.height as f32);
         let cells = &self.cells;
-        self.spatial_index.find_within(
-            position,
-            radius + self.max_cell_radius + gap,
-            |other_id, other_position| {
-                if other_id == cell_id {
-                    return false;
-                }
-                let other_radius = f64::from(cells[other_id].radius);
-                let delta = minimum_image_displacement(position, other_position, width, height);
-                let distance = f64::from(delta.x).hypot(f64::from(delta.y));
-                if distance <= f64::from(radius) + other_radius + f64::from(gap) {
-                    contacts.push(Contact {
-                        cell_id: other_id,
+        let mut push_contact = |other_id: CellId, other_position: Position| {
+            let other_radius = f64::from(cells[other_id].radius);
+            let delta = minimum_image_displacement(position, other_position, width, height);
+            let distance = f64::from(delta.x).hypot(f64::from(delta.y));
+            if distance <= f64::from(radius) + other_radius + f64::from(gap) {
+                contacts.push(Contact {
+                    cell_id: other_id,
+                    distance,
+                    share: interaction::perimeter_share(
+                        f64::from(radius),
+                        other_radius,
                         distance,
-                        share: interaction::perimeter_share(
-                            f64::from(radius),
-                            other_radius,
-                            distance,
-                            f64::from(gap),
-                        ),
-                    });
+                        f64::from(gap),
+                    ),
+                });
+            }
+        };
+        if let Some(row) = self.listed_row(cell_id) {
+            let start = self.contact_row_offsets[row] as usize;
+            let end = self.contact_row_offsets[row + 1] as usize;
+            for &slot in &self.contact_row_neighbors[start..end] {
+                if self.contact_displacements[slot as usize] > self.contact_loose_threshold {
+                    continue;
                 }
-                false
-            },
-        );
+                let other_id = self.contact_row_owners[slot as usize];
+                if let Some(other) = cells.get(other_id) {
+                    push_contact(other_id, other.position);
+                }
+            }
+            let first = self
+                .contact_loose_extras
+                .partition_point(|(extra_row, _)| (*extra_row as usize) < row);
+            for &(extra_row, other_id) in &self.contact_loose_extras[first..] {
+                if extra_row as usize != row {
+                    break;
+                }
+                if let Some(other) = cells.get(other_id) {
+                    push_contact(other_id, other.position);
+                }
+            }
+        } else {
+            self.spatial_index.find_within(
+                position,
+                radius + self.max_cell_radius + gap,
+                |other_id, other_position| {
+                    if other_id != cell_id {
+                        push_contact(other_id, other_position);
+                    }
+                    false
+                },
+            );
+        }
         contacts.sort_unstable_by_key(|contact| contact.cell_id.index());
         interaction::normalize_shares(contacts)
+    }
+
+    fn listed_row(&self, cell_id: CellId) -> Option<usize> {
+        if !self.contact_list_current {
+            return None;
+        }
+        let row = self.cell_phase_row?;
+        if self.contact_row_owners.get(row) != Some(&cell_id)
+            || self.contact_displacements[row] > self.contact_loose_threshold
+        {
+            return None;
+        }
+        Some(row)
     }
 
     fn step_surface_catalysis(&mut self, context: CellReactionContext, enzyme_count: usize) {
@@ -2351,18 +2653,14 @@ impl World {
         enzyme: &Enzyme,
         capacity_fraction: f64,
     ) {
-        let Some(stencil) = BilinearStencil::new(context.position, self.width, self.height) else {
-            return;
-        };
-        let tile_indices = stencil
-            .samples
-            .map(|sample| self.index_xy(sample.x, sample.y));
+        let stencil = context.stencil;
+        let tile_indices = stencil.tiles;
         let mut weighted = [[0.0_f64; 4]; ELEMENT_COUNT];
         let mut pool = ElementAmounts::ZERO;
         for element in ELEMENT_ORDER {
             let mut total = 0.0_f64;
-            for (corner, sample) in stencil.samples.iter().enumerate() {
-                let amount = f64::from(sample.weight)
+            for (corner, weight) in stencil.weights.iter().enumerate() {
+                let amount = f64::from(*weight)
                     * f64::from(self.element_fields[tile_indices[corner]][element]);
                 weighted[element.index()][corner] = amount;
                 total += amount;
@@ -2377,7 +2675,7 @@ impl World {
             ..ReactionEnv::internal(context.local_enval, context.cell_area, self.config.cell_body)
         };
         let energy_before = self.cells.at_slot(context.slot).energy;
-        let Some(outcome) = bio::compute_flux(
+        let flux = bio::compute_flux(
             enzyme,
             pool,
             energy_before,
@@ -2385,7 +2683,8 @@ impl World {
             context.genome,
             env,
             &mut self.rng,
-        ) else {
+        );
+        let Some(outcome) = flux.as_ref() else {
             self.reaction_counters.no_substrate =
                 self.reaction_counters.no_substrate.saturating_add(1);
             return;
@@ -2424,7 +2723,7 @@ impl World {
             catalyst_index,
             enzyme,
             ReactionSite::Field,
-            &outcome,
+            outcome,
             energy_before,
         );
     }
@@ -2452,7 +2751,7 @@ impl World {
             ..ReactionEnv::internal(context.local_enval, context.cell_area, self.config.cell_body)
         };
         let energy_before = self.cells.at_slot(context.slot).energy;
-        let Some(outcome) = bio::compute_flux(
+        let flux = bio::compute_flux(
             enzyme,
             pool,
             energy_before,
@@ -2460,7 +2759,8 @@ impl World {
             context.genome,
             env,
             &mut self.rng,
-        ) else {
+        );
+        let Some(outcome) = flux.as_ref() else {
             self.reaction_counters.no_substrate =
                 self.reaction_counters.no_substrate.saturating_add(1);
             return;
@@ -2492,15 +2792,20 @@ impl World {
             catalyst_index,
             enzyme,
             ReactionSite::Cell(target),
-            &outcome,
+            outcome,
             energy_before,
         );
     }
 
+    #[cfg(test)]
     fn transport_elements(&mut self, slot: usize, position: Position) -> (f64, f64) {
-        let Some(stencil) = BilinearStencil::new(position, self.width, self.height) else {
+        let Some(stencil) = self.tile_stencil(position) else {
             return (0.0, 0.0);
         };
+        self.transport_elements_with(slot, &stencil)
+    }
+
+    fn transport_elements_with(&mut self, slot: usize, stencil: &TileStencil) -> (f64, f64) {
         let radius = f64::from(self.cells.at_slot_mut(slot).radius);
         let area = std::f64::consts::PI * radius * radius;
         let perimeter = 2.0 * std::f64::consts::PI * radius;
@@ -2509,9 +2814,7 @@ impl World {
                 / (2.0 * area);
         let membrane_polarity = self.cells.at_slot(slot).membrane_polarity();
         let sigma = f64::from(self.config.cell_body.permeability_sigma);
-        let tile_indices = stencil
-            .samples
-            .map(|sample| self.index_xy(sample.x, sample.y));
+        let tile_indices = stencil.tiles;
 
         let mut inward = 0.0_f64;
         let mut outward = 0.0_f64;
@@ -2521,8 +2824,8 @@ impl World {
                 0.25 + 1.5 * (-distance * distance / (2.0 * sigma * sigma)).exp();
             let fraction = (base_fraction * permeability_factor).min(MAX_TRANSPORT_FRACTION);
             let mut weighted_sources = [0.0_f64; 4];
-            for (corner, sample) in stencil.samples.iter().enumerate() {
-                weighted_sources[corner] = f64::from(sample.weight)
+            for (corner, weight) in stencil.weights.iter().enumerate() {
+                weighted_sources[corner] = f64::from(*weight)
                     * f64::from(self.element_fields[tile_indices[corner]][element]);
             }
             let outside = weighted_sources.iter().sum::<f64>();
@@ -2548,8 +2851,8 @@ impl World {
                     continue;
                 }
                 self.cells.at_slot_mut(slot).internal_elements[element] = held - amount;
-                for (corner, sample) in stencil.samples.iter().enumerate() {
-                    self.element_fields[tile_indices[corner]][element] += amount * sample.weight;
+                for (corner, weight) in stencil.weights.iter().enumerate() {
+                    self.element_fields[tile_indices[corner]][element] += amount * weight;
                 }
                 outward += f64::from(amount);
             }
@@ -2561,6 +2864,21 @@ impl World {
                 .saturating_add(1);
         }
         (inward, outward)
+    }
+
+    fn apply_enval_exchange(&mut self, context: &CellReactionContext) {
+        let uptake = std::mem::take(&mut self.pending_enval_uptake) as f32;
+        let emission = std::mem::take(&mut self.pending_enval_emission) as f32;
+        if uptake != 0.0 {
+            if let Ok(applied) = self.adjust_enval_with(&context.stencil, -uptake) {
+                self.enval_ledger.cell_uptake += applied;
+            }
+        }
+        if emission != 0.0 {
+            if let Ok(applied) = self.add_enval_around(context.position, emission) {
+                self.enval_ledger.cell_emission += applied;
+            }
+        }
     }
 
     fn add_enval_around(
@@ -2743,42 +3061,265 @@ impl World {
             .fold(0.0, f32::max);
     }
 
-    fn collect_contact_pairs(&self, gap: f32, pairs: &mut Vec<(CellId, CellId)>) {
-        pairs.clear();
-        for cell in self.cells.iter() {
+    fn collect_contact_list(&mut self, reach: f32) -> (u64, u64) {
+        let gap = self.config.surface.contact_gap;
+        let (width, height) = (self.width, self.height);
+        let (world_width, world_height) = (width as f32, height as f32);
+        let cells = &self.cells;
+        let tile_of = |position: Position| {
+            debug_assert_eq!(position.wrapped(world_width, world_height), Some(position));
+            (position.x as usize).min(width - 1) * height + (position.y as usize).min(height - 1)
+        };
+        let tile_offsets = &mut self.contact_tile_offsets;
+        let tile_cells = &mut self.contact_tile_cells;
+        let mut found = std::mem::take(&mut self.contact_found);
+        found.clear();
+        let mut contacts = 0_u64;
+        let mut cross_lineage = 0_u64;
+        let binned = if cells.len() < 2 { 0 } else { cells.len() };
+        if binned > 0 {
+            tile_offsets.clear();
+            tile_offsets.resize(self.tile_count + 1, 0);
+            for cell in cells.iter() {
+                tile_offsets[tile_of(cell.position)] += 1;
+            }
+            let mut running = 0_u32;
+            for offset in tile_offsets[..self.tile_count].iter_mut() {
+                running += *offset;
+                *offset = running;
+            }
+            tile_offsets[self.tile_count] = running;
+            tile_cells.clear();
+            tile_cells.resize(cells.len(), BinnedCell::default());
+            for (slot, cell) in cells.iter().enumerate() {
+                let tile = tile_of(cell.position);
+                tile_offsets[tile] -= 1;
+                tile_cells[tile_offsets[tile] as usize] = BinnedCell {
+                    position: cell.position,
+                    radius: cell.radius,
+                    slot: slot as u32,
+                };
+            }
+        }
+        for slot in 0..binned {
+            let cell = cells.at_slot(slot);
+            let (position, radius) = (cell.position, cell.radius);
+            let range = 2.0 * radius + reach + CONTACT_LIST_RANGE_EPSILON;
+            let (first_column, columns) = tile_span(cell.position.x, range, width);
+            let (first_row, rows) = tile_span(cell.position.y, range, height);
+            for column_offset in 0..columns {
+                let column = wrap_tile(first_column + column_offset as isize, width);
+                for row_offset in 0..rows {
+                    let tile = column * height + wrap_tile(first_row + row_offset as isize, height);
+                    let start = tile_offsets[tile] as usize;
+                    let end = tile_offsets[tile + 1] as usize;
+                    for other in &tile_cells[start..end] {
+                        let other_slot = other.slot as usize;
+                        if other.radius > radius || (other.radius == radius && other_slot <= slot) {
+                            continue;
+                        }
+                        let distance_squared = toroidal_distance_squared(
+                            position,
+                            other.position,
+                            world_width,
+                            world_height,
+                        );
+                        let reach_separation = radius + other.radius + reach;
+                        if distance_squared <= reach_separation * reach_separation {
+                            found.push((slot as u32, other.slot));
+                            let separation = radius + other.radius + gap;
+                            if distance_squared <= separation * separation {
+                                contacts += 1;
+                                if cells.at_slot(other_slot).lineage_id != cell.lineage_id {
+                                    cross_lineage += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let count = cells.len();
+        self.contact_row_owners.clear();
+        self.contact_row_owners.extend(cells.ids());
+        let offsets = &mut self.contact_row_offsets;
+        offsets.clear();
+        offsets.resize(count + 1, 0);
+        for &(a, b) in &found {
+            offsets[a as usize] += 1;
+            offsets[b as usize] += 1;
+        }
+        let mut total = 0_u32;
+        for offset in offsets.iter_mut() {
+            let degree = *offset;
+            *offset = total;
+            total += degree;
+        }
+        let neighbors = &mut self.contact_row_neighbors;
+        neighbors.clear();
+        neighbors.resize(total as usize, 0);
+        for &(a, b) in &found {
+            neighbors[offsets[a as usize] as usize] = b;
+            offsets[a as usize] += 1;
+            neighbors[offsets[b as usize] as usize] = a;
+            offsets[b as usize] += 1;
+        }
+        for row in (1..=count).rev() {
+            offsets[row] = offsets[row - 1];
+        }
+        offsets[0] = 0;
+        let row_slots = &mut self.contact_row_scratch;
+        self.contact_pairs.clear();
+        for slot in 0..count {
+            row_slots.clear();
+            let row = offsets[slot] as usize..offsets[slot + 1] as usize;
+            row_slots.extend(
+                neighbors[row]
+                    .iter()
+                    .copied()
+                    .filter(|other| *other as usize > slot),
+            );
+            row_slots.sort_unstable();
+            self.contact_pairs
+                .extend(row_slots.iter().map(|other| (slot as u32, *other)));
+        }
+        self.contact_found = found;
+        self.contact_displacements.clear();
+        self.contact_displacements.resize(count, 0.0);
+        self.contact_loose_extras.clear();
+        self.contact_loose_threshold = f32::INFINITY;
+        self.contact_list_current = true;
+        (contacts, cross_lineage)
+    }
+
+    fn add_overlapping_pairs_of_loose_cells(&mut self, threshold: f32) {
+        let (width, height) = (self.width as f32, self.height as f32);
+        let cells = &self.cells;
+        for slot in 0..cells.len() {
+            if self.contact_displacements[slot] <= threshold {
+                continue;
+            }
+            let cell = cells.at_slot(slot);
+            let pairs = &mut self.contact_pairs;
             self.spatial_index.find_within(
                 cell.position,
-                cell.radius + self.max_cell_radius + gap,
-                |other_id, position| {
-                    if other_id.index() > cell.id.index() {
-                        let separation = cell.radius + self.cells[other_id].radius + gap;
-                        if toroidal_distance_squared(
-                            cell.position,
-                            position,
-                            self.width as f32,
-                            self.height as f32,
-                        ) <= separation * separation
-                        {
-                            pairs.push((cell.id, other_id));
+                cell.radius + self.max_cell_radius,
+                |other_id, other_position| {
+                    let Some(other_slot) = cells.slot(other_id) else {
+                        return false;
+                    };
+                    if other_slot == slot {
+                        return false;
+                    }
+                    let separation = cell.radius + cells.at_slot(other_slot).radius;
+                    if toroidal_distance_squared(cell.position, other_position, width, height)
+                        <= separation * separation
+                    {
+                        let pair = (slot.min(other_slot) as u32, slot.max(other_slot) as u32);
+                        if let Err(position) = pairs.binary_search(&pair) {
+                            pairs.insert(position, pair);
                         }
                     }
                     false
                 },
             );
         }
-        pairs.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
     }
 
+    fn collect_loose_extras(&mut self, threshold: f32, reach: f32) {
+        let (width, height) = (self.width as f32, self.height as f32);
+        let cells = &self.cells;
+        let displacements = &self.contact_displacements;
+        let extras = &mut self.contact_loose_extras;
+        extras.clear();
+        for slot in 0..cells.len() {
+            if displacements[slot] <= threshold {
+                continue;
+            }
+            let cell = cells.at_slot(slot);
+            self.spatial_index.find_within(
+                cell.position,
+                cell.radius + self.max_cell_radius + reach,
+                |other_id, other_position| {
+                    if other_id == cell.id {
+                        return false;
+                    }
+                    let Some(other_slot) = cells.slot(other_id) else {
+                        return false;
+                    };
+                    if displacements[other_slot] > threshold {
+                        return false;
+                    }
+                    let separation = cell.radius + cells.at_slot(other_slot).radius + reach;
+                    if toroidal_distance_squared(cell.position, other_position, width, height)
+                        <= separation * separation
+                    {
+                        extras.push((other_slot as u32, cell.id));
+                    }
+                    false
+                },
+            );
+        }
+        extras.sort_unstable_by_key(|(row, cell_id)| (*row, cell_id.index()));
+        self.contact_loose_threshold = threshold;
+    }
+
+    fn begin_unsynced_moves(&mut self) {
+        if self.spatial_sync_pending {
+            return;
+        }
+        self.indexed_positions.clear();
+        self.indexed_positions
+            .extend(self.cells.iter().map(|cell| cell.position));
+        self.spatial_sync_pending = true;
+    }
+
+    fn move_cell_unsynced(&mut self, slot: usize, position: Position) {
+        let old_tile = self.canonical_tile_index(self.cells.at_slot(slot).position);
+        let new_tile = self.canonical_tile_index(position);
+        if old_tile != new_tile {
+            let count = &mut self.tile_cell_counts[old_tile];
+            assert!(*count > 0, "derived tile cell count underflow");
+            *count -= 1;
+            self.tile_cell_counts[new_tile] = self.tile_cell_counts[new_tile].saturating_add(1);
+        }
+        self.cells.at_slot_mut(slot).position = position;
+    }
+
+    fn sync_spatial_index(&mut self) {
+        if !self.spatial_sync_pending {
+            return;
+        }
+        for (slot, indexed) in self.indexed_positions.iter().enumerate() {
+            let cell = self.cells.at_slot(slot);
+            if cell.position != *indexed {
+                assert!(
+                    self.spatial_index
+                        .update_position(cell.id, *indexed, cell.position)
+                );
+            }
+        }
+        self.spatial_sync_pending = false;
+    }
+
+    #[cfg(test)]
     fn drift_cells(&mut self) {
+        self.drift_cells_unsynced();
+        self.sync_spatial_index();
+    }
+
+    fn drift_cells_unsynced(&mut self) {
         let diffusivity = f64::from(self.config.cell_motion.diffusivity);
         if !(diffusivity > 0.0) {
             return;
         }
+        self.begin_unsynced_moves();
         let reference_radius = (f64::from(REFERENCE_CELL_AREA) / std::f64::consts::PI).sqrt();
         let (width, height) = (self.width as f32, self.height as f32);
         for slot in 0..self.cells.len() {
             let cell = self.cells.at_slot(slot);
-            let (cell_id, position) = (cell.id, cell.position);
+            let position = cell.position;
             let cell_diffusivity = diffusivity * reference_radius / f64::from(cell.radius);
             let sigma = (2.0 * cell_diffusivity * self.config.dt_seconds).sqrt();
             let dx = self.rng.gaussian(0.0, 1.0) * sigma;
@@ -2788,131 +3329,134 @@ impl World {
             else {
                 continue;
             };
-            self.update_cell_position(cell_id, moved);
+            self.move_cell_unsynced(slot, moved);
         }
     }
 
     fn resolve_overlaps(&mut self) {
         self.refresh_max_cell_radius();
-        self.contact_pair_count = 0;
-        self.cross_lineage_contact_pair_count = 0;
-        if self.cells.len() < 2 {
-            return;
-        }
-        for pass in 0..OVERLAP_RELAXATION_PASSES {
-            let mut pairs = std::mem::take(&mut self.pair_scratch);
-            if pass == 0 {
-                self.collect_contact_pairs(self.config.surface.contact_gap, &mut pairs);
-                self.contact_pair_count = pairs.len() as u64;
-                self.cross_lineage_contact_pair_count = pairs
-                    .iter()
-                    .filter(|(a, b)| self.cells[*a].lineage_id != self.cells[*b].lineage_id)
-                    .count() as u64;
-            } else {
-                self.collect_contact_pairs(0.0, &mut pairs);
+        let gap = self.config.surface.contact_gap;
+        let skin = gap * CONTACT_LIST_SKIN_GAPS;
+        let (contacts, cross_lineage) = self.collect_contact_list(gap + skin);
+        self.contact_pair_count = contacts;
+        self.cross_lineage_contact_pair_count = cross_lineage;
+        if self.cells.len() >= 2 {
+            for pass in 0..OVERLAP_RELAXATION_PASSES {
+                if pass > 0 {
+                    self.sync_spatial_index();
+                    self.add_overlapping_pairs_of_loose_cells(0.5 * (gap + skin));
+                }
+                if !self.overlap_pass() {
+                    break;
+                }
             }
-            self.operation_counters.spatial_candidate_checks = self
-                .operation_counters
-                .spatial_candidate_checks
-                .saturating_add(pairs.len() as u64);
-            self.operation_counters.overlap_candidates = self
-                .operation_counters
-                .overlap_candidates
-                .saturating_add(pairs.len() as u64);
-            self.mechanics_corrections.clear();
-            self.mechanics_corrections
-                .resize(self.cells.len(), Position::default());
-            let mut corrected = false;
-            for &(cell_a, cell_b) in &pairs {
-                let (Some(slot_a), Some(slot_b)) =
-                    (self.cells.slot(cell_a), self.cells.slot(cell_b))
-                else {
-                    continue;
-                };
-                let a = self.cells.at_slot(slot_a);
-                let b = self.cells.at_slot(slot_b);
-                let displacement = minimum_image_displacement(
-                    a.position,
-                    b.position,
-                    self.width as f32,
-                    self.height as f32,
-                );
-                let distance_squared = displacement
-                    .x
-                    .mul_add(displacement.x, displacement.y * displacement.y);
-                let required_distance = a.radius + b.radius;
-                let (direction_x, direction_y, distance) =
-                    if distance_squared <= GEOMETRY_TOLERANCE * GEOMETRY_TOLERANCE {
-                        let directions = [
-                            (1.0, 0.0),
-                            (
-                                std::f32::consts::FRAC_1_SQRT_2,
-                                std::f32::consts::FRAC_1_SQRT_2,
-                            ),
-                            (0.0, 1.0),
-                            (
-                                -std::f32::consts::FRAC_1_SQRT_2,
-                                std::f32::consts::FRAC_1_SQRT_2,
-                            ),
-                            (-1.0, 0.0),
-                            (
-                                -std::f32::consts::FRAC_1_SQRT_2,
-                                -std::f32::consts::FRAC_1_SQRT_2,
-                            ),
-                            (0.0, -1.0),
-                            (
-                                std::f32::consts::FRAC_1_SQRT_2,
-                                -std::f32::consts::FRAC_1_SQRT_2,
-                            ),
-                        ];
-                        let direction = directions[(cell_a.index().wrapping_mul(31)
-                            ^ cell_b.index().wrapping_mul(17))
-                            % directions.len()];
-                        (direction.0, direction.1, 0.0)
-                    } else {
-                        let distance = distance_squared.sqrt();
+        }
+        self.sync_spatial_index();
+        self.collect_loose_extras(0.25 * skin, gap + skin);
+    }
+
+    fn overlap_pass(&mut self) -> bool {
+        let pairs = std::mem::take(&mut self.contact_pairs);
+        self.operation_counters.spatial_candidate_checks = self
+            .operation_counters
+            .spatial_candidate_checks
+            .saturating_add(pairs.len() as u64);
+        self.operation_counters.overlap_candidates = self
+            .operation_counters
+            .overlap_candidates
+            .saturating_add(pairs.len() as u64);
+        self.mechanics_corrections.clear();
+        self.mechanics_corrections
+            .resize(self.cells.len(), Position::default());
+        let mut corrected = false;
+        for &(slot_a, slot_b) in &pairs {
+            let (slot_a, slot_b) = (slot_a as usize, slot_b as usize);
+            let a = self.cells.at_slot(slot_a);
+            let b = self.cells.at_slot(slot_b);
+            let (cell_a, cell_b) = (a.id, b.id);
+            let displacement = minimum_image_displacement(
+                a.position,
+                b.position,
+                self.width as f32,
+                self.height as f32,
+            );
+            let distance_squared = displacement
+                .x
+                .mul_add(displacement.x, displacement.y * displacement.y);
+            let required_distance = a.radius + b.radius;
+            let (direction_x, direction_y, distance) =
+                if distance_squared <= GEOMETRY_TOLERANCE * GEOMETRY_TOLERANCE {
+                    let directions = [
+                        (1.0, 0.0),
                         (
-                            displacement.x / distance,
-                            displacement.y / distance,
-                            distance,
-                        )
-                    };
-                let penetration = required_distance - distance;
-                if penetration <= GEOMETRY_TOLERANCE {
-                    continue;
-                }
-                let half = penetration * 0.5;
-                self.mechanics_corrections[slot_a].x -= direction_x * half;
-                self.mechanics_corrections[slot_a].y -= direction_y * half;
-                self.mechanics_corrections[slot_b].x += direction_x * half;
-                self.mechanics_corrections[slot_b].y += direction_y * half;
-                self.operation_counters.overlap_corrections = self
-                    .operation_counters
-                    .overlap_corrections
-                    .saturating_add(1);
-                corrected = true;
-            }
-            self.pair_scratch = pairs;
-            if !corrected {
-                break;
-            }
-            for slot in 0..self.cells.len() {
-                let correction = self.mechanics_corrections[slot];
-                if correction.x == 0.0 && correction.y == 0.0 {
-                    continue;
-                }
-                let cell = self.cells.at_slot(slot);
-                let cell_id = cell.id;
-                let Some(position) = Position::new(
-                    cell.position.x + correction.x,
-                    cell.position.y + correction.y,
-                )
-                .wrapped(self.width as f32, self.height as f32) else {
-                    continue;
+                            std::f32::consts::FRAC_1_SQRT_2,
+                            std::f32::consts::FRAC_1_SQRT_2,
+                        ),
+                        (0.0, 1.0),
+                        (
+                            -std::f32::consts::FRAC_1_SQRT_2,
+                            std::f32::consts::FRAC_1_SQRT_2,
+                        ),
+                        (-1.0, 0.0),
+                        (
+                            -std::f32::consts::FRAC_1_SQRT_2,
+                            -std::f32::consts::FRAC_1_SQRT_2,
+                        ),
+                        (0.0, -1.0),
+                        (
+                            std::f32::consts::FRAC_1_SQRT_2,
+                            -std::f32::consts::FRAC_1_SQRT_2,
+                        ),
+                    ];
+                    let direction = directions[(cell_a.index().wrapping_mul(31)
+                        ^ cell_b.index().wrapping_mul(17))
+                        % directions.len()];
+                    (direction.0, direction.1, 0.0)
+                } else {
+                    let distance = distance_squared.sqrt();
+                    (
+                        displacement.x / distance,
+                        displacement.y / distance,
+                        distance,
+                    )
                 };
-                self.update_cell_position(cell_id, position);
+            let penetration = required_distance - distance;
+            if penetration <= GEOMETRY_TOLERANCE {
+                continue;
             }
+            let half = penetration * 0.5;
+            self.mechanics_corrections[slot_a].x -= direction_x * half;
+            self.mechanics_corrections[slot_a].y -= direction_y * half;
+            self.mechanics_corrections[slot_b].x += direction_x * half;
+            self.mechanics_corrections[slot_b].y += direction_y * half;
+            self.operation_counters.overlap_corrections = self
+                .operation_counters
+                .overlap_corrections
+                .saturating_add(1);
+            corrected = true;
         }
+        self.contact_pairs = pairs;
+        if !corrected {
+            return false;
+        }
+        self.begin_unsynced_moves();
+        for slot in 0..self.cells.len() {
+            let correction = self.mechanics_corrections[slot];
+            if correction.x == 0.0 && correction.y == 0.0 {
+                continue;
+            }
+            self.contact_displacements[slot] += correction.x.hypot(correction.y);
+            let cell = self.cells.at_slot(slot);
+            let Some(position) = Position::new(
+                cell.position.x + correction.x,
+                cell.position.y + correction.y,
+            )
+            .wrapped(self.width as f32, self.height as f32) else {
+                continue;
+            };
+            self.move_cell_unsynced(slot, position);
+        }
+        true
     }
 }
 
@@ -2952,6 +3496,35 @@ fn inspect_enzyme(index: usize, enzyme: &Enzyme) -> EnzymeDetailInspection {
         enval_release_fraction: enzyme.enval_release_fraction,
         enval_pump: enzyme.enval_pump,
         exposure: enzyme.exposure,
+    }
+}
+
+fn tile_span(center: f32, range: f32, extent: usize) -> (isize, usize) {
+    let floor = |value: f32| {
+        let truncated = value as isize;
+        if (truncated as f32) > value {
+            truncated - 1
+        } else {
+            truncated
+        }
+    };
+    let first = floor(center - range);
+    let count = (floor(center + range) - first + 1) as usize;
+    if count >= extent {
+        (0, extent)
+    } else {
+        (first, count)
+    }
+}
+
+fn wrap_tile(index: isize, extent: usize) -> usize {
+    let extent = extent as isize;
+    if index < 0 {
+        (index + extent) as usize
+    } else if index >= extent {
+        (index - extent) as usize
+    } else {
+        index as usize
     }
 }
 
@@ -3194,8 +3767,8 @@ impl Error for InvariantError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        GEOMETRY_TOLERANCE, MAX_TRANSPORT_FRACTION, MOORE_WITH_CENTER_DX, MOORE_WITH_CENTER_DY,
-        RenderBuffers, TileId, World,
+        BilinearStencil, GEOMETRY_TOLERANCE, MAX_TRANSPORT_FRACTION, MOORE_WITH_CENTER_DX,
+        MOORE_WITH_CENTER_DY, RenderBuffers, TileId, World,
     };
     use crate::cell::CELL_FLUX_LOG_CAPACITY;
     use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts};
@@ -3346,27 +3919,73 @@ mod tests {
             cell.refresh_radius(world.config.cell_body.body_density);
         }
         world.rebuild_derived_caches();
-        for gap in [0.0, 0.1, 0.5] {
-            let mut actual = Vec::new();
-            world.collect_contact_pairs(gap, &mut actual);
+        let brute_force = |world: &World, reach: f32| {
             let mut expected = Vec::new();
             for a in world.cells.iter() {
                 for b in world.cells.iter() {
                     if a.id.index() < b.id.index()
                         && toroidal_distance_squared(a.position, b.position, 32.0, 24.0)
-                            <= (a.radius + b.radius + gap).powi(2)
+                            <= (a.radius + b.radius + reach).powi(2)
                     {
                         expected.push((a.id, b.id));
                     }
                 }
             }
             expected.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
-            assert_eq!(actual, expected);
-            let capacity = actual.capacity();
-            let pointer = actual.as_ptr();
-            world.collect_contact_pairs(gap, &mut actual);
-            assert_eq!(actual.capacity(), capacity);
-            assert_eq!(actual.as_ptr(), pointer);
+            expected
+        };
+        for reach in [0.0, 0.1, 0.5] {
+            let (contacts, _) = world.collect_contact_list(reach);
+            let mut listed = world
+                .contact_pairs
+                .iter()
+                .map(|&(a, b)| {
+                    let (a, b) = (
+                        world.cells.at_slot(a as usize).id,
+                        world.cells.at_slot(b as usize).id,
+                    );
+                    if a.index() < b.index() {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    }
+                })
+                .collect::<Vec<_>>();
+            listed.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
+            assert_eq!(listed, brute_force(&world, reach));
+            assert!(world.contact_pairs.windows(2).all(|pair| pair[0] < pair[1]));
+            if reach >= world.config.surface.contact_gap {
+                assert_eq!(
+                    contacts as usize,
+                    brute_force(&world, world.config.surface.contact_gap).len()
+                );
+            }
+            for (slot, owner) in world.contact_row_owners.iter().enumerate() {
+                assert_eq!(world.cells.at_slot(slot).id, *owner);
+                let start = world.contact_row_offsets[slot] as usize;
+                let end = world.contact_row_offsets[slot + 1] as usize;
+                let mut row = world.contact_row_neighbors[start..end]
+                    .iter()
+                    .map(|slot| world.contact_row_owners[*slot as usize])
+                    .collect::<Vec<_>>();
+                row.sort_unstable_by_key(|id| id.index());
+                let mut expected = world
+                    .contact_pairs
+                    .iter()
+                    .filter_map(|&(a, b)| {
+                        let (a, b) = (a as usize, b as usize);
+                        (a == slot).then_some(b).or((b == slot).then_some(a))
+                    })
+                    .map(|other| world.contact_row_owners[other])
+                    .collect::<Vec<_>>();
+                expected.sort_unstable_by_key(|id| id.index());
+                assert_eq!(row, expected);
+            }
+            let capacity = world.contact_pairs.capacity();
+            let pointer = world.contact_pairs.as_ptr();
+            world.collect_contact_list(reach);
+            assert_eq!(world.contact_pairs.capacity(), capacity);
+            assert_eq!(world.contact_pairs.as_ptr(), pointer);
         }
         for index in 0..500 {
             let position = Position::new(
@@ -3719,7 +4338,8 @@ mod tests {
             .tile_element_amounts(world.tile_id(0, 0).unwrap())
             .unwrap();
         for element in ELEMENT_ORDER {
-            let alpha = world.config.element_fields.diffusivities[element];
+            let alpha =
+                world.config.element_fields.diffusivities[element] * world.config.dt_seconds as f32;
             assert!((source_amounts[element] - (9.0 - 8.0 * alpha)).abs() <= 1.0e-6);
             assert!((neighbor_amounts[element] - alpha).abs() <= 1.0e-6);
             assert!((after[element.index()] - before[element.index()]).abs() <= 1.0e-5);
@@ -3761,13 +4381,9 @@ mod tests {
         assert_eq!(world.element_fields, uniform);
         assert_eq!(world.element_fields_next, uniform);
         let mut expected_rng = crate::rng::Rng::from_seed_str("uniform-fields");
-        let expected_sources = crate::environment::EnvalSources::place(
-            &config.enval_sources,
-            40,
-            30,
-            &mut expected_rng,
-        );
-        assert_eq!(world.enval_sources(), &expected_sources);
+        let expected_landscape =
+            crate::environment::enval_landscape(&config.enval_landscape, 40, 30, &mut expected_rng);
+        assert_eq!(world.enval_landscape(), expected_landscape.as_slice());
     }
 
     #[test]
@@ -3846,29 +4462,29 @@ mod tests {
     }
 
     #[test]
-    fn initial_enval_is_zero_off_source_and_at_target_on_source_tiles() {
+    fn initial_enval_equals_the_landscape_targets_on_every_tile() {
         let world = World::new(small_config("enval-initial", 64, 48)).unwrap();
         assert!(world.average_enval().is_finite());
-        assert_eq!(world.enval_sources().sources.len(), 6);
-        let mut on_source = 0;
+        assert_eq!(world.enval_landscape().len(), world.tile_count());
         for tile_index in 0..world.tile_count() {
             let tile = TileId(tile_index);
-            let value = world.tile_enval(tile).unwrap();
-            let inspection = world.inspect_tile(tile).unwrap();
-            match world.enval_sources().target_for_tile(tile_index) {
-                Some(target) => {
-                    on_source += 1;
-                    assert_eq!(value, target);
-                    assert_eq!(inspection.enval_source_target, Some(target));
-                }
-                None => {
-                    assert_eq!(value, 0.0);
-                    assert_eq!(inspection.enval_source_target, None);
-                }
-            }
+            let target = world.enval_landscape()[tile_index];
+            assert_eq!(world.tile_enval(tile).unwrap().to_bits(), target.to_bits());
+            assert_eq!(
+                world
+                    .inspect_tile(tile)
+                    .unwrap()
+                    .enval_landscape_target
+                    .to_bits(),
+                target.to_bits()
+            );
         }
-        assert_eq!(on_source, world.enval_sources().tile_count());
-        assert!(on_source > 0 && on_source < world.tile_count());
+        let total = world
+            .enval
+            .iter()
+            .map(|value| f64::from(*value))
+            .sum::<f64>();
+        assert_eq!(world.enval_ledger().initial_total, total);
     }
 
     #[test]
@@ -4236,6 +4852,106 @@ mod tests {
     }
 
     #[test]
+    fn smoothed_enval_grid_sampled_bilinearly_equals_the_twenty_five_sample_average() {
+        for (seed, width, height, noise) in [
+            ("smoothed-enval-default", 320, 240, 0.5),
+            ("smoothed-enval-small", 7, 6, 2.0),
+            ("smoothed-enval-narrow", 3, 4, 2.0),
+            ("smoothed-enval-line", 1, 9, 2.0),
+        ] {
+            let mut world = World::new(small_config(seed, width, height)).unwrap();
+            for tile in 0..world.tile_count() {
+                let value = world.enval_landscape[tile] + world.rng.range(-noise, noise);
+                world.set_tile_enval(TileId(tile), value).unwrap();
+            }
+            world.refresh_enval_smoothed();
+            assert!(world.enval_smoothed_current);
+            let mut checked = 0;
+            for _ in 0..2_000 {
+                let position = Position::new(
+                    world.rng.range(0.0, width as f32),
+                    world.rng.range(0.0, height as f32),
+                );
+                let smoothed = world.smoothed_local_enval_at(position).unwrap();
+                let averaged = world.local_enval_average_at(position, 2).unwrap();
+                assert!(
+                    (smoothed - averaged).abs() <= 1.0e-6,
+                    "{seed} at {position:?}: {smoothed} vs {averaged}"
+                );
+                checked += 1;
+            }
+            for x in 0..width {
+                for y in 0..height {
+                    let position = Position::new(x as f32, y as f32);
+                    let averaged = world.local_enval_average_at(position, 2).unwrap();
+                    let smoothed = world.smoothed_local_enval_at(position).unwrap();
+                    assert!((smoothed - averaged).abs() <= 1.0e-6);
+                }
+            }
+            assert_eq!(checked, 2_000);
+        }
+    }
+
+    #[test]
+    fn tile_stencils_match_bilinear_stencils_bit_for_bit() {
+        for (width, height) in [(320, 240), (7, 5), (1, 3)] {
+            let mut world = World::new(small_config("tile-stencil", width, height)).unwrap();
+            let (w, h) = (width as f32, height as f32);
+            let mut positions = vec![
+                Position::new(0.0, 0.0),
+                Position::new(w - 1.0e-4, h - 1.0e-4),
+                Position::new(-1.0e-7, -3.5),
+                Position::new(w, h),
+                Position::new(2.0 * w + 0.25, -h - 0.75),
+            ];
+            for _ in 0..5_000 {
+                positions.push(Position::new(
+                    world.rng.range(-2.0 * w, 3.0 * w),
+                    world.rng.range(-2.0 * h, 3.0 * h),
+                ));
+            }
+            for position in positions {
+                let expected = BilinearStencil::new(position, width, height).unwrap();
+                let actual = world.tile_stencil(position).unwrap();
+                for corner in 0..4 {
+                    let sample = expected.samples[corner];
+                    assert_eq!(actual.tiles[corner], world.index_xy(sample.x, sample.y));
+                    assert_eq!(actual.weights[corner].to_bits(), sample.weight.to_bits());
+                }
+            }
+            assert!(world.tile_stencil(Position::new(f32::NAN, 0.0)).is_none());
+        }
+    }
+
+    #[test]
+    fn cells_read_the_smoothed_enval_of_the_start_of_the_cell_phase() {
+        let mut world = World::new(small_config("smoothed-enval-phase", 24, 18)).unwrap();
+        world.spawn_founder_cells(6).unwrap();
+        world.step_many(20);
+        let before = world.clone();
+        world.step_cells();
+        assert!(!world.enval_smoothed_current);
+        let mut expected = before.clone();
+        expected.refresh_enval_smoothed();
+        for cell in before.cells.iter() {
+            let reference = before.local_enval_average_at(cell.position, 2).unwrap();
+            let smoothed = expected.smoothed_local_enval_at(cell.position).unwrap();
+            assert!((reference - smoothed).abs() <= 1.0e-6);
+        }
+        let last_cell = before.cells.at_slot(before.cells.len() - 1);
+        let mut stepped = before.clone();
+        stepped.inspect_cell_fluxes(last_cell.id, 64).unwrap();
+        stepped.step_cells();
+        assert!(stepped.enval != before.enval);
+        let log = stepped.inspect_cell_fluxes(last_cell.id, 64).unwrap();
+        let reference = expected
+            .smoothed_local_enval_at(last_cell.position)
+            .unwrap();
+        assert!(!log.fluxes.is_empty());
+        assert!(log.fluxes.iter().all(|flux| flux.local_enval == reference));
+    }
+
+    #[test]
     fn fast_local_enval_average_is_bit_identical_to_averaging_bilinear_samples() {
         let mut world = World::new(small_config("fast-local-enval", 23, 17)).unwrap();
         let mut rng = crate::rng::Rng::from_seed_str("fast-local-enval-values");
@@ -4463,6 +5179,102 @@ mod tests {
         assert_eq!(
             world.rng.next_f64().to_bits(),
             expected_rng.next_f64().to_bits()
+        );
+    }
+
+    #[test]
+    fn a_cell_step_exchanges_its_net_enval_once_and_draws_one_release_offset() {
+        let mut world = World::new(only_a_config("batched-enval-exchange", 7, 7)).unwrap();
+        world.set_all_enval(0.8).unwrap();
+        let tile = world.tile_id(3, 3).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, 0.8);
+        let mut first = Enzyme::founder_downhill();
+        first.rate = 10.0;
+        first.enval_sigma = 1000.0;
+        first.secretion_fraction = 0.0;
+        let mut second = Enzyme::founder_engine_forward();
+        second.rate = 10.0;
+        second.enval_sigma = 1000.0;
+        second.enval_pump = 0.1;
+        let mut third = Enzyme::founder_engine_reverse();
+        third.rate = 10.0;
+        third.enval_sigma = 1000.0;
+        genome.enzymes = vec![first, second, third];
+        genome.optimal_enval = 0.8;
+        genome.maintenance_cost_per_area = 0.0;
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        world.cells[cell_id].internal_elements =
+            ElementAmounts::new([0.0, 0.5, 0.5, 0.5, 0.0, 0.0]);
+        let before = world.enval.clone();
+        let ledger_before = world.enval_ledger();
+        let mut expected_rng = world.rng.clone();
+        let release_choice = expected_rng.usize(9);
+        let release_tile = world.wrapped_tile_id(
+            3 + MOORE_WITH_CENTER_DX[release_choice],
+            3 + MOORE_WITH_CENTER_DY[release_choice],
+        );
+
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
+        world.step_cell(cell_id);
+
+        let records = world
+            .flux_log
+            .fluxes_newest_first()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        let input = records.iter().map(|record| record.enval_input).sum::<f32>();
+        let output = records
+            .iter()
+            .map(|record| record.enval_output)
+            .sum::<f32>();
+        assert!(records.iter().all(|record| record.enval_input > 0.0));
+        assert!(records.iter().all(|record| record.enval_output < 0.0));
+        for (index, before_value) in before.iter().copied().enumerate() {
+            let mut expected = before_value;
+            if index == tile.index() {
+                expected -= input;
+            }
+            if index == release_tile.index() {
+                expected += output;
+            }
+            assert!(
+                (world.enval[index] - expected).abs() <= 1.0e-6,
+                "tile {index}"
+            );
+        }
+        assert_eq!(
+            world.rng.next_f64().to_bits(),
+            expected_rng.next_f64().to_bits()
+        );
+        let ledger = world.enval_ledger();
+        assert!(
+            (ledger.cell_uptake - ledger_before.cell_uptake + f64::from(input)).abs() <= 1.0e-6
+        );
+        assert!(
+            (ledger.cell_emission - ledger_before.cell_emission - f64::from(output)).abs()
+                <= 1.0e-6
+        );
+        assert!(world.enval_ledger_residual().abs() <= 1.0e-5);
+
+        let mut silent = World::new(only_a_config("batched-enval-silent", 7, 7)).unwrap();
+        let mut genome = Genome::random_founder(&mut silent.rng, 0.0);
+        for enzyme in &mut genome.enzymes {
+            enzyme.enval_throughput = 0.0;
+            enzyme.enval_pump = 0.0;
+        }
+        genome.optimal_enval = 0.3;
+        let cell_id = silent.spawn_cell_with_genome_at(tile, genome).unwrap();
+        silent.cells[cell_id].internal_elements =
+            ElementAmounts::new([0.0, 0.5, 0.5, 0.5, 0.0, 0.0]);
+        let mut untouched_rng = silent.rng.clone();
+        let enval_before = silent.enval.clone();
+        silent.step_cell(cell_id);
+        assert!(silent.reaction_counters.successes > 0);
+        assert_eq!(silent.enval, enval_before);
+        assert_eq!(
+            silent.rng.next_f64().to_bits(),
+            untouched_rng.next_f64().to_bits()
         );
     }
 
@@ -5385,7 +6197,7 @@ mod tests {
 
     fn closed_config(seed: &str, width: usize, height: usize) -> Config {
         let mut config = small_config(seed, width, height);
-        config.enval_sources.pairs = 0;
+        config.enval_landscape.relaxation_per_second = 0.0;
         config.enval_recharge.rate_per_second = 0.0;
         config
     }
@@ -5416,6 +6228,7 @@ mod tests {
         config.catalyst_upkeep_per_sec = 0.0;
         config.element_fields.initial_amounts = ElementAmounts::new([0.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
         let mut world = World::new(config).unwrap();
+        world.set_all_enval(0.0).unwrap();
         let positive = pump_engine_genome(&mut world, 1, 0.3);
         let negative = pump_engine_genome(&mut world, 2, -0.3);
         world
@@ -5448,66 +6261,105 @@ mod tests {
     }
 
     #[test]
-    fn source_tiles_converge_to_their_targets_and_relax_back_after_edits() {
-        let mut config = small_config("source-convergence", 96, 72);
-        config.enval_diffusion_alpha = 0.0;
+    fn perturbed_cell_free_tiles_relax_toward_their_targets_at_kappa_per_tick() {
+        let mut config = small_config("landscape-relaxation", 96, 72);
+        config.enval_diffusivity_per_second = 0.0;
         config.enval_recharge.rate_per_second = 0.0;
         let mut world = World::new(config).unwrap();
-        world.set_all_enval(0.0).unwrap();
-        let (edited_tile, _) = world.enval_sources().tiles().next().unwrap();
-        for tick in 0..500 {
+        let targets = world.enval_landscape().to_vec();
+        let kappa = 1.0
+            - (-f64::from(world.config.enval_landscape.relaxation_per_second)
+                * world.config.dt_seconds)
+                .exp();
+        let edited = TileId(1234);
+        world.set_tile_enval(edited, 7.5).unwrap();
+        world.set_tile_enval(TileId(77), -3.0).unwrap();
+        for _ in 0..300 {
+            let before = world.enval.clone();
+            let inflow_before = world.enval_ledger().source_inflow;
             world.step();
-            if tick == 100 {
-                world.set_tile_enval(TileId(edited_tile), 7.5).unwrap();
-            }
-        }
-        for (tile, target) in world.enval_sources().tiles() {
-            assert!((world.enval[tile] - target).abs() <= 1.0e-5);
-        }
-        let off_source = (0..world.tile_count())
-            .find(|tile| world.enval_sources().target_for_tile(*tile).is_none())
-            .unwrap();
-        assert_eq!(world.enval[off_source], 0.0);
-
-        let mut diffusing =
-            World::new(small_config("source-convergence-diffusing", 96, 72)).unwrap();
-        diffusing.step_many(1_000);
-        for source in diffusing.enval_sources().sources.clone() {
-            let centre = diffusing
-                .center_tile_id(Position::new(
-                    source.center.x.round(),
-                    source.center.y.round(),
-                ))
-                .unwrap();
-            let value = diffusing.enval[centre.index()];
-            assert!(value.signum() == source.target.signum());
-            assert!((value - source.target).abs() <= 0.35 * source.target.abs());
-        }
-    }
-
-    #[test]
-    fn source_placement_is_deterministic_per_seed_and_separated() {
-        let first = World::new(small_config("world-source-placement", 320, 240)).unwrap();
-        let second = World::new(small_config("world-source-placement", 320, 240)).unwrap();
-        let other = World::new(small_config("world-source-placement-other", 320, 240)).unwrap();
-        assert_eq!(first.enval_sources(), second.enval_sources());
-        assert_eq!(first.enval, second.enval);
-        assert_ne!(first.enval_sources().sources, other.enval_sources().sources);
-        let sources = &first.enval_sources().sources;
-        assert_eq!(sources.len(), 2 * first.config.enval_sources.pairs);
-        for (index, left) in sources.iter().enumerate() {
-            for right in &sources[index + 1..] {
+            let mut applied = 0.0;
+            for tile in 0..world.tile_count() {
+                let expected = f64::from(before[tile])
+                    + kappa * (f64::from(targets[tile]) - f64::from(before[tile]));
                 assert!(
-                    crate::spatial::toroidal_distance(left.center, right.center, 320.0, 240.0)
-                        >= 4.0 * first.config.enval_sources.radius
+                    (f64::from(world.enval[tile]) - expected).abs() <= 1.0e-6,
+                    "tile {tile}"
                 );
+                applied += f64::from(world.enval[tile]) - f64::from(before[tile]);
             }
+            let inflow = world.enval_ledger().source_inflow - inflow_before;
+            assert!((inflow - applied).abs() <= 1.0e-9);
         }
+        let expected_gap = (7.5 - f64::from(targets[edited.index()])) * (1.0 - kappa).powi(300);
+        let gap = f64::from(world.enval[edited.index()]) - f64::from(targets[edited.index()]);
+        assert!((gap - expected_gap).abs() <= 1.0e-4 * expected_gap.abs());
+        assert!(gap < 7.5 - f64::from(targets[edited.index()]));
+        assert!(world.enval_ledger_residual().abs() <= 1.0e-6);
+
+        let mut frozen_config = small_config("landscape-relaxation", 96, 72);
+        frozen_config.enval_landscape.relaxation_per_second = 0.0;
+        frozen_config.enval_recharge.rate_per_second = 0.0;
+        frozen_config.enval_diffusivity_per_second = 0.0;
+        let mut frozen = World::new(frozen_config).unwrap();
+        frozen.set_tile_enval(edited, 7.5).unwrap();
+        let before = frozen.enval.clone();
+        frozen.step_many(200);
+        assert_eq!(frozen.enval_ledger().source_inflow, 0.0);
+        assert_eq!(frozen.enval, before);
     }
 
     #[test]
-    fn enval_ledger_closes_with_sources_cells_recharge_and_user_edits() {
-        let mut config = small_config("enval-ledger-sources", 64, 48);
+    fn landscape_is_seed_deterministic_bounded_periodic_and_differs_between_seeds() {
+        let first = World::new(small_config("world-landscape", 320, 240)).unwrap();
+        let second = World::new(small_config("world-landscape", 320, 240)).unwrap();
+        let other = World::new(small_config("world-landscape-other", 320, 240)).unwrap();
+        assert_eq!(first.enval_landscape(), second.enval_landscape());
+        assert_eq!(first.enval, second.enval);
+        assert_ne!(first.enval_landscape(), other.enval_landscape());
+        let magnitude = first.config.enval_landscape.magnitude;
+        let peak = first
+            .enval_landscape()
+            .iter()
+            .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+        assert_eq!(peak, magnitude);
+        assert!(
+            first
+                .enval_landscape()
+                .iter()
+                .all(|value| value.abs() <= magnitude)
+        );
+        let at = |x: usize, y: usize| first.enval_landscape()[first.index_xy(x, y)];
+        let mut interior = 0.0_f32;
+        for x in 0..first.width - 1 {
+            for y in 0..first.height - 1 {
+                interior = interior
+                    .max((at(x + 1, y) - at(x, y)).abs())
+                    .max((at(x, y + 1) - at(x, y)).abs());
+            }
+        }
+        let mut seam = 0.0_f32;
+        for y in 0..first.height {
+            seam = seam.max((at(0, y) - at(first.width - 1, y)).abs());
+        }
+        for x in 0..first.width {
+            seam = seam.max((at(x, 0) - at(x, first.height - 1)).abs());
+        }
+        assert!(
+            interior > 0.0 && seam <= interior,
+            "seam {seam} interior {interior}"
+        );
+        let positive = first
+            .enval_landscape()
+            .iter()
+            .filter(|value| **value > 0.0)
+            .count();
+        assert!(positive > first.tile_count() / 5 && positive < 4 * first.tile_count() / 5);
+    }
+
+    #[test]
+    fn enval_ledger_closes_with_landscape_cells_recharge_and_user_edits() {
+        let mut config = small_config("enval-ledger-landscape", 64, 48);
         config.initial_founder_count = 12;
         let mut world = World::new(config).unwrap();
         world.spawn_founder_cells(12).unwrap();
@@ -5516,10 +6368,7 @@ mod tests {
             world.step();
             match tick {
                 300 => world.adjust_tile_enval(TileId(5), 2.0).unwrap(),
-                900 => {
-                    let (tile, _) = world.enval_sources().tiles().nth(3).unwrap();
-                    world.set_tile_enval(TileId(tile), -3.0).unwrap();
-                }
+                900 => world.set_tile_enval(TileId(3), -3.0).unwrap(),
                 1_400 => world.set_all_enval(0.05).unwrap(),
                 _ => {}
             }
@@ -5563,7 +6412,7 @@ mod tests {
             let tick_energy = world.enval_ledger.recharge_energy - energy_before;
             assert!((tick_energy - tick_consumed).abs() <= 1.0e-5 + 1.0e-4 * tick_energy);
             consumed += tick_consumed;
-            world.relax_enval_sources();
+            world.relax_enval_landscape();
             world.refresh_enval_sum();
             world.advance_time();
             assert!(
@@ -5595,7 +6444,7 @@ mod tests {
             manual.drift_cells();
             manual.resolve_overlaps();
             manual.diffuse_enval();
-            manual.relax_enval_sources();
+            manual.relax_enval_landscape();
             manual.refresh_enval_sum();
             manual.advance_time();
         }
@@ -5618,7 +6467,7 @@ mod tests {
     #[test]
     fn recharge_makes_d_only_where_enval_is_positive_and_e_only_where_negative() {
         let mut config = small_config("recharge-sign", 96, 72);
-        config.enval_diffusion_alpha = 0.0;
+        config.enval_diffusivity_per_second = 0.0;
         config.element_fields.diffusivities = ElementAmounts::ZERO;
         config.element_fields.initial_amounts = ElementAmounts::new([0.0, 0.0, 0.0, 0.1, 0.1, 1.0]);
         config.element_fields.heterogeneity = 0.0;
@@ -5631,21 +6480,19 @@ mod tests {
             let amounts = world.element_fields[tile];
             let d_gain = amounts[Element::D] - 0.1;
             let e_gain = amounts[Element::E] - 0.1;
-            match world.enval_sources().target_for_tile(tile) {
-                Some(target) if target > 0.0 => {
-                    assert!(d_gain > 0.0);
-                    assert!(e_gain.abs() <= 1.0e-7);
-                    saw_d = true;
-                }
-                Some(_) => {
-                    assert!(e_gain > 0.0);
-                    assert!(d_gain.abs() <= 1.0e-7);
-                    saw_e = true;
-                }
-                None => {
-                    assert!(d_gain.abs() <= 1.0e-7);
-                    assert!(e_gain.abs() <= 1.0e-7);
-                }
+            let target = world.enval_landscape()[tile];
+            if target >= 0.0 {
+                assert!(e_gain.abs() <= 1.0e-7);
+            }
+            if target <= 0.0 {
+                assert!(d_gain.abs() <= 1.0e-7);
+            }
+            if target > 0.05 {
+                assert!(d_gain > 0.0);
+                saw_d = true;
+            } else if target < -0.05 {
+                assert!(e_gain > 0.0);
+                saw_e = true;
             }
         }
         assert!(saw_d && saw_e);
@@ -5694,8 +6541,6 @@ mod tests {
         for seed in ["viability-1", "viability-2", "viability-3"] {
             let mut config = small_config(seed, 64, 48);
             config.initial_founder_count = 8;
-            config.enval_sources.pairs = 1;
-            config.enval_sources.radius = 4.0;
             let mut world = World::new(config).unwrap();
             assert_eq!(world.spawn_founder_cells(8).unwrap(), 8);
             for tick in 1..=3_000 {
@@ -5850,6 +6695,7 @@ mod tests {
             cell_id,
             slot,
             position: cell.position,
+            stencil: world.tile_stencil(cell.position).unwrap(),
             local_enval: world
                 .local_enval_average_at(cell.position, super::LOCAL_ENVAL_RADIUS)
                 .unwrap(),
@@ -6556,11 +7402,18 @@ mod tests {
         let mut config = small_config("steady-state-allocations", 48, 36);
         config.catalyst_upkeep_per_sec = 0.0;
         let mut world = World::new(config).unwrap();
+        let slow_growth = |genome: &mut Genome| {
+            for engine in &mut genome.enzymes[1..] {
+                engine.body_fraction = 0.02;
+                engine.boundary_fraction = 0.02;
+            }
+        };
         for index in 0..80 {
             let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
             world.config.founder_energy = 50.0;
             genome.maintenance_cost_per_area = 0.0;
             genome.enzymes[0].exposure = 0.05;
+            slow_growth(&mut genome);
             let position = Position::new(
                 (index % 10) as f32 * 4.3 + 1.0,
                 (index / 10) as f32 * 4.1 + 1.0,
@@ -6572,6 +7425,7 @@ mod tests {
                 let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
                 genome.lineage_id = LineageId(900 + index as u64);
                 genome.maintenance_cost_per_area = 0.0;
+                slow_growth(&mut genome);
                 let neighbour = Position::new(position.x + 0.91, position.y);
                 let _ = world.spawn_cell_with_genome_at_position(neighbour, genome);
             }
@@ -6599,6 +7453,151 @@ mod tests {
             "steady-state steps allocated {allocations} times"
         );
         world.check_invariants().unwrap();
+    }
+
+    fn brute_force_pairs(world: &World, gap: f32) -> Vec<(u32, u32)> {
+        let (width, height) = (world.width as f32, world.height as f32);
+        let mut pairs = Vec::new();
+        for slot_a in 0..world.cells.len() {
+            for slot_b in slot_a + 1..world.cells.len() {
+                let (a, b) = (world.cells.at_slot(slot_a), world.cells.at_slot(slot_b));
+                if toroidal_distance_squared(a.position, b.position, width, height)
+                    <= (a.radius + b.radius + gap).powi(2)
+                {
+                    pairs.push((slot_a as u32, slot_b as u32));
+                }
+            }
+        }
+        pairs
+    }
+
+    fn brute_force_step(world: &mut World) {
+        world.diffuse_element_fields();
+        world.contact_list_current = false;
+        world.step_cells();
+        world.drift_cells();
+        world.refresh_max_cell_radius();
+        let gap = world.config.surface.contact_gap;
+        let contacts = brute_force_pairs(world, gap);
+        world.contact_pair_count = contacts.len() as u64;
+        world.cross_lineage_contact_pair_count = contacts
+            .iter()
+            .filter(|(a, b)| {
+                world.cells.at_slot(*a as usize).lineage_id
+                    != world.cells.at_slot(*b as usize).lineage_id
+            })
+            .count() as u64;
+        if world.cells.len() >= 2 {
+            for pass in 0..super::OVERLAP_RELAXATION_PASSES {
+                world.contact_pairs = brute_force_pairs(world, if pass == 0 { gap } else { 0.0 });
+                world.contact_displacements.clear();
+                world.contact_displacements.resize(world.cells.len(), 0.0);
+                let corrected = world.overlap_pass();
+                world.sync_spatial_index();
+                if !corrected {
+                    break;
+                }
+            }
+        }
+        world.contact_list_current = false;
+        world.enval_phase();
+        world.advance_time();
+    }
+
+    #[test]
+    fn shared_contact_list_matches_brute_force_overlap_statistics_and_catalysis() {
+        let mut world = World::new(small_config("shared-contact-list", 20, 16)).unwrap();
+        world.config.founder_energy = 20.0;
+        let mut index = 0;
+        for column in 0..7 {
+            for row in 0..6 {
+                let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
+                genome.lineage_id = LineageId(1 + (column * 6 + row) as u64 % 3);
+                for engine in &mut genome.enzymes[1..] {
+                    engine.body_fraction = 0.02;
+                    engine.boundary_fraction = 0.02;
+                }
+                if index % 2 == 0 {
+                    genome.enzymes[0].exposure = 0.2;
+                    genome.enzymes[0].reactants =
+                        ElementAmounts::new([1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+                    genome.enzymes[0].products =
+                        ElementAmounts::new([0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+                }
+                let position = Position::new(
+                    3.0 + column as f32 * 0.93 + (row % 2) as f32 * 0.4,
+                    3.0 + row as f32 * 0.88,
+                );
+                world
+                    .spawn_cell_with_genome_at_position(position, genome)
+                    .unwrap();
+                index += 1;
+            }
+        }
+        world.config.cell_motion.diffusivity = 0.5;
+        let mut brute = world.clone();
+        let mut overlapping_ticks = 0;
+        let mut contact_sum = 0;
+        let mut loose_ticks = 0;
+        for tick in 0..200 {
+            if tick % 20 == 10 {
+                for target in [&mut world, &mut brute] {
+                    let ids = live_ids(target);
+                    let (mover, anchor) = (ids[tick % ids.len()], ids[(tick + 7) % ids.len()]);
+                    let anchor_position = target.cells[anchor].position;
+                    target.cells[mover].position =
+                        Position::new(anchor_position.x + 0.05, anchor_position.y)
+                            .wrapped(target.width as f32, target.height as f32)
+                            .unwrap();
+                    target.rebuild_spatial_index();
+                }
+            }
+            world.step();
+            brute_force_step(&mut brute);
+            assert!(world.contact_list_current);
+            assert_eq!(
+                world.contact_pair_count, brute.contact_pair_count,
+                "tick {tick}"
+            );
+            assert_eq!(
+                world.cross_lineage_contact_pair_count,
+                brute.cross_lineage_contact_pair_count
+            );
+            for (listed, reference) in world.cells.iter().zip(brute.cells.iter()) {
+                assert_eq!(listed.id, reference.id);
+                assert_eq!(listed.position, reference.position, "tick {tick}");
+                assert_eq!(listed.energy.to_bits(), reference.energy.to_bits());
+            }
+            contact_sum += world.contact_pair_count;
+            if !world.contact_loose_extras.is_empty() {
+                loose_ticks += 1;
+            }
+            if world.operation_counters.overlap_corrections > 0 {
+                overlapping_ticks += 1;
+            }
+            world.operation_counters.overlap_corrections = 0;
+        }
+        assert_eq!(world.reaction_counters.divisions, 0);
+        assert!(
+            contact_sum > 200 * 20,
+            "{contact_sum} contacts over the run"
+        );
+        assert!(loose_ticks >= 10, "{loose_ticks} ticks with loose cells");
+        assert!(
+            overlapping_ticks > 20,
+            "{overlapping_ticks} ticks with overlaps"
+        );
+        assert!(world.interaction_counters.cell_surface_extent > 0.0);
+        assert_eq!(
+            world.interaction_counters.cell_surface_extent.to_bits(),
+            brute.interaction_counters.cell_surface_extent.to_bits()
+        );
+        world.operation_counters = Default::default();
+        brute.operation_counters = Default::default();
+        assert_eq!(
+            crate::snapshot::to_bytes(&world).unwrap(),
+            crate::snapshot::to_bytes(&brute).unwrap()
+        );
     }
 
     #[test]

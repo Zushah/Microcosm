@@ -2,8 +2,8 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::sync::{Mutex, OnceLock};
 
 use microcosmcore::{
-    CellBodyConfig, CellId, CellMotionConfig, Config, ElementFieldConfig, EnvalRechargeConfig,
-    EnvalSourceConfig, GenomePatch, LineageId, Position, RenderBrushPreview, RenderBuffers,
+    CellBodyConfig, CellId, CellMotionConfig, Config, ElementFieldConfig, EnvalLandscapeConfig,
+    EnvalRechargeConfig, GenomePatch, LineageId, Position, RenderBrushPreview, RenderBuffers,
     RenderDisplayMode, RenderVisualState, SurfaceConfig, VERSION, World, WorldStats,
 };
 use serde::{Deserialize, Serialize};
@@ -259,11 +259,11 @@ struct WasmInitConfig {
     height: Option<usize>,
     initial_cells: Option<usize>,
     dt_seconds: Option<f64>,
-    enval_diffusion_alpha: Option<f32>,
+    enval_diffusivity_per_second: Option<f32>,
     element_fields: Option<ElementFieldConfig>,
     membrane_permeability: Option<f32>,
     catalyst_upkeep_per_sec: Option<f64>,
-    enval_sources: Option<EnvalSourceConfig>,
+    enval_landscape: Option<EnvalLandscapeConfig>,
     enval_recharge: Option<EnvalRechargeConfig>,
     cell_motion: Option<CellMotionConfig>,
     surface: Option<SurfaceConfig>,
@@ -293,8 +293,8 @@ impl WasmInitConfig {
         if let Some(dt_seconds) = self.dt_seconds {
             config.dt_seconds = dt_seconds;
         }
-        if let Some(alpha) = self.enval_diffusion_alpha {
-            config.enval_diffusion_alpha = alpha;
+        if let Some(diffusivity) = self.enval_diffusivity_per_second {
+            config.enval_diffusivity_per_second = diffusivity;
         }
         if let Some(element_fields) = self.element_fields {
             config.element_fields = element_fields;
@@ -305,8 +305,8 @@ impl WasmInitConfig {
         if let Some(upkeep) = self.catalyst_upkeep_per_sec {
             config.catalyst_upkeep_per_sec = upkeep;
         }
-        if let Some(sources) = self.enval_sources {
-            config.enval_sources = sources;
+        if let Some(landscape) = self.enval_landscape {
+            config.enval_landscape = landscape;
         }
         if let Some(recharge) = self.enval_recharge {
             config.enval_recharge = recharge;
@@ -801,7 +801,7 @@ pub extern "C" fn microcosm_inspect_tile(handle: u32, x: u32, y: u32) -> u32 {
                     "x": info.x,
                     "y": info.y,
                     "enval": info.enval,
-                    "enval_source_target": info.enval_source_target,
+                    "enval_landscape_target": info.enval_landscape_target,
                     "cell_center_count": info.cell_center_count,
                     "element_concentrations": {
                         "A": info.element_concentrations[0],
@@ -1382,12 +1382,14 @@ mod tests {
 
     #[test]
     fn json_config_accepts_phase_three_environment_overrides() {
-        let json = br#"{"membrane_permeability":6.0,"catalyst_upkeep_per_sec":0.02,"enval_sources":{"pairs":1,"radius":4.0,"magnitude":2.0,"relaxation_per_second":3.0},"enval_recharge":{"rate_per_second":0.0},"element_fields":{"initial_amounts":[1.0,0.65,0.5,0.12,0.08,0.05],"diffusivities":[0.028,0.018,0.014,0.012,0.03,0.022]}}"#;
+        let json = br#"{"membrane_permeability":6.0,"catalyst_upkeep_per_sec":0.02,"enval_landscape":{"magnitude":1.2,"scale":30.0,"relaxation_per_second":0.3},"enval_diffusivity_per_second":9.0,"enval_recharge":{"rate_per_second":0.0},"element_fields":{"initial_amounts":[1.0,0.65,0.5,0.12,0.08,0.05],"diffusivities":[2.8,1.8,1.4,1.2,3.0,2.2]}}"#;
         let config = parse_config_from_bytes(json.as_ptr(), json.len()).unwrap();
         assert_eq!(config.membrane_permeability, 6.0);
         assert_eq!(config.catalyst_upkeep_per_sec, 0.02);
-        assert_eq!(config.enval_sources.pairs, 1);
-        assert_eq!(config.enval_sources.magnitude, 2.0);
+        assert_eq!(config.enval_landscape.magnitude, 1.2);
+        assert_eq!(config.enval_landscape.scale, 30.0);
+        assert_eq!(config.enval_landscape.relaxation_per_second, 0.3);
+        assert_eq!(config.enval_diffusivity_per_second, 9.0);
         assert_eq!(config.enval_recharge.rate_per_second, 0.0);
         assert_eq!(config.element_fields.heterogeneity, 0.5);
         assert_eq!(config.element_fields.heterogeneity_scale, 24.0);
@@ -1607,7 +1609,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
         assert_eq!(microcosm_inspect_tile(handle, 0, 0), STATUS_OK);
-        assert!(query_json().get("enval_source_target").is_some());
+        assert!(query_json()["enval_landscape_target"].as_f64().is_some());
         assert!(microcosm_query_result_len() > 0);
         assert!(!microcosm_query_result_ptr().is_null());
         let before = unsafe { *microcosm_stats_ptr(handle) }.average_enval;
@@ -1883,6 +1885,7 @@ mod tests {
         assert!(stepped.energy_maintenance > 0.0);
         assert!(stepped.energy_ledger_residual.abs() < 1.0e-9);
         assert!(stepped.renewable_coverage.is_finite());
+        assert!(stepped.enval_source_inflow != 0.0);
         assert_eq!(stepped.max_exposure, 0.0);
         assert_eq!(stepped.exposed_cell_count, 0);
         assert_eq!(stepped.boundary_digested, 0.0);

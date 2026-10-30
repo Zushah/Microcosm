@@ -538,7 +538,7 @@ export class MicrocosmGUI {
             this.elements.hoverInspector.innerHTML = tile ? detailRows([
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Enval", tile.enval],
-                ["Enval source", tile.enval_source_target ?? "—"],
+                ["Enval landscape target", tile.enval_landscape_target ?? "—"],
                 ["Cell centers", tile.cell_center_count],
                 ["Total elements", tile.total_element_concentration],
                 ["Mass density", tile.mass_density]
@@ -550,7 +550,7 @@ export class MicrocosmGUI {
                 ["Tile", `${tile.x}, ${tile.y}`],
                 ["Tile id", tile.tile_id],
                 ["Enval", tile.enval],
-                ["Enval source target", tile.enval_source_target ?? "—"],
+                ["Enval landscape target", tile.enval_landscape_target ?? "—"],
                 ["Cell center count", tile.cell_center_count],
                 ["Total elements", tile.total_element_concentration],
                 ["Mass density", tile.mass_density],

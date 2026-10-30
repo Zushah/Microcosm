@@ -10,13 +10,12 @@ pub const DEFAULT_HEIGHT: usize = 240;
 pub const DEFAULT_SEED: &str = "42";
 pub const DEFAULT_INITIAL_FOUNDER_COUNT: usize = 32;
 pub const DEFAULT_DT_SECONDS: f64 = 0.010;
-pub const DEFAULT_ENVAL_DIFFUSION_ALPHA: f32 = 0.18;
+pub const DEFAULT_ENVAL_DIFFUSIVITY_PER_SECOND: f32 = 18.0;
 pub const DEFAULT_MEMBRANE_PERMEABILITY: f32 = 4.0;
 pub const DEFAULT_CATALYST_UPKEEP_PER_SEC: f64 = 0.01;
-pub const DEFAULT_ENVAL_SOURCE_PAIRS: usize = 3;
-pub const DEFAULT_ENVAL_SOURCE_RADIUS: f32 = 6.0;
-pub const DEFAULT_ENVAL_SOURCE_MAGNITUDE: f32 = 1.0;
-pub const DEFAULT_ENVAL_SOURCE_RELAXATION_PER_SECOND: f32 = 5.0;
+pub const DEFAULT_ENVAL_LANDSCAPE_MAGNITUDE: f32 = 1.0;
+pub const DEFAULT_ENVAL_LANDSCAPE_SCALE: f32 = 40.0;
+pub const DEFAULT_ENVAL_LANDSCAPE_RELAXATION_PER_SECOND: f32 = 0.2;
 pub const DEFAULT_ENVAL_RECHARGE_RATE_PER_SECOND: f32 = 0.1;
 pub const DEFAULT_SURFACE_CONTACT_GAP: f32 = 0.1;
 pub const DEFAULT_CELL_DIFFUSIVITY: f32 = 0.2;
@@ -24,7 +23,7 @@ pub const DEFAULT_CELL_DIFFUSIVITY: f32 = 0.2;
 pub const DEFAULT_ELEMENT_FIELD_AMOUNTS: ElementAmounts =
     ElementAmounts::new([1.00, 0.65, 0.50, 0.12, 0.08, 0.05]);
 pub const DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES: ElementAmounts =
-    ElementAmounts::new([0.028, 0.018, 0.014, 0.012, 0.030, 0.022]);
+    ElementAmounts::new([2.8, 1.8, 1.4, 1.2, 3.0, 2.2]);
 pub const DEFAULT_ELEMENT_FIELD_HETEROGENEITY: f32 = 0.5;
 pub const DEFAULT_ELEMENT_FIELD_HETEROGENEITY_SCALE: f32 = 24.0;
 
@@ -58,14 +57,12 @@ impl Default for ElementFieldConfig {
 }
 
 impl ElementFieldConfig {
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate(&self, dt_seconds: f64) -> Result<(), ConfigError> {
         self.initial_amounts
             .validate_nonnegative("element_fields.initial_amounts")?;
-        self.diffusivities
-            .validate_nonnegative("element_fields.diffusivities")?;
         for element in ELEMENT_ORDER {
             let diffusivity = self.diffusivities[element];
-            if diffusivity > 1.0 {
+            if !diffusivity_is_valid(diffusivity, dt_seconds) {
                 return Err(ConfigError::InvalidElementDiffusivity {
                     element: element.symbol(),
                     value: diffusivity,
@@ -84,38 +81,45 @@ impl ElementFieldConfig {
     }
 }
 
+pub fn diffusivity_is_valid(rate_per_second: f32, dt_seconds: f64) -> bool {
+    rate_per_second.is_finite()
+        && rate_per_second >= 0.0
+        && f64::from(rate_per_second) * dt_seconds <= 1.0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct EnvalSourceConfig {
-    pub pairs: usize,
-    pub radius: f32,
+pub struct EnvalLandscapeConfig {
     pub magnitude: f32,
+    pub scale: f32,
     pub relaxation_per_second: f32,
 }
 
-impl Default for EnvalSourceConfig {
+impl Default for EnvalLandscapeConfig {
     fn default() -> Self {
         Self {
-            pairs: DEFAULT_ENVAL_SOURCE_PAIRS,
-            radius: DEFAULT_ENVAL_SOURCE_RADIUS,
-            magnitude: DEFAULT_ENVAL_SOURCE_MAGNITUDE,
-            relaxation_per_second: DEFAULT_ENVAL_SOURCE_RELAXATION_PER_SECOND,
+            magnitude: DEFAULT_ENVAL_LANDSCAPE_MAGNITUDE,
+            scale: DEFAULT_ENVAL_LANDSCAPE_SCALE,
+            relaxation_per_second: DEFAULT_ENVAL_LANDSCAPE_RELAXATION_PER_SECOND,
         }
     }
 }
 
-impl EnvalSourceConfig {
+impl EnvalLandscapeConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        for (name, value) in [
-            ("enval_sources.radius", self.radius),
-            ("enval_sources.magnitude", self.magnitude),
-            (
-                "enval_sources.relaxation_per_second",
-                self.relaxation_per_second,
-            ),
-        ] {
-            if !value.is_finite() || value <= 0.0 {
-                return Err(ConfigError::InvalidPositive(name, f64::from(value)));
-            }
+        if !self.magnitude.is_finite() || self.magnitude <= 0.0 {
+            return Err(ConfigError::InvalidPositive(
+                "enval_landscape.magnitude",
+                f64::from(self.magnitude),
+            ));
+        }
+        if !self.scale.is_finite() || self.scale < 2.0 {
+            return Err(ConfigError::InvalidLandscapeScale(self.scale));
+        }
+        if !self.relaxation_per_second.is_finite() || self.relaxation_per_second < 0.0 {
+            return Err(ConfigError::InvalidNonnegative(
+                "enval_landscape.relaxation_per_second",
+                f64::from(self.relaxation_per_second),
+            ));
         }
         Ok(())
     }
@@ -274,11 +278,11 @@ pub struct Config {
     pub seed: String,
     pub initial_founder_count: usize,
     pub dt_seconds: f64,
-    pub enval_diffusion_alpha: f32,
+    pub enval_diffusivity_per_second: f32,
     pub element_fields: ElementFieldConfig,
     pub membrane_permeability: f32,
     pub catalyst_upkeep_per_sec: f64,
-    pub enval_sources: EnvalSourceConfig,
+    pub enval_landscape: EnvalLandscapeConfig,
     pub enval_recharge: EnvalRechargeConfig,
     pub cell_motion: CellMotionConfig,
     pub surface: SurfaceConfig,
@@ -294,11 +298,11 @@ impl Default for Config {
             seed: DEFAULT_SEED.to_owned(),
             initial_founder_count: DEFAULT_INITIAL_FOUNDER_COUNT,
             dt_seconds: DEFAULT_DT_SECONDS,
-            enval_diffusion_alpha: DEFAULT_ENVAL_DIFFUSION_ALPHA,
+            enval_diffusivity_per_second: DEFAULT_ENVAL_DIFFUSIVITY_PER_SECOND,
             element_fields: ElementFieldConfig::default(),
             membrane_permeability: DEFAULT_MEMBRANE_PERMEABILITY,
             catalyst_upkeep_per_sec: DEFAULT_CATALYST_UPKEEP_PER_SEC,
-            enval_sources: EnvalSourceConfig::default(),
+            enval_landscape: EnvalLandscapeConfig::default(),
             enval_recharge: EnvalRechargeConfig::default(),
             cell_motion: CellMotionConfig::default(),
             surface: SurfaceConfig::default(),
@@ -324,12 +328,9 @@ impl Config {
         if !self.dt_seconds.is_finite() || self.dt_seconds <= 0.0 {
             return Err(ConfigError::InvalidDtSeconds(self.dt_seconds));
         }
-        if !self.enval_diffusion_alpha.is_finite()
-            || !(0.0..=1.0).contains(&self.enval_diffusion_alpha)
-        {
-            return Err(ConfigError::InvalidProbability(
-                "enval_diffusion_alpha",
-                self.enval_diffusion_alpha,
+        if !diffusivity_is_valid(self.enval_diffusivity_per_second, self.dt_seconds) {
+            return Err(ConfigError::InvalidEnvalDiffusivity(
+                self.enval_diffusivity_per_second,
             ));
         }
         if !self.membrane_permeability.is_finite() || self.membrane_permeability <= 0.0 {
@@ -351,11 +352,11 @@ impl Config {
                 self.founder_energy,
             ));
         }
-        self.enval_sources.validate()?;
+        self.enval_landscape.validate()?;
         self.enval_recharge.validate()?;
         self.cell_motion.validate()?;
         self.surface.validate()?;
-        self.element_fields.validate()
+        self.element_fields.validate(self.dt_seconds)
     }
 }
 
@@ -364,13 +365,14 @@ pub enum ConfigError {
     InvalidDimension(&'static str, usize),
     TileCountOverflow,
     InvalidDtSeconds(f64),
-    InvalidProbability(&'static str, f32),
     InvalidPositive(&'static str, f64),
     InvalidNonnegative(&'static str, f64),
     InvalidElementAmount(ElementAmountsError),
+    InvalidEnvalDiffusivity(f32),
     InvalidElementDiffusivity { element: &'static str, value: f32 },
     InvalidHeterogeneity(f32),
     InvalidHeterogeneityScale(f32),
+    InvalidLandscapeScale(f32),
 }
 
 impl From<ElementAmountsError> for ConfigError {
@@ -392,10 +394,6 @@ impl fmt::Display for ConfigError {
                     "invalid dt_seconds: expected a positive finite value, got {value}"
                 )
             }
-            Self::InvalidProbability(name, value) => write!(
-                f,
-                "invalid {name}: expected a finite probability in [0, 1], got {value}"
-            ),
             Self::InvalidPositive(name, value) => write!(
                 f,
                 "invalid {name}: expected a positive finite value, got {value}"
@@ -405,9 +403,13 @@ impl fmt::Display for ConfigError {
                 "invalid {name}: expected a nonnegative finite value, got {value}"
             ),
             Self::InvalidElementAmount(error) => error.fmt(f),
+            Self::InvalidEnvalDiffusivity(value) => write!(
+                f,
+                "invalid enval_diffusivity_per_second: expected a finite nonnegative rate with rate * dt_seconds <= 1, got {value}"
+            ),
             Self::InvalidElementDiffusivity { element, value } => write!(
                 f,
-                "invalid element_fields.diffusivities.{element}: expected a finite mixing strength in [0, 1], got {value}"
+                "invalid element_fields.diffusivities.{element}: expected a finite nonnegative rate per second with rate * dt_seconds <= 1, got {value}"
             ),
             Self::InvalidHeterogeneity(value) => write!(
                 f,
@@ -416,6 +418,10 @@ impl fmt::Display for ConfigError {
             Self::InvalidHeterogeneityScale(value) => write!(
                 f,
                 "invalid element_fields.heterogeneity_scale: expected a finite value >= 2, got {value}"
+            ),
+            Self::InvalidLandscapeScale(value) => write!(
+                f,
+                "invalid enval_landscape.scale: expected a finite value >= 2, got {value}"
             ),
         }
     }
@@ -426,7 +432,8 @@ impl Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ConfigError, DEFAULT_ELEMENT_FIELD_AMOUNTS, DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES,
+        Config, ConfigError, DEFAULT_DT_SECONDS, DEFAULT_ELEMENT_FIELD_AMOUNTS,
+        DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES, DEFAULT_ENVAL_DIFFUSIVITY_PER_SECOND,
         ElementFieldConfig,
     };
     use crate::chem::Element;
@@ -443,12 +450,12 @@ mod tests {
         );
         assert_eq!(
             *DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES.as_array(),
-            [0.028, 0.018, 0.014, 0.012, 0.030, 0.022]
+            [2.8, 1.8, 1.4, 1.2, 3.0, 2.2]
         );
 
         for element in crate::chem::ELEMENT_ORDER {
             approx_eq(
-                DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES[element],
+                DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES[element] * DEFAULT_DT_SECONDS as f32,
                 0.01 + 0.02 * element.properties().polarity,
             );
         }
@@ -456,30 +463,117 @@ mod tests {
     }
 
     #[test]
-    fn source_recharge_and_upkeep_config_is_validated() {
+    fn per_second_diffusion_rates_reproduce_the_per_tick_defaults_at_the_default_dt() {
+        let per_tick = |rate: f32| f64::from(rate) * DEFAULT_DT_SECONDS;
+        let relative = |actual: f64, expected: f64| (actual - expected).abs() / expected;
+        assert!(relative(per_tick(DEFAULT_ENVAL_DIFFUSIVITY_PER_SECOND), 0.18) <= 1.0e-6);
+        for (element, expected) in crate::chem::ELEMENT_ORDER
+            .into_iter()
+            .zip([0.028, 0.018, 0.014, 0.012, 0.030, 0.022])
+        {
+            assert!(
+                relative(
+                    per_tick(DEFAULT_ELEMENT_FIELD_DIFFUSIVITIES[element]),
+                    expected
+                ) <= 1.0e-6
+            );
+        }
+    }
+
+    #[test]
+    fn diffusion_rates_reject_negative_non_finite_and_over_unit_per_tick_values() {
+        for rate in [-0.1, f32::NAN, f32::INFINITY, 100.5] {
+            let config = Config {
+                enval_diffusivity_per_second: rate,
+                ..Config::default()
+            };
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidEnvalDiffusivity(_))
+            ));
+            let mut config = Config::default();
+            config.element_fields.diffusivities[Element::C] = rate;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidElementDiffusivity { element: "C", .. })
+            ));
+        }
+        let config = Config {
+            enval_diffusivity_per_second: 100.0,
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let config = Config {
+            dt_seconds: 0.5,
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidEnvalDiffusivity(_))
+        ));
+        let config = Config {
+            dt_seconds: 0.5,
+            enval_diffusivity_per_second: 2.0,
+            element_fields: ElementFieldConfig {
+                diffusivities: crate::chem::ElementAmounts::new([2.0; 6]),
+                ..ElementFieldConfig::default()
+            },
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let mut config = Config {
+            enval_diffusivity_per_second: 0.0,
+            ..Config::default()
+        };
+        config.element_fields.diffusivities = crate::chem::ElementAmounts::ZERO;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn landscape_recharge_and_upkeep_config_is_validated() {
         let config = Config::default();
-        assert_eq!(config.enval_sources.pairs, 3);
-        assert_eq!(config.enval_sources.radius, 6.0);
-        assert_eq!(config.enval_sources.magnitude, 1.0);
-        assert_eq!(config.enval_sources.relaxation_per_second, 5.0);
+        assert_eq!(config.enval_landscape.magnitude, 1.0);
+        assert_eq!(config.enval_landscape.scale, 40.0);
+        assert_eq!(config.enval_landscape.relaxation_per_second, 0.2);
         assert_eq!(config.enval_recharge.rate_per_second, 0.1);
         assert_eq!(config.catalyst_upkeep_per_sec, 0.01);
 
         let mut closed = Config::default();
-        closed.enval_sources.pairs = 0;
+        closed.enval_landscape.relaxation_per_second = 0.0;
         closed.enval_recharge.rate_per_second = 0.0;
         closed.catalyst_upkeep_per_sec = 0.0;
         closed.validate().unwrap();
 
+        for magnitude in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut config = Config::default();
+            config.enval_landscape.magnitude = magnitude;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidPositive("enval_landscape.magnitude", _))
+            ));
+        }
+        for scale in [1.9, f32::NAN, f32::INFINITY] {
+            let mut config = Config::default();
+            config.enval_landscape.scale = scale;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidLandscapeScale(_))
+            ));
+        }
         let mut config = Config::default();
-        config.enval_sources.radius = 0.0;
-        assert!(matches!(
-            config.validate(),
-            Err(ConfigError::InvalidPositive("enval_sources.radius", _))
-        ));
-        let mut config = Config::default();
-        config.enval_sources.relaxation_per_second = f32::NAN;
-        assert!(config.validate().is_err());
+        config.enval_landscape.scale = 2.0;
+        config.validate().unwrap();
+        for relaxation in [-0.1, f32::NAN, f32::INFINITY] {
+            let mut config = Config::default();
+            config.enval_landscape.relaxation_per_second = relaxation;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidNonnegative(
+                    "enval_landscape.relaxation_per_second",
+                    _
+                ))
+            ));
+        }
         let mut config = Config::default();
         config.enval_recharge.rate_per_second = -0.1;
         assert!(matches!(
@@ -539,14 +633,14 @@ mod tests {
         let mut config = ElementFieldConfig::default();
         config.initial_amounts[Element::A] = -0.01;
         assert!(matches!(
-            config.validate(),
+            config.validate(0.01),
             Err(ConfigError::InvalidElementAmount(_))
         ));
 
         let mut config = ElementFieldConfig::default();
-        config.diffusivities[Element::F] = 1.01;
+        config.diffusivities[Element::F] = 101.0;
         assert!(matches!(
-            config.validate(),
+            config.validate(0.01),
             Err(ConfigError::InvalidElementDiffusivity { element: "F", .. })
         ));
 
@@ -556,7 +650,7 @@ mod tests {
                 ..ElementFieldConfig::default()
             };
             assert!(matches!(
-                config.validate(),
+                config.validate(0.01),
                 Err(ConfigError::InvalidHeterogeneity(_))
             ));
         }
@@ -566,7 +660,7 @@ mod tests {
                 ..ElementFieldConfig::default()
             };
             assert!(matches!(
-                config.validate(),
+                config.validate(0.01),
                 Err(ConfigError::InvalidHeterogeneityScale(_))
             ));
         }
@@ -574,6 +668,6 @@ mod tests {
             heterogeneity: 0.0,
             ..ElementFieldConfig::default()
         };
-        uniform.validate().unwrap();
+        uniform.validate(0.01).unwrap();
     }
 }

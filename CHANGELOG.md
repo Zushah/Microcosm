@@ -2,8 +2,9 @@
 
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
-## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-10-23) 2026-10-23
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Replace combat enzymes and predation with surface catalysis and drift
+## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-10-30) 2026-10-30
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Replace the enval poles with the enval landscape
+- [`ed2d890`](https://github.com/Zushah/Microcosm/commit/ed2d890) Replace combat enzymes and predation with surface catalysis and drift
 - [`1d0a640`](https://github.com/Zushah/Microcosm/commit/1d0a640) Replace energy-based division with membrane-driven fission
 - [`206d5cf`](https://github.com/Zushah/Microcosm/commit/206d5cf) Rework biology around gradient transport and enval sources
 - [`1da3037`](https://github.com/Zushah/Microcosm/commit/1da3037) Replace tile-bound cells with continuous-space cells
