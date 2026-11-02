@@ -23,8 +23,9 @@ pub use config::{
 };
 pub use environment::{ENVAL_PER_RECHARGE_ENERGY, RechargeOutcome};
 pub use genome::{
-    CatalystError, Enzyme, EnzymeFieldPatch, EnzymePatchOperation, GENOME_PATCH_SCHEMA, Genome,
-    GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+    CatalystError, ENVAL_OPTIMUM_MUTATION_SIGMA, Enzyme, EnzymeFieldPatch, EnzymePatchOperation,
+    GENOME_PATCH_SCHEMA, Genome, GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId,
+    MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 pub use render_buffers::{RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState};
 pub use rng::Rng;
@@ -37,8 +38,9 @@ pub use spatial::{
     wrap_coordinate,
 };
 pub use stats::{
-    ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger, InteractionCounters, OperationCounters,
-    ReactionCounters, StepProfile, WorldStats, renewable_coverage,
+    ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger, InteractionCounters,
+    MIXED_POLARITY_THRESHOLD, OperationCounters, ReactionCounters, StepProfile, WorldStats,
+    renewable_coverage,
 };
 pub use interaction::Contact;
 pub use world::{

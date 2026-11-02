@@ -19,7 +19,7 @@ const LINEAGE_REFRESH_INTERVAL_MS = 2500;
 const LINEAGE_LIST_REFRESH_INTERVAL_MS = 5000;
 const CELL_FLUX_LIMIT = 24;
 const LINEAGE_LIST_LIMIT = 32;
-const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v5";
+const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v6";
 const INTEGER_GENOME_FIELDS = new Set();
 const INTEGER_ENZYME_FIELDS = new Set();
 
@@ -337,8 +337,8 @@ export class MicrocosmGUI {
         const detail = this.cellDetailPayload();
         const genome = detail && detail.genome;
         if (!genome) { this.setError(new Error("Select a live cell before loading a genome draft.")); return; }
-        if (this.elements.genomeEditField) this.elements.genomeEditField.value = "optimal_enval";
-        if (this.elements.genomeEditValue) this.elements.genomeEditValue.value = displayValue(genome.optimal_enval);
+        if (this.elements.genomeEditField) this.elements.genomeEditField.value = "mutation_rate";
+        if (this.elements.genomeEditValue) this.elements.genomeEditValue.value = displayValue(genome.mutation_rate);
         const enzymes = Array.isArray(genome.enzymes) ? genome.enzymes : [];
         const enzyme = enzymes[0] || null;
         if (this.elements.enzymeEditOp) this.elements.enzymeEditOp.value = "none";
@@ -416,7 +416,10 @@ export class MicrocosmGUI {
             ["Cross-lineage contacts", stats.cross_lineage_contact_pairs],
             ["Field surface extent", stats.field_surface_extent],
             ["Cell surface extent", stats.cell_surface_extent],
-            ["Lyses after digestion", stats.lyses_after_digestion]
+            ["Lyses after digestion", stats.lyses_after_digestion],
+            ["Mixed-polarity cells", stats.mixed_polarity_cells],
+            ["Mean optimum spread", stats.mean_enval_optimum_spread],
+            ["Mean niche mismatch", stats.mean_niche_mismatch]
         ];
         const energyBudget = [
             ["Enval harvest", stats.energy_enval_harvest],
@@ -571,7 +574,8 @@ export class MicrocosmGUI {
                 ["Lineage", cell.lineage_id],
                 ["Energy", cell.energy],
                 ["Age", `${displayValue(cell.age_seconds)}s`],
-                ["Optimal enval", cell.optimal_enval],
+                ["Mean enval optimum", cell.mean_enval_optimum],
+                ["Enval optimum spread", cell.enval_optimum_spread],
                 ["Local enval average", cell.local_enval_average],
                 ["Enzymes", cell.enzyme_count],
                 ["Internal elements", cell.total_internal_elements],
@@ -637,7 +641,8 @@ export class MicrocosmGUI {
             ["Lineage", cell.lineage_id],
             ["Energy", cell.energy],
             ["Age", `${displayValue(cell.age_seconds)}s`],
-            ["Optimal enval", cell.optimal_enval],
+            ["Mean enval optimum", cell.mean_enval_optimum],
+            ["Enval optimum spread", cell.enval_optimum_spread],
             ["Local enval average", cell.local_enval_average],
             ["Maintenance / area", detail.maintenance_cost_per_area],
             ["Catalyst upkeep / sec", detail.catalyst_upkeep_per_sec],
@@ -652,12 +657,10 @@ export class MicrocosmGUI {
         if (!this.elements.genomeInspector) return;
         if (!genome) { this.elements.genomeInspector.innerHTML = payloadMessage("Genome detail is available after selecting a live cell."); return; }
         this.elements.genomeInspector.innerHTML = detailRows([
-            ["Optimal enval", genome.optimal_enval],
             ["Lineage", genome.lineage_id],
             ["Enzyme count", genome.enzyme_count],
             ["Enzyme bounds", `${displayValue(genome.min_cell_enzymes)}-${displayValue(genome.max_cell_enzymes)}`],
             ["Mutation rate", genome.mutation_rate],
-            ["Enval mutation floor", genome.enval_mutation_floor],
             ["Maintenance / area", genome.maintenance_cost_per_area],
         ]);
     }
@@ -670,6 +673,7 @@ export class MicrocosmGUI {
             { label: "Products A-F", value: (enzyme) => elementCountsText(enzyme.products) },
             { label: "Rate", value: (enzyme) => enzyme.rate },
             { label: "K½", value: (enzyme) => enzyme.half_saturation },
+            { label: "Enval optimum", value: (enzyme) => enzyme.enval_optimum },
             { label: "σ", value: (enzyme) => enzyme.enval_sigma },
             { label: "Throughput", value: (enzyme) => enzyme.enval_throughput },
             { label: "Harvest", value: (enzyme) => enzyme.energy_harvest_fraction },
@@ -718,7 +722,8 @@ export class MicrocosmGUI {
             { label: "Extent", value: (record) => `${displayValue(record.executed_extent)} / ${displayValue(record.requested_extent)}` },
             { label: "Secreted", value: (record) => elementCountsText(record.secreted_elements) },
             { label: "ΔE", value: (record) => record.delta_cell_energy ?? "—" },
-            { label: "Enval in/out", value: (record) => `${displayValue(record.enval_input)} / ${displayValue(record.enval_output)}` }
+            { label: "Enval in/out", value: (record) => `${displayValue(record.enval_input)} / ${displayValue(record.enval_output)}` },
+            { label: "Enval optimum", value: (record) => record.enval_optimum ?? "—" }
         ], records, "No successful metabolic flux recorded yet for this cell.");
         this.elements.fluxInspector.innerHTML = summary + table;
     }
@@ -737,7 +742,8 @@ export class MicrocosmGUI {
             ["Live share", lineage.share],
             ["Average energy", lineage.average_energy],
             ["Average enzymes", lineage.average_enzyme_count],
-            ["Mean exposure", lineage.mean_exposure]
+            ["Mean exposure", lineage.mean_exposure],
+            ["Mean enval optimum", lineage.mean_enval_optimum]
         ]);
     }
 

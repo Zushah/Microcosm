@@ -197,6 +197,9 @@ struct ViabilityResult {
     mean_exposure: f64,
     max_exposure: f32,
     exposed_cells: usize,
+    mixed_polarity_cells: usize,
+    mean_enval_optimum_spread: f64,
+    mean_niche_mismatch: f64,
     peak_cross_lineage_contacts: u64,
     milestone_cells: [Option<usize>; 2],
     wall_seconds: f64,
@@ -790,7 +793,7 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
     result.chemical_harvest = energy.chemical_harvest;
     result.recharge_energy = enval.recharge_energy;
     result.renewable_coverage = renewable_coverage(&energy, &enval);
-    let stats = world.compact_stats();
+    let stats = world.stats();
     result.final_totals = stats.system_element_amounts;
     result.final_live = stats.live_cell_count;
     result.final_tick = stats.tick_count;
@@ -807,6 +810,9 @@ fn run_viability_world(config: Config, steps: u64, quiet: bool) -> ViabilityResu
     result.mean_exposure = stats.mean_exposure;
     result.max_exposure = stats.max_exposure;
     result.exposed_cells = stats.exposed_cell_count;
+    result.mixed_polarity_cells = stats.mixed_polarity_cells;
+    result.mean_enval_optimum_spread = stats.mean_enval_optimum_spread;
+    result.mean_niche_mismatch = stats.mean_niche_mismatch;
     if stats.fissions < 200 {
         result
             .failures
@@ -853,11 +859,11 @@ fn milestone_column(cells: Option<usize>) -> String {
 
 fn print_viability_table(results: &[ViabilityResult], steps: u64) {
     println!(
-        "seed pass final peak cells_20k cells_60k coverage fissions energy_deaths lyses/all_deaths radius_median radius_p95 max_radius_seen median_range max_resid AF_total_drift digested cross_digested lyses_after_digestion mean_exposure max_exposure exposed_cells peak_cross_contacts wall_s"
+        "seed pass final peak cells_20k cells_60k coverage fissions energy_deaths lyses/all_deaths radius_median radius_p95 max_radius_seen median_range max_resid AF_total_drift digested cross_digested lyses_after_digestion mean_exposure max_exposure exposed_cells peak_cross_contacts mixed_polarity_cells mean_optimum_spread mean_niche_mismatch wall_s"
     );
     for result in results {
         println!(
-            "{} {} {} {} {} {} {:.3} {} {} {}/{} {:.3} {:.3} {:.3} {:.3}..{:.3} {:.2e} {:.2e} {:.3} {:.3} {} {:.4} {:.3} {} {} {:.1}",
+            "{} {} {} {} {} {} {:.3} {} {} {}/{} {:.3} {:.3} {:.3} {:.3}..{:.3} {:.2e} {:.2e} {:.3} {:.3} {} {:.4} {:.3} {} {} {} {:.4} {:.4} {:.1}",
             result.seed,
             if result.passed { "yes" } else { "NO" },
             result.final_live,
@@ -883,6 +889,9 @@ fn print_viability_table(results: &[ViabilityResult], steps: u64) {
             result.max_exposure,
             result.exposed_cells,
             result.peak_cross_lineage_contacts,
+            result.mixed_polarity_cells,
+            result.mean_enval_optimum_spread,
+            result.mean_niche_mismatch,
             result.wall_seconds
         );
         for failure in &result.failures {
@@ -943,6 +952,9 @@ fn print_viability_json(results: &[ViabilityResult], steps: u64) {
                 "mean_exposure": result.mean_exposure,
                 "max_exposure": result.max_exposure,
                 "exposed_cells": result.exposed_cells,
+                "mixed_polarity_cells": result.mixed_polarity_cells,
+                "mean_enval_optimum_spread": result.mean_enval_optimum_spread,
+                "mean_niche_mismatch": result.mean_niche_mismatch,
                 "peak_cross_lineage_contacts": result.peak_cross_lineage_contacts,
                 "wall_seconds": result.wall_seconds,
             })
@@ -1478,7 +1490,7 @@ fn open_csv(path: Option<&PathBuf>) -> Result<Option<BufWriter<File>>, std::io::
 }
 
 fn csv_header() -> &'static str {
-    "tick,sim_time,population,live_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,total_enzymes,rx_attempts,rx_successes,rx_no_substrate,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,leak_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_leak_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,energy_founder,energy_injected,energy_extracted,energy_chemical_harvest,energy_chemical_cost,energy_enval_harvest,energy_pump_cost,energy_maintenance,energy_death_loss,energy_ledger_residual,renewable_coverage,enval_source_inflow,enval_cell_uptake,enval_cell_emission,enval_recharge,enval_edits,recharge_amount,recharge_energy,fissions,energy_deaths,lyses,radius_median,radius_p95,radius_max,mean_strain,assembly_cost,mean_exposure,max_exposure,exposed_cells,contact_pairs,cross_lineage_contact_pairs,field_surface_extent,cell_surface_extent,boundary_digested,cross_lineage_boundary_digested,lyses_after_digestion"
+    "tick,sim_time,population,live_cells,occupancy_fraction,occupied_tiles,empty_tiles,births,deaths,interval_births,interval_deaths,interval_pop_delta,lineages,total_lineage_records,extinct_lineages,dominant_lineage,dominant_lineage_population,dominant_lineage_share,lineage_entropy,extracellular_a,extracellular_b,extracellular_c,extracellular_d,extracellular_e,extracellular_f,intracellular_a,intracellular_b,intracellular_c,intracellular_d,intracellular_e,intracellular_f,system_a,system_b,system_c,system_d,system_e,system_f,total_element_amount,avg_energy,min_energy,max_energy,total_energy,avg_age,max_age,avg_enzyme_count,min_enzyme_count,max_enzyme_count,cells_at_enzyme_cap,fraction_at_enzyme_cap,total_enzymes,rx_attempts,rx_successes,rx_no_substrate,rx_energy_delta_total,rx_enval_input_total,rx_enval_output_total,executed_metabolic_flux,uptake_flux,leak_flux,secretion_flux,divisions,interval_divisions,interval_reaction_attempts,interval_reaction_successes,interval_executed_metabolic_flux,interval_uptake_flux,interval_leak_flux,interval_secretion_flux,cell_steps,interval_cell_steps,interval_cell_steps_per_sec,element_field_diffusion_tiles,element_uptake_events,enval_avg,enval_min,enval_max,enval_stddev,enval_p05,enval_p50,enval_p95,enval_positive_tiles,enval_negative_tiles,enval_near_zero_tiles,energy_founder,energy_injected,energy_extracted,energy_chemical_harvest,energy_chemical_cost,energy_enval_harvest,energy_pump_cost,energy_maintenance,energy_death_loss,energy_ledger_residual,renewable_coverage,enval_source_inflow,enval_cell_uptake,enval_cell_emission,enval_recharge,enval_edits,recharge_amount,recharge_energy,fissions,energy_deaths,lyses,radius_median,radius_p95,radius_max,mean_strain,assembly_cost,mean_exposure,max_exposure,exposed_cells,contact_pairs,cross_lineage_contact_pairs,field_surface_extent,cell_surface_extent,boundary_digested,cross_lineage_boundary_digested,lyses_after_digestion,mixed_polarity_cells,mean_enval_optimum_spread,mean_niche_mismatch"
 }
 
 fn emit_world_stats_profiled(
@@ -1676,6 +1688,9 @@ fn write_csv_record<W: Write>(
         format!("{:.9}", stats.interaction.boundary_digested),
         format!("{:.9}", stats.interaction.cross_lineage_boundary_digested),
         stats.interaction.lyses_after_digestion.to_string(),
+        stats.mixed_polarity_cells.to_string(),
+        format!("{:.8}", stats.mean_enval_optimum_spread),
+        format!("{:.8}", stats.mean_niche_mismatch),
     ];
     assert_eq!(fields.len(), csv_header().split(',').count());
     writeln!(writer, "{}", fields.join(","))
@@ -1696,7 +1711,7 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
     let extracellular = stats.extracellular_element_amounts.iter().sum::<f64>();
     let intracellular = stats.intracellular_element_amounts.iter().sum::<f64>();
     println!(
-        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4} energy=founder:{:.3} injected:{:.3} extracted:{:.3} chem_harvest:{:.3} chem_cost:{:.3} enval_harvest:{:.3} pump:{:.3} maintenance:{:.3} death_loss:{:.3} residual:{:.3e} coverage={:.4} fissions={} energy_deaths={} lyses={} radius_median={:.4} radius_p95={:.4} radius_max={:.4} mean_strain={:.4} assembly_cost={:.6} exposure_mean={:.4} exposure_max={:.3} exposed_cells={} contacts={} cross_contacts={} field_extent={:.6} cell_extent={:.6} digested={:.6} cross_digested={:.6} lyses_after_digestion={}",
+        "tick={} time={:.3}s size={}x{} tiles={} occ={:.3} cells={} d_cells={:+} births={} d_births={} deaths={} d_deaths={} lineages={} total_elements={:.6} extracellular={:.6} intracellular={:.6} avg_energy={:.3} avg_enzymes={:.2} cap={:.3} rx_success={} d_rx_success={} flux={:.6} d_flux={:.6} uptake={:.6} secretion={:.6} cell_steps={} d_cell_steps={} enval_avg={:.6} enval_min={:.6} enval_max={:.6} enval_sd={:.6} system=A:{:.4} B:{:.4} C:{:.4} D:{:.4} E:{:.4} F:{:.4} energy=founder:{:.3} injected:{:.3} extracted:{:.3} chem_harvest:{:.3} chem_cost:{:.3} enval_harvest:{:.3} pump:{:.3} maintenance:{:.3} death_loss:{:.3} residual:{:.3e} coverage={:.4} fissions={} energy_deaths={} lyses={} radius_median={:.4} radius_p95={:.4} radius_max={:.4} mean_strain={:.4} assembly_cost={:.6} exposure_mean={:.4} exposure_max={:.3} exposed_cells={} contacts={} cross_contacts={} field_extent={:.6} cell_extent={:.6} digested={:.6} cross_digested={:.6} lyses_after_digestion={} mixed_polarity={} optimum_spread={:.4} niche_mismatch={:.4}",
         stats.tick_count,
         stats.sim_time_seconds,
         stats.width,
@@ -1763,6 +1778,9 @@ fn print_compact_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.interaction.boundary_digested,
         stats.interaction.cross_lineage_boundary_digested,
         stats.interaction.lyses_after_digestion,
+        stats.mixed_polarity_cells,
+        stats.mean_enval_optimum_spread,
+        stats.mean_niche_mismatch,
     );
 }
 
@@ -1836,6 +1854,10 @@ fn print_full_stats(stats: &WorldStats, interval: &StatsInterval) {
         stats.interaction.boundary_digested,
         stats.interaction.cross_lineage_boundary_digested,
         stats.interaction.lyses_after_digestion,
+    );
+    println!(
+        "  niche mixed_polarity={} optimum_spread={:.4} mismatch={:.4}",
+        stats.mixed_polarity_cells, stats.mean_enval_optimum_spread, stats.mean_niche_mismatch,
     );
     println!(
         "  lineages extant={} total_records={} extinct={} dominant={} dominant_pop={} dominant_share={:.3} entropy={:.3}",
@@ -1973,6 +1995,11 @@ fn print_stats_json(stats: &WorldStats, interval: &StatsInterval) {
             "boundary_digested": stats.interaction.boundary_digested,
             "cross_lineage_boundary_digested": stats.interaction.cross_lineage_boundary_digested,
             "lyses_after_digestion": stats.interaction.lyses_after_digestion,
+        },
+        "niche": {
+            "mixed_polarity_cells": stats.mixed_polarity_cells,
+            "mean_enval_optimum_spread": stats.mean_enval_optimum_spread,
+            "mean_niche_mismatch": stats.mean_niche_mismatch,
         },
         "energy_ledger": {
             "founder_energy": stats.energy_ledger.founder_energy,
@@ -2345,6 +2372,9 @@ mod tests {
             "boundary_digested",
             "cross_lineage_boundary_digested",
             "lyses_after_digestion",
+            "mixed_polarity_cells",
+            "mean_enval_optimum_spread",
+            "mean_niche_mismatch",
         ] {
             assert!(columns.contains(&column), "{column}");
         }
@@ -2603,6 +2633,7 @@ mod tests {
         };
         let short = run_viability_world(config, 200, true);
         assert_eq!(short.milestone_cells, [None, None]);
+        assert!(short.mean_niche_mismatch > 0.0, "the final report uses full stats");
         assert!(
             short
                 .failures

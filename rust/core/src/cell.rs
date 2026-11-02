@@ -87,7 +87,7 @@ pub struct FluxRecord {
     pub enval_input: f32,
     pub enval_output: f32,
     pub local_enval: f32,
-    pub optimal_enval: f32,
+    pub enval_optimum: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -367,7 +367,7 @@ mod tests {
             enval_input: 0.0,
             enval_output: 0.0,
             local_enval: 0.0,
-            optimal_enval: 0.0,
+            enval_optimum: 0.0,
         }
     }
 

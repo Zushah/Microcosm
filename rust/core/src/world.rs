@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bio::{self, GenomeReactionContext, ReactionEnv};
+use crate::bio::{self, ReactionEnv};
 use crate::cell::{Cell, CellFluxLog, CellId, CellStore, FluxRecord, ReactionSite};
 use crate::chem::{ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError};
 use crate::config::{Config, ConfigError};
@@ -22,7 +22,7 @@ use crate::spatial::{
 };
 use crate::stats::{
     ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger,
-    InteractionCounters, OperationCounters,
+    InteractionCounters, MIXED_POLARITY_THRESHOLD, OperationCounters,
     ReactionCounters, StepProfile, WorldStats, renewable_coverage,
 };
 
@@ -97,7 +97,8 @@ pub struct CellInspection {
     pub enzyme_count: usize,
     pub total_internal_elements: f32,
     pub age_seconds: f64,
-    pub optimal_enval: f32,
+    pub mean_enval_optimum: f32,
+    pub enval_optimum_spread: f32,
     pub local_enval_average: f32,
     pub field_share: f64,
     pub contacts: Vec<ContactInspection>,
@@ -122,6 +123,7 @@ pub struct EnzymeDetailInspection {
     pub secretion_fraction: f32,
     pub body_fraction: f32,
     pub boundary_fraction: f32,
+    pub enval_optimum: f32,
     pub enval_sigma: f32,
     pub enval_throughput: f32,
     pub enval_energy_fraction: f32,
@@ -132,9 +134,7 @@ pub struct EnzymeDetailInspection {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct GenomeDetailInspection {
-    pub optimal_enval: f32,
     pub mutation_rate: f32,
-    pub enval_mutation_floor: f32,
     pub maintenance_cost_per_area: f64,
     pub lineage_id: LineageId,
     pub enzyme_count: usize,
@@ -197,6 +197,7 @@ pub struct LineageSummaryInspection {
     pub average_energy: f64,
     pub average_enzyme_count: f64,
     pub mean_exposure: f64,
+    pub mean_enval_optimum: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -229,7 +230,6 @@ struct CellReactionContext {
     stencil: TileStencil,
     local_enval: f32,
     cell_area: f32,
-    genome: GenomeReactionContext,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1395,6 +1395,9 @@ impl World {
         let mut exposure_sum = 0.0_f64;
         let mut max_exposure = 0.0_f32;
         let mut exposed_cell_count = 0_usize;
+        let mut mixed_polarity_cells = 0_usize;
+        let mut enval_optimum_spread_sum = 0.0_f64;
+        let mut niche_mismatch_sum = 0.0_f64;
 
         for cell in self.cells.iter() {
             live_cell_count += 1;
@@ -1416,13 +1419,28 @@ impl World {
                 cells_at_enzyme_cap += 1;
             }
             let mut cell_max_exposure = 0.0_f32;
+            let mut cell_min_optimum = f32::INFINITY;
+            let mut cell_max_optimum = f32::NEG_INFINITY;
             for enzyme in &cell.genome.enzymes {
                 exposure_sum += f64::from(enzyme.exposure);
                 cell_max_exposure = cell_max_exposure.max(enzyme.exposure);
+                cell_min_optimum = cell_min_optimum.min(enzyme.enval_optimum);
+                cell_max_optimum = cell_max_optimum.max(enzyme.enval_optimum);
             }
             max_exposure = max_exposure.max(cell_max_exposure);
             if cell_max_exposure >= EXPOSED_CELL_THRESHOLD {
                 exposed_cell_count += 1;
+            }
+            if cell_max_optimum > MIXED_POLARITY_THRESHOLD
+                && cell_min_optimum < -MIXED_POLARITY_THRESHOLD
+            {
+                mixed_polarity_cells += 1;
+            }
+            if enzyme_count > 0 {
+                enval_optimum_spread_sum += f64::from(cell_max_optimum - cell_min_optimum);
+            }
+            if include_distribution_stats {
+                niche_mismatch_sum += self.cell_niche_mismatch(cell);
             }
         }
 
@@ -1552,6 +1570,9 @@ impl World {
             },
             max_exposure,
             exposed_cell_count,
+            mixed_polarity_cells,
+            mean_enval_optimum_spread: enval_optimum_spread_sum / live_cell_count.max(1) as f64,
+            mean_niche_mismatch: niche_mismatch_sum / live_cell_count.max(1) as f64,
             contact_pairs: self.contact_pair_count,
             cross_lineage_contact_pairs: self.cross_lineage_contact_pair_count,
             interaction: self.interaction_counters,
@@ -1561,6 +1582,25 @@ impl World {
             enval_ledger: self.enval_ledger,
             energy_ledger_residual: energy_sum - self.energy_ledger.expected_cell_energy(),
             renewable_coverage: renewable_coverage(&self.energy_ledger, &self.enval_ledger),
+        }
+    }
+
+    fn cell_niche_mismatch(&self, cell: &Cell) -> f64 {
+        let local = f64::from(
+            self.local_enval_average_at(cell.position, LOCAL_ENVAL_RADIUS)
+                .unwrap_or(0.0),
+        );
+        let mut rate_total = 0.0_f64;
+        let mut weighted_mismatch = 0.0_f64;
+        for enzyme in &cell.genome.enzymes {
+            let rate = f64::from(enzyme.rate);
+            rate_total += rate;
+            weighted_mismatch += rate * (local - f64::from(enzyme.enval_optimum)).abs();
+        }
+        if rate_total > 0.0 {
+            weighted_mismatch / rate_total
+        } else {
+            0.0
         }
     }
 
@@ -1794,7 +1834,8 @@ impl World {
             enzyme_count: cell.genome.enzymes.len(),
             total_internal_elements: cell.internal_elements.total() as f32,
             age_seconds: (self.sim_time_seconds - cell.birth_sim_time).max(0.0),
-            optimal_enval: cell.genome.optimal_enval,
+            mean_enval_optimum: cell.genome.mean_enval_optimum(),
+            enval_optimum_spread: cell.genome.enval_optimum_spread(),
             local_enval_average: self
                 .local_enval_average_at(cell.position, LOCAL_ENVAL_RADIUS)
                 .unwrap_or(0.0),
@@ -1997,6 +2038,8 @@ impl World {
         let mut energy_sum = 0.0_f64;
         let mut enzyme_sum = 0_u64;
         let mut exposure_sum = 0.0_f64;
+        let mut rate_sum = 0.0_f64;
+        let mut rate_weighted_optimum_sum = 0.0_f64;
         for cell in self.cells.iter() {
             if cell.lineage_id != lineage_id {
                 continue;
@@ -2004,12 +2047,11 @@ impl World {
             live_count = live_count.saturating_add(1);
             energy_sum += cell.energy;
             enzyme_sum = enzyme_sum.saturating_add(cell.genome.enzymes.len() as u64);
-            exposure_sum += cell
-                .genome
-                .enzymes
-                .iter()
-                .map(|enzyme| f64::from(enzyme.exposure))
-                .sum::<f64>();
+            for enzyme in &cell.genome.enzymes {
+                exposure_sum += f64::from(enzyme.exposure);
+                rate_sum += f64::from(enzyme.rate);
+                rate_weighted_optimum_sum += f64::from(enzyme.rate) * f64::from(enzyme.enval_optimum);
+            }
         }
         let denominator = live_count.max(1) as f64;
         let total_live_cells = self.cells.len().max(1) as f64;
@@ -2032,6 +2074,11 @@ impl World {
             },
             mean_exposure: if enzyme_sum > 0 {
                 exposure_sum / enzyme_sum as f64
+            } else {
+                0.0
+            },
+            mean_enval_optimum: if rate_sum > 0.0 {
+                rate_weighted_optimum_sum / rate_sum
             } else {
                 0.0
             },
@@ -2315,7 +2362,6 @@ impl World {
             stencil,
             local_enval,
             cell_area: std::f32::consts::PI * radius * radius,
-            genome: GenomeReactionContext::from(&self.cells.at_slot(slot).genome),
         };
 
         for catalyst_index in 0..enzyme_count {
@@ -2345,9 +2391,7 @@ impl World {
                 reservoir,
                 energy_before,
                 self.config.dt_seconds,
-                context.genome,
                 env,
-                &mut self.rng,
             );
             let Some(outcome) = flux.as_ref() else {
                 self.reaction_counters.no_substrate =
@@ -2420,7 +2464,7 @@ impl World {
             }
             self.kill_cell_and_release(cell_id);
         } else if strain >= self.config.cell_body.fission_strain {
-            self.fission_cell(cell_id, local_enval);
+            self.fission_cell(cell_id);
         }
     }
 
@@ -2510,7 +2554,7 @@ impl World {
                 enval_input: outcome.enval_input,
                 enval_output: outcome.enval_output,
                 local_enval: context.local_enval,
-                optimal_enval: context.genome.optimal_enval,
+                enval_optimum: enzyme.enval_optimum,
             });
         }
     }
@@ -2680,9 +2724,7 @@ impl World {
             pool,
             energy_before,
             self.config.dt_seconds,
-            context.genome,
             env,
-            &mut self.rng,
         );
         let Some(outcome) = flux.as_ref() else {
             self.reaction_counters.no_substrate =
@@ -2756,9 +2798,7 @@ impl World {
             pool,
             energy_before,
             self.config.dt_seconds,
-            context.genome,
             env,
-            &mut self.rng,
         );
         let Some(outcome) = flux.as_ref() else {
             self.reaction_counters.no_substrate =
@@ -2897,7 +2937,7 @@ impl World {
         self.adjust_enval_at(target, enval_delta)
     }
 
-    fn fission_cell(&mut self, cell_id: CellId, local_enval: f32) {
+    fn fission_cell(&mut self, cell_id: CellId) {
         let parent = &self.cells[cell_id];
         if parent.strain(self.config.cell_body.boundary_density)
             < self.config.cell_body.fission_strain
@@ -2913,7 +2953,7 @@ impl World {
         let axis = Position::new(angle.cos(), angle.sin());
         let old_position = parent.position;
         let lineage = parent.lineage_id;
-        let genome = parent.genome.mutate(&mut self.rng, local_enval);
+        let genome = parent.genome.mutate(&mut self.rng);
         let child_energy = parent.energy * fraction;
         let mut body = ElementAmounts::ZERO;
         let mut boundary = ElementAmounts::ZERO;
@@ -3462,9 +3502,7 @@ impl World {
 
 fn inspect_genome(genome: &Genome) -> GenomeDetailInspection {
     GenomeDetailInspection {
-        optimal_enval: genome.optimal_enval,
         mutation_rate: genome.mutation_rate,
-        enval_mutation_floor: genome.enval_mutation_floor,
         maintenance_cost_per_area: genome.maintenance_cost_per_area,
         lineage_id: genome.lineage_id,
         enzyme_count: genome.enzymes.len(),
@@ -3490,6 +3528,7 @@ fn inspect_enzyme(index: usize, enzyme: &Enzyme) -> EnzymeDetailInspection {
         secretion_fraction: enzyme.secretion_fraction,
         body_fraction: enzyme.body_fraction,
         boundary_fraction: enzyme.boundary_fraction,
+        enval_optimum: enzyme.enval_optimum,
         enval_sigma: enzyme.enval_sigma,
         enval_throughput: enzyme.enval_throughput,
         enval_energy_fraction: enzyme.enval_energy_fraction,
@@ -3801,17 +3840,21 @@ mod tests {
         config
     }
 
-    const INERT_OPTIMAL_ENVAL: f32 = 50.0;
-
     fn inert_enzyme() -> Enzyme {
         let mut enzyme = Enzyme::founder_downhill();
+        enzyme.enval_optimum = 50.0;
         enzyme.enval_sigma = 1.0e-4;
         enzyme
     }
 
     fn make_inert(genome: &mut Genome) {
         genome.enzymes = vec![inert_enzyme()];
-        genome.optimal_enval = INERT_OPTIMAL_ENVAL;
+    }
+
+    fn set_enval_optimum(genome: &mut Genome, optimum: f32) {
+        for enzyme in &mut genome.enzymes {
+            enzyme.enval_optimum = optimum;
+        }
     }
 
     fn assert_valid_reservoir(world: &World, cell_id: crate::cell::CellId) {
@@ -4020,7 +4063,7 @@ mod tests {
         for element in ELEMENT_ORDER {
             world.cells[id].boundary[element] *= 1.6;
         }
-        world.fission_cell(id, 0.0);
+        world.fission_cell(id);
         let child_id = world.cells.ids().find(|other| *other != id).unwrap();
         let center = world.cells[id].position;
         world.update_cell_position(child_id, center);
@@ -4116,8 +4159,8 @@ mod tests {
             let before = world.cells[id].clone();
             let field_before = world.element_field_totals();
             let mut repeated = world.clone();
-            world.fission_cell(id, 0.1);
-            repeated.fission_cell(id, 0.1);
+            world.fission_cell(id);
+            repeated.fission_cell(id);
             assert_eq!(
                 bincode::serialize(&world).unwrap(),
                 bincode::serialize(&repeated).unwrap()
@@ -4193,13 +4236,13 @@ mod tests {
         let mut world = World::new(small_config("fission-minimum", 8, 8)).unwrap();
         let id = world.spawn_random_cell().unwrap().unwrap();
         world.set_all_live_cell_energy(1_000_000.0).unwrap();
-        world.fission_cell(id, 0.0);
+        world.fission_cell(id);
         assert_eq!(world.cell_count(), 1);
         for element in ELEMENT_ORDER {
             world.cells[id].body[element] *= 0.01;
         }
         world.cells[id].refresh_radius(world.config.cell_body.body_density);
-        world.fission_cell(id, 0.0);
+        world.fission_cell(id);
         assert_eq!(world.cell_count(), 1);
         world.check_invariants().unwrap();
     }
@@ -5034,7 +5077,7 @@ mod tests {
         let tile = world.tile_id(2, 2).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
         genome.enzymes = vec![Enzyme::founder_downhill()];
-        genome.optimal_enval = -0.9;
+        set_enval_optimum(&mut genome, -0.9);
         genome.maintenance_cost_per_area = 0.0;
         world.config.founder_energy = 1.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
@@ -5120,7 +5163,7 @@ mod tests {
         catalyst.enval_throughput = 0.0;
         catalyst.enval_pump = 0.0;
         genome.enzymes = vec![catalyst];
-        genome.optimal_enval = local;
+        set_enval_optimum(&mut genome, local);
         genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 1.0;
@@ -5144,7 +5187,7 @@ mod tests {
         catalyst.enval_sigma = 1000.0;
         catalyst.secretion_fraction = 0.0;
         genome.enzymes = vec![catalyst];
-        genome.optimal_enval = 1.0;
+        set_enval_optimum(&mut genome, 1.0);
         genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 1.0;
@@ -5200,7 +5243,7 @@ mod tests {
         third.rate = 10.0;
         third.enval_sigma = 1000.0;
         genome.enzymes = vec![first, second, third];
-        genome.optimal_enval = 0.8;
+        set_enval_optimum(&mut genome, 0.8);
         genome.maintenance_cost_per_area = 0.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements =
@@ -5263,7 +5306,7 @@ mod tests {
             enzyme.enval_throughput = 0.0;
             enzyme.enval_pump = 0.0;
         }
-        genome.optimal_enval = 0.3;
+        set_enval_optimum(&mut genome, 0.3);
         let cell_id = silent.spawn_cell_with_genome_at(tile, genome).unwrap();
         silent.cells[cell_id].internal_elements =
             ElementAmounts::new([0.0, 0.5, 0.5, 0.5, 0.0, 0.0]);
@@ -5300,13 +5343,13 @@ mod tests {
         let mut world = World::new(only_a_config("reaction-log-bounded", 4, 4)).unwrap();
         let tile = world.tile_id(1, 1).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.optimal_enval = world.tile_enval(tile).unwrap();
         let mut catalyst = Enzyme::founder_downhill();
         catalyst.enval_sigma = 1000.0;
         catalyst.rate = 10.0;
         catalyst.body_fraction = 0.0;
         catalyst.boundary_fraction = 0.0;
         catalyst.secretion_fraction = 0.25;
+        catalyst.enval_optimum = world.tile_enval(tile).unwrap();
         genome.enzymes = vec![catalyst];
         world.config.founder_energy = 10.0;
         genome.maintenance_cost_per_area = 0.0;
@@ -5361,7 +5404,7 @@ mod tests {
         catalyst.enval_sigma = 1000.0;
         genome.enzymes = vec![catalyst];
         genome.maintenance_cost_per_area = 0.0;
-        genome.optimal_enval = world.default_local_enval_average(tile).unwrap();
+        set_enval_optimum(&mut genome, world.default_local_enval_average(tile).unwrap());
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
         world.cells[cell_id].internal_elements[Element::D] = 1.0;
         let a_before = world.element_fields[tile.index()][Element::A];
@@ -5394,7 +5437,6 @@ mod tests {
         let patch = GenomePatch {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
             genome: Some(GenomeFieldPatch {
-                optimal_enval: Some(0.25),
                 mutation_rate: Some(0.02),
                 maintenance_cost_per_area: Some(0.11),
                 ..GenomeFieldPatch::default()
@@ -5430,9 +5472,9 @@ mod tests {
             result
                 .changed_fields
                 .iter()
-                .any(|field| field == "optimal_enval")
+                .any(|field| field == "mutation_rate")
         );
-        assert!((cell.genome.optimal_enval - 0.25).abs() <= 1.0e-6);
+        assert_eq!(cell.genome.mutation_rate, 0.02);
         assert_eq!(cell.maintenance_cost_per_area, 0.11);
         assert_eq!(cell.genome.maintenance_cost_per_area, 0.11);
         assert_eq!(cell.energy, energy_before);
@@ -5441,6 +5483,45 @@ mod tests {
         assert_eq!(cell.genome.enzymes.last().unwrap().rate, 0.77);
         assert!(cell.genome.enzymes.len() >= 2);
         world.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn inspection_reports_each_enzymes_niche_and_rate_weighted_summaries() {
+        let mut world = World::new(only_a_config("niche-inspection", 8, 8)).unwrap();
+        world.set_all_enval(0.5).unwrap();
+        let mut first = Enzyme::founder_downhill();
+        first.rate = 1.0;
+        first.enval_sigma = 1000.0;
+        first.enval_optimum = 0.5;
+        let mut second = Enzyme::founder_engine_forward();
+        second.rate = 3.0;
+        second.enval_sigma = 1000.0;
+        second.enval_optimum = -0.5;
+        let cell_id = spawn_with(&mut world, Position::new(2.5, 2.5), 7, vec![first, second]);
+        let mut third = Enzyme::founder_downhill();
+        third.rate = 4.0;
+        third.enval_optimum = 1.0;
+        spawn_with(&mut world, Position::new(5.5, 5.5), 7, vec![third]);
+        world.cells[cell_id].internal_elements =
+            ElementAmounts::new([0.0, 0.5, 0.0, 0.5, 0.0, 0.0]);
+
+        let cell = world.inspect_cell(cell_id).unwrap();
+        assert_eq!(cell.mean_enval_optimum, (0.5 - 1.5) / 4.0);
+        assert_eq!(cell.enval_optimum_spread, 1.0);
+
+        let lineage = world.inspect_lineage(LineageId(7)).unwrap();
+        assert!((lineage.mean_enval_optimum - (0.5 - 1.5 + 4.0) / 8.0).abs() <= 1.0e-12);
+
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
+        world.step_cell(cell_id);
+        let detail = world.inspect_cell_detail(cell_id, 8).unwrap();
+        assert_eq!(detail.genome.enzymes[0].enval_optimum, 0.5);
+        assert_eq!(detail.genome.enzymes[1].enval_optimum, -0.5);
+        assert_eq!(detail.recent_fluxes.fluxes.len(), 2);
+        for record in &detail.recent_fluxes.fluxes {
+            let expected = detail.genome.enzymes[record.catalyst_index].enval_optimum;
+            assert_eq!(record.enval_optimum, expected);
+        }
     }
 
     #[test]
@@ -5531,7 +5612,7 @@ mod tests {
         let patch = GenomePatch {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
             genome: Some(GenomeFieldPatch {
-                optimal_enval: Some(0.33),
+                mutation_rate: Some(0.33),
                 ..GenomeFieldPatch::default()
             }),
             enzymes: Vec::new(),
@@ -5540,8 +5621,8 @@ mod tests {
         let result = world.apply_genome_brush(3, 3, 3, 3, &patch).unwrap();
         assert_eq!(result.visited_tile_count, 9);
         assert_eq!(result.patched_cell_count, 2);
-        assert_eq!(world.cells[first].genome.optimal_enval, 0.33);
-        assert_eq!(world.cells[second].genome.optimal_enval, 0.33);
+        assert_eq!(world.cells[first].genome.mutation_rate, 0.33);
+        assert_eq!(world.cells[second].genome.mutation_rate, 0.33);
         world.check_invariants().unwrap();
     }
 
@@ -5559,7 +5640,7 @@ mod tests {
         let patch = GenomePatch {
             schema: Some(crate::genome::GENOME_PATCH_SCHEMA.to_owned()),
             genome: Some(GenomeFieldPatch {
-                optimal_enval: Some(0.44),
+                mutation_rate: Some(0.44),
                 ..GenomeFieldPatch::default()
             }),
             enzymes: Vec::new(),
@@ -5569,8 +5650,8 @@ mod tests {
 
         assert_eq!(result.visited_tile_count, 1);
         assert_eq!(result.patched_cell_count, 2);
-        assert_eq!(world.cells[first].genome.optimal_enval, 0.44);
-        assert_eq!(world.cells[second].genome.optimal_enval, 0.44);
+        assert_eq!(world.cells[first].genome.mutation_rate, 0.44);
+        assert_eq!(world.cells[second].genome.mutation_rate, 0.44);
         assert_eq!(world.inspect_tile_xy(1, 1).unwrap().cell_center_count, 2);
     }
 
@@ -5600,14 +5681,169 @@ mod tests {
     }
 
     #[test]
+    fn opposite_polarity_enzymes_in_one_cell_exchange_their_net_enval() {
+        let mut world = World::new(only_a_config("mixed-polarity-cell", 7, 7)).unwrap();
+        world.set_all_enval(0.5).unwrap();
+        let tile = world.tile_id(3, 3).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, 0.5);
+        let mut positive = Enzyme::founder_engine_forward();
+        positive.rate = 10.0;
+        positive.enval_sigma = 1000.0;
+        positive.enval_pump = 0.2;
+        positive.enval_optimum = 0.5;
+        let mut negative = positive;
+        negative.enval_optimum = -0.5;
+        genome.enzymes = vec![positive, negative];
+        genome.maintenance_cost_per_area = 0.0;
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        world.cells[cell_id].internal_elements =
+            ElementAmounts::new([0.0, 0.5, 0.0, 0.0, 0.0, 0.0]);
+        let before = world.enval.clone();
+        let ledger_before = world.enval_ledger();
+        let mut expected_rng = world.rng.clone();
+        let release_choice = expected_rng.usize(9);
+        let release_tile = world.wrapped_tile_id(
+            3 + MOORE_WITH_CENTER_DX[release_choice],
+            3 + MOORE_WITH_CENTER_DY[release_choice],
+        );
+
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
+        world.step_cell(cell_id);
+
+        let records = world
+            .flux_log
+            .fluxes_newest_first()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        let up = records.iter().find(|r| r.catalyst_index == 0).unwrap();
+        let down = records.iter().find(|r| r.catalyst_index == 1).unwrap();
+        assert_eq!(up.enval_optimum, 0.5);
+        assert_eq!(down.enval_optimum, -0.5);
+        assert!(up.enval_input > 0.0);
+        assert_eq!(down.enval_input, 0.0);
+        assert!(up.enval_output < 0.0);
+        assert!(down.enval_output > 0.0);
+
+        let input = up.enval_input + down.enval_input;
+        let output = up.enval_output + down.enval_output;
+        for (index, before_value) in before.iter().copied().enumerate() {
+            let mut expected = before_value;
+            if index == tile.index() {
+                expected -= input;
+            }
+            if index == release_tile.index() {
+                expected += output;
+            }
+            assert!(
+                (world.enval[index] - expected).abs() <= 1.0e-5,
+                "tile {index}: {} != {expected}",
+                world.enval[index]
+            );
+        }
+        let ledger = world.enval_ledger();
+        assert!(
+            (ledger.cell_uptake - ledger_before.cell_uptake + f64::from(input)).abs() <= 1.0e-6
+        );
+        assert!(
+            (ledger.cell_emission - ledger_before.cell_emission - f64::from(output)).abs()
+                <= 1.0e-6
+        );
+        assert!(world.enval_ledger_residual().abs() <= 1.0e-5);
+        assert_eq!(
+            world.rng.next_f64().to_bits(),
+            expected_rng.next_f64().to_bits(),
+            "the two enzymes share one release draw"
+        );
+    }
+
+    #[test]
+    fn zero_optimum_cell_reacts_without_touching_the_enval_field_or_the_rng() {
+        let mut world = World::new(only_a_config("zero-optimum-cell", 7, 7)).unwrap();
+        world.set_all_enval(0.5).unwrap();
+        let tile = world.tile_id(3, 3).unwrap();
+        let mut genome = Genome::random_founder(&mut world.rng, 0.5);
+        let mut catalyst = Enzyme::founder_downhill();
+        catalyst.rate = 10.0;
+        catalyst.enval_sigma = 1000.0;
+        catalyst.enval_pump = 0.3;
+        catalyst.enval_optimum = 0.0;
+        genome.enzymes = vec![catalyst];
+        genome.maintenance_cost_per_area = 0.0;
+        let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        world.cells[cell_id].internal_elements[Element::D] = 1.0;
+        let before = world.enval.clone();
+        let mut untouched_rng = world.rng.clone();
+
+        world.inspect_cell_fluxes(cell_id, 0).unwrap();
+        world.step_cell(cell_id);
+
+        let record = world.flux_log.latest_flux().unwrap();
+        assert!(record.executed_extent > 0.0);
+        assert!(record.raw_chemical_energy > 0.0);
+        assert_eq!(record.enval_optimum, 0.0);
+        assert_eq!(record.enval_input, 0.0);
+        assert_eq!(record.enval_output, 0.0);
+        assert_eq!(world.enval, before);
+        assert_eq!(world.energy_ledger().pump_cost, 0.0);
+        assert_eq!(world.energy_ledger().enval_harvest, 0.0);
+        assert_eq!(
+            world.rng.next_f64().to_bits(),
+            untouched_rng.next_f64().to_bits()
+        );
+    }
+
+    #[test]
+    fn surface_reactions_use_the_enzymes_own_optimum() {
+        let mut config = only_a_config("surface-optimum", 8, 8);
+        config.catalyst_upkeep_per_sec = 0.0;
+        let mut world = World::new(config).unwrap();
+        world.set_all_enval(0.5).unwrap();
+        let mut catalyst = surface_enzyme(A_ONLY, E_ONLY, 2.0, 1.0);
+        catalyst.enval_pump = 0.2;
+        catalyst.enval_throughput = 0.2;
+        let mut uncoupled = catalyst;
+        catalyst.enval_optimum = 0.5;
+        uncoupled.enval_optimum = 0.0;
+        let coupled_id = spawn_with(&mut world, Position::new(1.5, 1.5), 1, vec![catalyst]);
+        let uncoupled_id = spawn_with(&mut world, Position::new(5.5, 5.5), 2, vec![uncoupled]);
+        for id in [coupled_id, uncoupled_id] {
+            let tile = world.center_tile_id(world.cells[id].position).unwrap();
+            world.element_fields[tile.index()][Element::A] = 5.0;
+        }
+
+        for (id, coupled) in [(coupled_id, true), (uncoupled_id, false)] {
+            let before = world.energy_ledger();
+            let context = reaction_context(&world, id);
+            world.inspect_cell_fluxes(id, 0).unwrap();
+            let enzyme = world.cells[id].genome.enzymes[0];
+            world.surface_reaction_on_field(context, 0, &enzyme, 1.0);
+            world.apply_enval_exchange(&context);
+            let record = world.flux_log.latest_flux().unwrap();
+            assert_eq!(record.site, super::ReactionSite::Field);
+            assert!(record.executed_extent > 0.0);
+            let ledger = world.energy_ledger();
+            if coupled {
+                assert!(record.enval_input > 0.0);
+                assert!(record.enval_output < 0.0);
+                assert!(ledger.pump_cost > before.pump_cost);
+            } else {
+                assert_eq!(record.enval_input, 0.0);
+                assert_eq!(record.enval_output, 0.0);
+                assert_eq!(ledger.pump_cost, before.pump_cost);
+            }
+        }
+    }
+
+    #[test]
     fn enval_coupling_changes_field() {
         let mut world = World::new(only_a_config("enval-coupling", 4, 4)).unwrap();
         let before = world.average_enval();
         let tile = world.tile_id(1, 1).unwrap();
         let mut genome = Genome::random_founder(&mut world.rng, world.avg_enval);
-        genome.optimal_enval = world.tile_enval(tile).unwrap();
         let mut catalyst = Enzyme::founder_downhill();
         catalyst.rate = 10.0;
+        catalyst.enval_optimum = world.tile_enval(tile).unwrap();
         genome.enzymes = vec![catalyst];
         world.config.founder_energy = 10.0;
         let cell_id = world.spawn_cell_with_genome_at(tile, genome).unwrap();
@@ -5941,6 +6177,85 @@ mod tests {
         world.check_invariants().unwrap();
     }
 
+    fn niche_enzyme(enval_optimum: f32, rate: f32) -> Enzyme {
+        let mut enzyme = inert_enzyme();
+        enzyme.enval_optimum = enval_optimum;
+        enzyme.rate = rate;
+        enzyme
+    }
+
+    #[test]
+    fn niche_stats_match_scripted_optima_and_a_known_enval_field() {
+        let mut world = World::new(only_a_config("niche-stats", 16, 16)).unwrap();
+        world.set_all_enval(0.2).unwrap();
+        let empty = world.stats();
+        assert_eq!(empty.mixed_polarity_cells, 0);
+        assert_eq!(empty.mean_enval_optimum_spread, 0.0);
+        assert_eq!(empty.mean_niche_mismatch, 0.0);
+
+        let scripted = [
+            (vec![niche_enzyme(0.5, 1.0), niche_enzyme(-0.5, 3.0)], true, 1.0, 0.6),
+            (vec![niche_enzyme(0.04, 1.0), niche_enzyme(-0.06, 1.0)], false, 0.1, 0.21),
+            (vec![niche_enzyme(0.3, 2.0)], false, 0.0, 0.1),
+            (vec![niche_enzyme(0.05, 1.0), niche_enzyme(-0.05, 1.0)], false, 0.1, 0.2),
+            (vec![niche_enzyme(0.0, 1.0), niche_enzyme(-1.0, 1.0)], false, 1.0, 0.7),
+        ];
+        let count = scripted.len() as f64;
+        let mut mixed = 0;
+        let mut spread = 0.0_f64;
+        let mut mismatch = 0.0_f64;
+        for (index, (enzymes, is_mixed, cell_spread, cell_mismatch)) in
+            scripted.into_iter().enumerate()
+        {
+            let position = Position::new(1.5 + index as f32 * 3.0, 8.5);
+            spawn_with(&mut world, position, index as u64 + 1, enzymes);
+            mixed += usize::from(is_mixed);
+            spread += cell_spread;
+            mismatch += cell_mismatch;
+        }
+
+        let full = world.stats();
+        assert_eq!(full.mixed_polarity_cells, mixed);
+        assert_eq!(full.mixed_polarity_cells, 1);
+        assert!((full.mean_enval_optimum_spread - spread / count).abs() <= 1.0e-6);
+        assert!((full.mean_niche_mismatch - mismatch / count).abs() <= 1.0e-6);
+
+        let compact = world.compact_stats();
+        assert_eq!(compact.mixed_polarity_cells, full.mixed_polarity_cells);
+        assert_eq!(compact.mean_enval_optimum_spread, full.mean_enval_optimum_spread);
+        assert_eq!(compact.mean_niche_mismatch, 0.0);
+    }
+
+    #[test]
+    fn niche_mismatch_reads_the_smoothed_local_enval_not_the_cells_tile() {
+        let mut world = World::new(only_a_config("niche-stats-local", 9, 9)).unwrap();
+        world.set_all_enval(0.0).unwrap();
+        let tile = world.tile_id(4, 4).unwrap();
+        world.set_tile_enval(tile, 1.0).unwrap();
+        let local = world.default_local_enval_average(tile).unwrap();
+        assert!((local - 0.04).abs() <= 1.0e-6);
+        let mut genome = Genome::random_founder(&mut world.rng, 0.0);
+        genome.enzymes = vec![niche_enzyme(-0.5, 1.0)];
+        world.spawn_cell_with_genome_at(tile, genome).unwrap();
+        let stats = world.stats();
+        assert!((stats.mean_niche_mismatch - f64::from(local + 0.5)).abs() <= 1.0e-6);
+    }
+
+    #[test]
+    fn niche_stats_read_only_the_world_and_leave_the_rng_alone() {
+        let mut world = World::new(small_config("niche-stats-readonly", 10, 8)).unwrap();
+        world.spawn_founder_cells(3).unwrap();
+        world.step_many(5);
+        let rng_before = format!("{:?}", world.rng());
+        let first = world.stats();
+        let second = world.stats();
+        assert_eq!(first, second);
+        assert_eq!(rng_before, format!("{:?}", world.rng()));
+        assert_eq!(first.mixed_polarity_cells, 0);
+        assert_eq!(first.mean_enval_optimum_spread, 0.0);
+        assert!(first.mean_niche_mismatch > 0.0);
+    }
+
     #[test]
     fn profiled_step_records_actual_operation_counters() {
         let mut world = World::new(small_config("profile-counters", 10, 8)).unwrap();
@@ -6202,7 +6517,7 @@ mod tests {
         config
     }
 
-    fn pump_engine_genome(world: &mut World, lineage: u64, optimal_enval: f32) -> Genome {
+    fn pump_engine_genome(world: &mut World, lineage: u64, enval_optimum: f32) -> Genome {
         let mut genome = Genome::random_founder(&mut world.rng, 0.0);
         let mut engine = Enzyme::metabolic(
             ElementAmounts::new([0.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
@@ -6214,9 +6529,9 @@ mod tests {
         engine.enval_sigma = 1000.0;
         engine.enval_throughput = 0.5;
         engine.enval_pump = 0.4;
+        engine.enval_optimum = enval_optimum;
         genome.enzymes = vec![engine];
         genome.lineage_id = LineageId(lineage);
-        genome.optimal_enval = optimal_enval;
         world.config.founder_energy = 5.0;
         genome.maintenance_cost_per_area = 0.0;
         genome
@@ -6504,7 +6819,6 @@ mod tests {
             let mut world = World::new(closed_config("catalyst-upkeep", 6, 6)).unwrap();
             let mut genome = Genome::random_founder(&mut world.rng, 0.0);
             genome.enzymes = enzymes;
-            genome.optimal_enval = INERT_OPTIMAL_ENVAL;
             world.config.founder_energy = 10.0;
             genome.maintenance_cost_per_area = 0.05;
             let cell_id = world
@@ -6700,7 +7014,6 @@ mod tests {
                 .local_enval_average_at(cell.position, super::LOCAL_ENVAL_RADIUS)
                 .unwrap(),
             cell_area: std::f32::consts::PI * cell.radius * cell.radius,
-            genome: crate::bio::GenomeReactionContext::from(&cell.genome),
         }
     }
 
@@ -6728,7 +7041,6 @@ mod tests {
             vec![surface_enzyme(E_ONLY, A_ONLY, 2.0, 1.0)],
         );
         let prey = spawn_with(&mut world, Position::new(3.9, 4.0), 2, vec![inert_enzyme()]);
-        world.cells[prey].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
         let boundary = world.cells[prey].boundary.total() as f32;
         world.cells[prey].boundary = ElementAmounts::new([0.0, 0.0, 0.0, 0.0, boundary * 0.8, 0.0]);
         let digester_boundary = world.cells[digester].boundary;
@@ -6784,7 +7096,6 @@ mod tests {
                 world.advance_time();
             }
             let id = spawn_with(&mut world, Position::new(2.5, 3.5), 1, vec![inert_enzyme()]);
-            world.cells[id].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
             for element in ELEMENT_ORDER {
                 world.cells[id].boundary[element] *= 0.6;
             }
@@ -6812,7 +7123,6 @@ mod tests {
             vec![surface_enzyme(E_ONLY, A_ONLY, 5.0, 1.0)],
         );
         let neighbour = spawn_with(&mut world, Position::new(3.9, 4.0), 1, vec![inert_enzyme()]);
-        world.cells[neighbour].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
         let total = world.cells[cell].boundary.total() as f32;
         world.cells[cell].boundary = ElementAmounts::new([0.0, 0.0, 0.0, 0.0, total, 0.0]);
         let own_boundary = world.cells[cell].boundary;
@@ -6996,7 +7306,6 @@ mod tests {
                 2 + index as u64,
                 vec![inert_enzyme()],
             );
-            world.cells[id].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
             world.cells[id].boundary[Element::D] += 2.0;
         }
         world.cells[actor].internal_elements[Element::D] = 5.0;
@@ -7261,9 +7570,6 @@ mod tests {
         let mut lower = inert_enzyme();
         lower.exposure = 0.02;
         let loner = spawn_with(&mut world, Position::new(9.0, 8.0), 3, vec![low, lower]);
-        for id in [prey, sibling, loner] {
-            world.cells[id].genome.optimal_enval = INERT_OPTIMAL_ENVAL;
-        }
         let boundary = world.cells[prey].boundary.total() as f32;
         world.cells[prey].boundary = ElementAmounts::new([0.0, 0.0, 0.0, 0.0, boundary * 0.8, 0.0]);
         world.cells[sibling].boundary =

@@ -171,6 +171,9 @@ const STATS_FIELD_TYPES = Object.freeze([
     ["boundary_digested", "f64"],
     ["cross_lineage_boundary_digested", "f64"],
     ["lyses_after_digestion", "u64"],
+    ["mean_enval_optimum_spread", "f64"],
+    ["mean_niche_mismatch", "f64"],
+    ["mixed_polarity_cells", "u32"],
     ["render_epoch", "u32"]
 ]);
 

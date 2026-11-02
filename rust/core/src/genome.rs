@@ -8,12 +8,13 @@ use crate::rng::Rng;
 
 pub const MIN_CELL_ENZYMES: usize = 1;
 pub const MAX_CELL_ENZYMES: usize = 10;
-pub const GENOME_PATCH_SCHEMA: &str = "microcosm.genome_patch.v5";
+pub const GENOME_PATCH_SCHEMA: &str = "microcosm.genome_patch.v6";
 pub const DEFAULT_HALF_SATURATION: f32 = 0.1;
 pub const FOUNDER_ENGINE_RATE: f32 = 0.8;
 pub const FOUNDER_ENGINE_ENVAL_THROUGHPUT: f32 = 0.18;
 const FOUNDER_ENGINE_HARVEST_FRACTION: f32 = 0.65;
 const MIN_HALF_SATURATION: f32 = 1.0e-3;
+pub const ENVAL_OPTIMUM_MUTATION_SIGMA: f32 = 0.3;
 
 const STOICHIOMETRY_EPSILON: f64 = 1.0e-6;
 
@@ -42,6 +43,7 @@ pub struct Enzyme {
     pub secretion_fraction: f32,
     pub body_fraction: f32,
     pub boundary_fraction: f32,
+    pub enval_optimum: f32,
     pub enval_sigma: f32,
     pub enval_throughput: f32,
     pub enval_energy_fraction: f32,
@@ -67,6 +69,7 @@ impl Enzyme {
             secretion_fraction,
             body_fraction: 0.0,
             boundary_fraction: 0.0,
+            enval_optimum: 0.0,
             enval_sigma: 0.18,
             enval_throughput: 0.12,
             enval_energy_fraction: 2.0 / 3.0,
@@ -155,6 +158,7 @@ impl Enzyme {
             ("secretion_fraction", self.secretion_fraction),
             ("body_fraction", self.body_fraction),
             ("boundary_fraction", self.boundary_fraction),
+            ("enval_optimum", self.enval_optimum),
             ("enval_sigma", self.enval_sigma),
             ("enval_throughput", self.enval_throughput),
             ("enval_energy_fraction", self.enval_energy_fraction),
@@ -276,6 +280,7 @@ impl Enzyme {
             self.body_fraction /= routing_sum;
             self.boundary_fraction /= routing_sum;
         }
+        self.enval_optimum = finite_or(self.enval_optimum, 0.0);
         self.enval_sigma = finite_or(self.enval_sigma, 0.18).max(1.0e-4);
         self.enval_throughput = finite_or(self.enval_throughput, 0.12).max(0.0);
         self.enval_energy_fraction =
@@ -310,26 +315,26 @@ impl Error for CatalystError {}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Genome {
-    pub optimal_enval: f32,
     pub enzymes: Vec<Enzyme>,
     pub mutation_rate: f32,
-    pub enval_mutation_floor: f32,
     pub maintenance_cost_per_area: f64,
     pub lineage_id: LineageId,
 }
 
 impl Genome {
     pub fn random_founder(rng: &mut Rng, average_enval: f32) -> Self {
-        let optimal_enval = average_enval + (rng.next_f32() - 0.5) * 0.20;
+        let enval_optimum = average_enval + (rng.next_f32() - 0.5) * 0.20;
+        let mut enzymes = vec![
+            Enzyme::founder_downhill(),
+            Enzyme::founder_engine_forward(),
+            Enzyme::founder_engine_reverse(),
+        ];
+        for enzyme in &mut enzymes {
+            enzyme.enval_optimum = enval_optimum;
+        }
         let mut genome = Self {
-            optimal_enval,
-            enzymes: vec![
-                Enzyme::founder_downhill(),
-                Enzyme::founder_engine_forward(),
-                Enzyme::founder_engine_reverse(),
-            ],
+            enzymes,
             mutation_rate: 0.06,
-            enval_mutation_floor: 0.03,
             maintenance_cost_per_area: 0.0786,
             lineage_id: LineageId(rng.usize(1_000_000_000) as u64),
         };
@@ -337,26 +342,16 @@ impl Genome {
         genome
     }
 
-    pub fn mutate(&self, rng: &mut Rng, reference_enval: f32) -> Self {
+    pub fn mutate(&self, rng: &mut Rng) -> Self {
         let mut genome = self.clone();
         let mutation_rate = genome.mutation_rate;
-        let reference_enval = if reference_enval.is_finite() {
-            reference_enval
-        } else {
-            0.0
-        };
         genome.enforce_enzyme_count_bounds(rng);
-
-        genome.optimal_enval = mutate_optimal_enval(
-            genome.optimal_enval,
-            reference_enval,
-            genome.enval_mutation_floor,
-            rng,
-        );
 
         for enzyme in &mut genome.enzymes {
             if rng.chance(mutation_rate * 0.2) {
+                let enval_optimum = enzyme.enval_optimum;
                 *enzyme = Enzyme::random(rng);
+                enzyme.enval_optimum = enval_optimum;
             } else {
                 if rng.chance(mutation_rate) {
                     let element = ELEMENT_ORDER[rng.usize(ELEMENT_COUNT)];
@@ -423,6 +418,10 @@ impl Genome {
                     enzyme.exposure =
                         (enzyme.exposure + (rng.next_f32() - 0.5) * 0.12).clamp(0.0, 1.0);
                 }
+                if rng.chance(mutation_rate) {
+                    enzyme.enval_optimum +=
+                        rng.gaussian(0.0, f64::from(ENVAL_OPTIMUM_MUTATION_SIGMA)) as f32;
+                }
                 enzyme.normalize_after_mutation();
             }
         }
@@ -431,11 +430,40 @@ impl Genome {
             let index = rng.usize(genome.enzymes.len());
             genome.enzymes.swap_remove(index);
         } else if rng.chance(mutation_rate * 0.3) && genome.enzymes.len() < MAX_CELL_ENZYMES {
-            genome.enzymes.push(Enzyme::random(rng));
+            let donor = rng.usize(genome.enzymes.len());
+            let enval_optimum = genome.enzymes[donor].enval_optimum;
+            let mut enzyme = Enzyme::random(rng);
+            enzyme.enval_optimum = enval_optimum;
+            genome.enzymes.push(enzyme);
         }
 
         genome.enforce_enzyme_count_bounds(rng);
         genome
+    }
+
+    pub fn mean_enval_optimum(&self) -> f32 {
+        let mut weighted = 0.0_f64;
+        let mut rate_total = 0.0_f64;
+        for enzyme in &self.enzymes {
+            let rate = f64::from(enzyme.rate);
+            weighted += rate * f64::from(enzyme.enval_optimum);
+            rate_total += rate;
+        }
+        if rate_total > 0.0 {
+            (weighted / rate_total) as f32
+        } else {
+            0.0
+        }
+    }
+
+    pub fn enval_optimum_spread(&self) -> f32 {
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for enzyme in &self.enzymes {
+            min = min.min(enzyme.enval_optimum);
+            max = max.max(enzyme.enval_optimum);
+        }
+        if min <= max { max - min } else { 0.0 }
     }
 
     pub fn enforce_enzyme_count_bounds(&mut self, rng: &mut Rng) {
@@ -517,9 +545,7 @@ impl GenomePatch {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenomeFieldPatch {
-    pub optimal_enval: Option<f32>,
     pub mutation_rate: Option<f32>,
-    pub enval_mutation_floor: Option<f32>,
     pub maintenance_cost_per_area: Option<f64>,
 }
 
@@ -537,9 +563,7 @@ impl GenomeFieldPatch {
                 }
             };
         }
-        set_field!(optimal_enval, finite_f32);
         set_field!(mutation_rate, probability_f32);
-        set_field!(enval_mutation_floor, nonnegative_f32);
         set_field!(maintenance_cost_per_area, nonnegative_f64);
         Ok(())
     }
@@ -647,6 +671,7 @@ pub struct EnzymeFieldPatch {
     pub secretion_fraction: Option<f32>,
     pub body_fraction: Option<f32>,
     pub boundary_fraction: Option<f32>,
+    pub enval_optimum: Option<f32>,
     pub enval_sigma: Option<f32>,
     pub enval_throughput: Option<f32>,
     pub enval_energy_fraction: Option<f32>,
@@ -688,6 +713,7 @@ impl EnzymeFieldPatch {
         set_enzyme_field!(secretion_fraction, probability_f32);
         set_enzyme_field!(body_fraction, probability_f32);
         set_enzyme_field!(boundary_fraction, probability_f32);
+        set_enzyme_field!(enval_optimum, finite_f32);
         set_enzyme_field!(enval_sigma, positive_f32);
         set_enzyme_field!(enval_throughput, nonnegative_f32);
         set_enzyme_field!(enval_energy_fraction, probability_f32);
@@ -770,26 +796,6 @@ fn probability_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
     }
 }
 
-pub fn mutate_optimal_enval(parent: f32, reference: f32, floor: f32, rng: &mut Rng) -> f32 {
-    let midpoint = (parent + reference) * 0.5;
-    let mut step = (parent - midpoint).abs();
-    let mut toward_sign = (reference - parent).signum();
-    if step < floor {
-        step = floor;
-        if toward_sign == 0.0 {
-            toward_sign = if rng.chance(0.5) { -1.0 } else { 1.0 };
-        }
-    }
-    let r = rng.next_f32();
-    if r < 0.5 {
-        parent
-    } else if r < 0.75 {
-        parent + toward_sign * step
-    } else {
-        parent - toward_sign * step
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -848,7 +854,7 @@ mod tests {
             enzyme.boundary_fraction = 0.45;
         }
         for _ in 0..100 {
-            genome = genome.mutate(&mut rng, 0.0);
+            genome = genome.mutate(&mut rng);
             genome.validate().unwrap();
             for enzyme in &genome.enzymes {
                 assert!(
@@ -867,7 +873,9 @@ mod tests {
         let genome = Genome::random_founder(&mut rng, 0.1);
         genome.validate().unwrap();
         assert_eq!(genome.enzymes.len(), 3);
-        assert!((genome.optimal_enval - 0.1).abs() <= 0.1);
+        for enzyme in &genome.enzymes {
+            assert!((enzyme.enval_optimum - 0.1).abs() <= 0.1);
+        }
 
         let downhill = genome.enzymes[0];
         let reference = Enzyme::founder_downhill();
@@ -915,6 +923,214 @@ mod tests {
     }
 
     #[test]
+    fn founder_enzymes_all_carry_the_single_drawn_optimum_at_the_old_rng_position() {
+        for average in [-0.7, 0.0, 0.1] {
+            let mut rng = Rng::from_seed_str("founder-optimum");
+            let mut expected_rng = rng.clone();
+            let drawn = average + (expected_rng.next_f32() - 0.5) * 0.20;
+            let lineage = expected_rng.usize(1_000_000_000) as u64;
+
+            let genome = Genome::random_founder(&mut rng, average);
+
+            assert_eq!(genome.enzymes.len(), 3);
+            for enzyme in &genome.enzymes {
+                assert_eq!(enzyme.enval_optimum.to_bits(), drawn.to_bits());
+            }
+            assert_eq!(genome.lineage_id.raw(), lineage);
+            assert_eq!(rng.next_f64().to_bits(), expected_rng.next_f64().to_bits());
+        }
+    }
+
+    #[test]
+    fn enzyme_constructors_default_to_no_enval_coupling() {
+        let mut rng = Rng::from_seed_str("default-optimum");
+        assert_eq!(Enzyme::founder_downhill().enval_optimum, 0.0);
+        assert_eq!(Enzyme::founder_engine_forward().enval_optimum, 0.0);
+        assert_eq!(Enzyme::founder_engine_reverse().enval_optimum, 0.0);
+        for _ in 0..50 {
+            assert_eq!(Enzyme::random(&mut rng).enval_optimum, 0.0);
+        }
+    }
+
+    #[test]
+    fn enval_optimum_must_be_finite_but_has_no_range() {
+        let mut enzyme = Enzyme::founder_downhill();
+        for valid in [-1000.0, -0.5, 0.0, 0.5, 1000.0] {
+            enzyme.enval_optimum = valid;
+            enzyme.validate().unwrap();
+            enzyme.normalize_after_mutation();
+            assert_eq!(enzyme.enval_optimum, valid);
+        }
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            enzyme.enval_optimum = invalid;
+            assert!(enzyme.validate().is_err());
+            enzyme.normalize_after_mutation();
+            assert_eq!(enzyme.enval_optimum, 0.0);
+        }
+    }
+
+    fn distinct_optimum_genome(seed: &str, enzyme_count: usize) -> (Genome, Rng) {
+        let mut rng = Rng::from_seed_str(seed);
+        let mut genome = Genome::random_founder(&mut rng, 0.0);
+        genome.enzymes = (0..enzyme_count)
+            .map(|index| {
+                let mut enzyme = Enzyme::founder_downhill();
+                enzyme.enval_optimum = index as f32 * 0.25 - 0.4;
+                enzyme
+            })
+            .collect();
+        (genome, rng)
+    }
+
+    #[test]
+    fn point_mutation_changes_optima_at_the_mutation_rate_with_the_configured_sigma() {
+        let (genome, mut rng) = distinct_optimum_genome("optimum-point-mutation", 5);
+        let mut slots = 0_u64;
+        let mut changed = 0_u64;
+        let mut sum_squares = 0.0_f64;
+        for _ in 0..10_000 {
+            let child = genome.mutate(&mut rng);
+            if child.enzymes.len() != genome.enzymes.len() {
+                continue;
+            }
+            for (parent, daughter) in genome.enzymes.iter().zip(&child.enzymes) {
+                slots += 1;
+                if daughter.enval_optimum != parent.enval_optimum {
+                    changed += 1;
+                    let delta = f64::from(daughter.enval_optimum - parent.enval_optimum);
+                    sum_squares += delta * delta;
+                }
+            }
+        }
+        let rate = f64::from(genome.mutation_rate);
+        let fraction = changed as f64 / slots as f64;
+        let three_sigma = 3.0 * (rate * (1.0 - rate) / slots as f64).sqrt();
+        assert!(
+            (fraction - rate).abs() <= three_sigma,
+            "changed fraction {fraction} vs rate {rate} (3 sigma {three_sigma})"
+        );
+        let deviation = (sum_squares / changed as f64).sqrt();
+        let sigma = f64::from(super::ENVAL_OPTIMUM_MUTATION_SIGMA);
+        assert_eq!(super::ENVAL_OPTIMUM_MUTATION_SIGMA, 0.3);
+        assert!(
+            (deviation - sigma).abs() <= 0.05 * sigma,
+            "change deviation {deviation} vs sigma {sigma}"
+        );
+    }
+
+    #[test]
+    fn point_mutation_does_not_clamp_or_pull_optima_toward_anything() {
+        let (mut genome, mut rng) = distinct_optimum_genome("optimum-unclamped", 3);
+        genome.mutation_rate = 1.0;
+        for enzyme in &mut genome.enzymes {
+            enzyme.enval_optimum = 500.0;
+        }
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        let mut sum = 0.0_f64;
+        let mut count = 0_u64;
+        for _ in 0..2_000 {
+            for enzyme in genome.mutate(&mut rng).enzymes {
+                if enzyme.enval_optimum != 500.0 {
+                    min = min.min(enzyme.enval_optimum);
+                    max = max.max(enzyme.enval_optimum);
+                    sum += f64::from(enzyme.enval_optimum);
+                    count += 1;
+                }
+            }
+        }
+        assert!(min < 500.0 && max > 500.0);
+        assert!((sum / count as f64 - 500.0).abs() <= 0.03);
+    }
+
+    #[test]
+    fn replacement_keeps_and_append_copies_the_optimum_in_scripted_draw_order() {
+        let (mut genome, mut rng) = distinct_optimum_genome("optimum-scripted", 1);
+        genome.mutation_rate = 5.0;
+        genome.enzymes[0].enval_optimum = 0.7;
+        let mut script = rng.clone();
+        let mut replaced = Enzyme::random(&mut script);
+        replaced.enval_optimum = 0.7;
+        assert_eq!(script.usize(1), 0);
+        let mut appended = Enzyme::random(&mut script);
+        appended.enval_optimum = 0.7;
+        replaced.normalize_after_mutation();
+        appended.normalize_after_mutation();
+
+        let child = genome.mutate(&mut rng);
+
+        assert_eq!(child.enzymes, vec![replaced, appended]);
+        assert_eq!(rng.next_f64().to_bits(), script.next_f64().to_bits());
+    }
+
+    #[test]
+    fn replacement_in_a_larger_genome_keeps_each_slots_own_optimum() {
+        let (mut genome, mut rng) = distinct_optimum_genome("optimum-replacement", 5);
+        genome.mutation_rate = 5.0;
+        let optima = genome
+            .enzymes
+            .iter()
+            .map(|enzyme| enzyme.enval_optimum)
+            .collect::<Vec<_>>();
+        let mut script = rng.clone();
+        let replaced = (0..5)
+            .map(|_| Enzyme::random(&mut script))
+            .collect::<Vec<_>>();
+        let removed = script.usize(5);
+
+        let child = genome.mutate(&mut rng);
+
+        let mut expected = replaced;
+        for (enzyme, optimum) in expected.iter_mut().zip(&optima) {
+            enzyme.enval_optimum = *optimum;
+            enzyme.normalize_after_mutation();
+        }
+        expected.swap_remove(removed);
+        assert_eq!(child.enzymes, expected);
+        assert_eq!(rng.next_f64().to_bits(), script.next_f64().to_bits());
+    }
+
+    #[test]
+    fn append_draws_its_donor_uniformly_from_the_same_genome() {
+        let (mut genome, mut rng) = distinct_optimum_genome("optimum-append", 4);
+        genome.mutation_rate = 0.5;
+        let mut donors = [0_u32; 4];
+        let mut appended = 0_u32;
+        for _ in 0..40_000 {
+            let child = genome.mutate(&mut rng);
+            if child.enzymes.len() != genome.enzymes.len() + 1 {
+                continue;
+            }
+            appended += 1;
+            let new = child.enzymes.last().unwrap();
+            let donor = child.enzymes[..4]
+                .iter()
+                .position(|enzyme| enzyme.enval_optimum == new.enval_optimum)
+                .expect("an appended enzyme copies an existing optimum");
+            donors[donor] += 1;
+        }
+        assert!(appended > 1_000, "only {appended} appends");
+        for count in donors {
+            let expected = f64::from(appended) / 4.0;
+            let three_sigma = 3.0 * (f64::from(appended) * 0.25 * 0.75).sqrt();
+            assert!(
+                (f64::from(count) - expected).abs() <= three_sigma,
+                "{donors:?} of {appended}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_genome_fallback_has_no_enval_coupling() {
+        let mut rng = Rng::from_seed_str("optimum-empty-fallback");
+        let mut genome = Genome::random_founder(&mut rng, 0.5);
+        genome.enzymes.clear();
+        genome.enforce_enzyme_count_bounds(&mut rng);
+        assert_eq!(genome.enzymes.len(), 1);
+        assert_eq!(genome.enzymes[0].enval_optimum, 0.0);
+    }
+
+    #[test]
     fn catalyst_validation_rejects_unbalanced_empty_and_noop_stoichiometry() {
         let mut enzyme = Enzyme::founder_downhill();
         enzyme.products[crate::chem::Element::A] = 2.0;
@@ -935,8 +1151,8 @@ mod tests {
         let mut first_rng = Rng::from_seed_str("mutation-child");
         let mut second_rng = Rng::from_seed_str("mutation-child");
         for _ in 0..100 {
-            let first = parent.mutate(&mut first_rng, 0.25);
-            let second = parent.mutate(&mut second_rng, 0.25);
+            let first = parent.mutate(&mut first_rng);
+            let second = parent.mutate(&mut second_rng);
             assert_eq!(first, second);
             assert!((MIN_CELL_ENZYMES..=MAX_CELL_ENZYMES).contains(&first.enzymes.len()));
             first.validate().unwrap();
@@ -958,7 +1174,7 @@ mod tests {
         let mut rng = Rng::from_seed_str("patch-v3-half-saturation");
         let mut genome = Genome::random_founder(&mut rng, 0.0);
         let patch = GenomePatch {
-            schema: Some("microcosm.genome_patch.v5".to_owned()),
+            schema: Some(GENOME_PATCH_SCHEMA.to_owned()),
             genome: None,
             enzymes: vec![EnzymePatchOperation {
                 op: "update".to_owned(),
@@ -1024,7 +1240,7 @@ mod tests {
         genome.mutation_rate = 1.0;
         let mut saw_change = false;
         for _ in 0..100 {
-            let child = genome.mutate(&mut rng, 0.0);
+            let child = genome.mutate(&mut rng);
             child.validate().unwrap();
             for enzyme in &child.enzymes {
                 assert!(enzyme.half_saturation.is_finite());
@@ -1103,8 +1319,8 @@ mod tests {
     }
 
     #[test]
-    fn v5_patch_round_trips_exposure_and_rejects_v4_and_out_of_range_values() {
-        assert_eq!(GENOME_PATCH_SCHEMA, "microcosm.genome_patch.v5");
+    fn v6_patch_round_trips_exposure_and_rejects_older_schemas_and_out_of_range_values() {
+        assert_eq!(GENOME_PATCH_SCHEMA, "microcosm.genome_patch.v6");
         let mut rng = Rng::from_seed_str("exposure-patch");
         let original = Genome::random_founder(&mut rng, 0.0);
 
@@ -1134,7 +1350,11 @@ mod tests {
         append.apply_to_genome(&mut appended).unwrap();
         assert_eq!(appended.enzymes.last().unwrap().exposure, 1.0);
 
-        for schema in ["microcosm.genome_patch.v4", "microcosm.genome_patch.v3"] {
+        for schema in [
+            "microcosm.genome_patch.v5",
+            "microcosm.genome_patch.v4",
+            "microcosm.genome_patch.v3",
+        ] {
             let mut target = original.clone();
             assert!(exposure_patch(schema, 0.35).apply_to_genome(&mut target).is_err());
             assert_eq!(target, original);
@@ -1149,6 +1369,109 @@ mod tests {
         }
     }
 
+    fn optimum_patch(op: &str, index: Option<usize>, optimum: f32) -> GenomePatch {
+        let patch_fields = Some(EnzymeFieldPatch {
+            enval_optimum: Some(optimum),
+            ..EnzymeFieldPatch::default()
+        });
+        let (fields, enzyme) = if op == "update" {
+            (patch_fields, None)
+        } else {
+            (None, patch_fields)
+        };
+        GenomePatch {
+            schema: Some(GENOME_PATCH_SCHEMA.to_owned()),
+            genome: None,
+            enzymes: vec![EnzymePatchOperation {
+                op: op.to_owned(),
+                index,
+                fields,
+                enzyme,
+            }],
+        }
+    }
+
+    #[test]
+    fn v6_patch_round_trips_enval_optimum_with_no_range_limit() {
+        let mut rng = Rng::from_seed_str("optimum-patch");
+        let original = Genome::random_founder(&mut rng, 0.0);
+
+        let mut genome = original.clone();
+        let changed = optimum_patch("update", Some(1), -3.5)
+            .apply_to_genome(&mut genome)
+            .unwrap();
+        assert_eq!(changed, vec!["enzyme[1].enval_optimum".to_owned()]);
+        assert_eq!(genome.enzymes[1].enval_optimum, -3.5);
+        assert_eq!(genome.enzymes[0].enval_optimum, original.enzymes[0].enval_optimum);
+        let decoded: Genome = bincode::deserialize(&bincode::serialize(&genome).unwrap()).unwrap();
+        assert_eq!(decoded, genome);
+
+        optimum_patch("append", None, 0.75)
+            .apply_to_genome(&mut genome)
+            .unwrap();
+        assert_eq!(genome.enzymes.last().unwrap().enval_optimum, 0.75);
+        optimum_patch("replace", Some(0), 0.0)
+            .apply_to_genome(&mut genome)
+            .unwrap();
+        assert_eq!(genome.enzymes[0].enval_optimum, 0.0);
+
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut target = original.clone();
+            assert!(
+                optimum_patch("update", Some(0), invalid)
+                    .apply_to_genome(&mut target)
+                    .is_err()
+            );
+        }
+        let mut stale = optimum_patch("update", Some(0), 0.5);
+        stale.schema = Some("microcosm.genome_patch.v5".to_owned());
+        let mut target = original.clone();
+        assert!(stale.apply_to_genome(&mut target).is_err());
+        assert_eq!(target, original);
+    }
+
+    #[test]
+    fn editor_appended_and_replaced_enzymes_default_to_optimum_zero() {
+        let mut rng = Rng::from_seed_str("optimum-patch-default");
+        let mut genome = Genome::random_founder(&mut rng, 0.8);
+        let rate_only = EnzymeFieldPatch {
+            rate: Some(0.5),
+            ..EnzymeFieldPatch::default()
+        };
+        for (op, index) in [("append", None), ("replace", Some(0))] {
+            let patch = GenomePatch {
+                schema: Some(GENOME_PATCH_SCHEMA.to_owned()),
+                genome: None,
+                enzymes: vec![EnzymePatchOperation {
+                    op: op.to_owned(),
+                    index,
+                    fields: None,
+                    enzyme: Some(rate_only.clone()),
+                }],
+            };
+            patch.apply_to_genome(&mut genome).unwrap();
+        }
+        assert_eq!(genome.enzymes[0].enval_optimum, 0.0);
+        assert_eq!(genome.enzymes.last().unwrap().enval_optimum, 0.0);
+        assert_ne!(genome.enzymes[1].enval_optimum, 0.0);
+    }
+
+    #[test]
+    fn genome_niche_summaries_are_rate_weighted_and_max_minus_min() {
+        let (mut genome, _) = distinct_optimum_genome("optimum-summaries", 3);
+        genome.enzymes[0].rate = 1.0;
+        genome.enzymes[0].enval_optimum = 0.5;
+        genome.enzymes[1].rate = 3.0;
+        genome.enzymes[1].enval_optimum = -0.5;
+        genome.enzymes[2].rate = 4.0;
+        genome.enzymes[2].enval_optimum = 1.0;
+        assert_eq!(genome.mean_enval_optimum(), (0.5 - 1.5 + 4.0) / 8.0);
+        assert_eq!(genome.enval_optimum_spread(), 1.5);
+        genome.enzymes.truncate(1);
+        assert_eq!(genome.mean_enval_optimum(), 0.5);
+        assert_eq!(genome.enval_optimum_spread(), 0.0);
+    }
+
     #[test]
     fn exposure_stays_valid_and_drifts_over_one_hundred_mutating_generations() {
         let mut rng = Rng::from_seed_str("exposure-mutation");
@@ -1159,7 +1482,7 @@ mod tests {
         let mut saw_interior = false;
         let mut saw_bounds = false;
         for _ in 0..100 {
-            genome = genome.mutate(&mut rng, 0.0);
+            genome = genome.mutate(&mut rng);
             genome.validate().unwrap();
             for enzyme in &genome.enzymes {
                 assert!(enzyme.exposure.is_finite());

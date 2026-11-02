@@ -135,6 +135,9 @@ pub struct WasmStats {
     pub boundary_digested: f64,
     pub cross_lineage_boundary_digested: f64,
     pub lyses_after_digestion: u64,
+    pub mean_enval_optimum_spread: f64,
+    pub mean_niche_mismatch: f64,
+    pub mixed_polarity_cells: u32,
     pub render_epoch: u32,
 }
 
@@ -245,6 +248,9 @@ impl From<&WorldStats> for WasmStats {
             boundary_digested: stats.interaction.boundary_digested,
             cross_lineage_boundary_digested: stats.interaction.cross_lineage_boundary_digested,
             lyses_after_digestion: stats.interaction.lyses_after_digestion,
+            mean_enval_optimum_spread: stats.mean_enval_optimum_spread,
+            mean_niche_mismatch: stats.mean_niche_mismatch,
+            mixed_polarity_cells: clamp_usize_to_u32(stats.mixed_polarity_cells),
             render_epoch: (stats.tick_count & u64::from(u32::MAX)) as u32,
         }
     }
@@ -847,7 +853,8 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "enzyme_count": info.enzyme_count,
                     "total_internal_elements": info.total_internal_elements,
                     "age_seconds": info.age_seconds,
-                    "optimal_enval": info.optimal_enval,
+                    "mean_enval_optimum": info.mean_enval_optimum,
+                    "enval_optimum_spread": info.enval_optimum_spread,
                     "local_enval_average": info.local_enval_average,
                     "body_total": info.body_total,
                     "boundary_total": info.boundary_total,
@@ -1551,7 +1558,9 @@ mod tests {
             max_exposure: f32, exposed_cell_count: u32, contact_pairs: u64,
             cross_lineage_contact_pairs: u64, field_surface_extent: f64,
             cell_surface_extent: f64, boundary_digested: f64,
-            cross_lineage_boundary_digested: f64, lyses_after_digestion: u64, render_epoch: u32,
+            cross_lineage_boundary_digested: f64, lyses_after_digestion: u64,
+            mean_enval_optimum_spread: f64, mean_niche_mismatch: f64, mixed_polarity_cells: u32,
+            render_epoch: u32,
         );
 
         let source = include_str!("../../../wasmgpu/runtime.js");
@@ -1714,7 +1723,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v5","genome":{"optimal_enval":0.125,"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"rate":0.77}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v6","genome":{"mutation_rate":0.02},"enzymes":[{"op":"append","enzyme":{"rate":0.77}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1729,12 +1738,15 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|field| field.as_str() == Some("optimal_enval"))
+                .any(|field| field.as_str() == Some("mutation_rate"))
         );
 
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2), STATUS_OK);
         let detail = query_json();
-        assert_eq!(detail["cell_detail"]["genome"]["optimal_enval"], 0.125);
+        assert!(
+            (detail["cell_detail"]["genome"]["mutation_rate"].as_f64().unwrap() - 0.02).abs()
+                <= 1.0e-6
+        );
         assert!(
             detail["cell_detail"]["genome"]["enzymes"]
                 .as_array()
@@ -1743,7 +1755,7 @@ mod tests {
                 .any(|enzyme| (enzyme["rate"].as_f64().unwrap() - 0.77).abs() <= 1.0e-6)
         );
 
-        let invalid = br#"{"schema":"microcosm.genome_patch.v5","genome":{"mutation_rate":2.0}}"#;
+        let invalid = br#"{"schema":"microcosm.genome_patch.v6","genome":{"mutation_rate":2.0}}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, invalid.as_ptr(), invalid.len()),
             STATUS_WORLD_ERROR
@@ -1757,7 +1769,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v6","enzymes":[{"op":"update","index":0,"fields":{"half_saturation":0.0625}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1786,7 +1798,7 @@ mod tests {
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":1,"fields":{"exposure":0.375}}]}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v6","enzymes":[{"op":"update","index":1,"fields":{"exposure":0.375}}]}"#;
         assert_eq!(
             microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1817,11 +1829,11 @@ mod tests {
                 STATUS_WORLD_ERROR,
             ),
             (
-                r#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":1,"fields":{"exposure":1.5}}]}"#,
+                r#"{"schema":"microcosm.genome_patch.v6","enzymes":[{"op":"update","index":1,"fields":{"exposure":1.5}}]}"#,
                 STATUS_WORLD_ERROR,
             ),
             (
-                r#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"append","enzyme":{"level":7}}]}"#,
+                r#"{"schema":"microcosm.genome_patch.v6","enzymes":[{"op":"append","enzyme":{"level":7}}]}"#,
                 STATUS_CONFIG_ERROR,
             ),
         ] {
@@ -1839,13 +1851,91 @@ mod tests {
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 
+    const REMOVED_GENOME_FIELDS: [&str; 2] =
+        [concat!("optimal", "_enval"), concat!("enval_mutation", "_floor")];
+
+    #[test]
+    fn genome_patch_json_round_trips_enval_optimum_and_rejects_v5_and_removed_fields() {
+        let json = br#"{"seed":"wasm-enval-optimum","width":8,"height":6,"initial_cells":2}"#;
+        let handle = microcosm_create(json.as_ptr(), json.len());
+        assert!(handle > 0);
+
+        let patch = br#"{"schema":"microcosm.genome_patch.v6","enzymes":[{"op":"update","index":0,"fields":{"rate":1.0,"enval_optimum":0.5}},{"op":"update","index":1,"fields":{"rate":1.0,"enval_optimum":-0.25}},{"op":"remove","index":2}]}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
+            STATUS_OK
+        );
+        let edit = query_json();
+        assert!(
+            edit["result"]["changed_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field.as_str() == Some("enzyme[1].enval_optimum"))
+        );
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 1), STATUS_OK);
+        let detail = query_json();
+        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][0]["enval_optimum"], 0.5);
+        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][1]["enval_optimum"], -0.25);
+        for removed in REMOVED_GENOME_FIELDS {
+            assert!(detail["cell_detail"]["genome"].get(removed).is_none());
+        }
+        assert_eq!(detail["cell_detail"]["cell"]["mean_enval_optimum"], 0.125);
+        assert_eq!(detail["cell_detail"]["cell"]["enval_optimum_spread"], 0.75);
+
+        assert_eq!(microcosm_inspect_cell(handle, 0), STATUS_OK);
+        let cell = query_json();
+        assert_eq!(cell["mean_enval_optimum"], 0.125);
+        assert_eq!(cell["enval_optimum_spread"], 0.75);
+        assert!(cell.get(REMOVED_GENOME_FIELDS[0]).is_none());
+
+        let lineage = cell["lineage_id"].as_u64().unwrap() as u32;
+        assert_eq!(microcosm_inspect_lineage(handle, lineage), STATUS_OK);
+        assert_eq!(query_json()["lineage"]["mean_enval_optimum"], 0.125);
+
+        assert_eq!(microcosm_step(handle, 5), STATUS_OK);
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 8), STATUS_OK);
+        let detail = query_json();
+        let fluxes = detail["cell_detail"]["recent_fluxes"]["fluxes"].as_array().unwrap();
+        assert!(!fluxes.is_empty());
+        for record in fluxes {
+            let index = record["catalyst_index"].as_u64().unwrap() as usize;
+            assert_eq!(
+                record["enval_optimum"],
+                detail["cell_detail"]["genome"]["enzymes"][index]["enval_optimum"]
+            );
+            assert!(record.get(REMOVED_GENOME_FIELDS[0]).is_none());
+        }
+
+        let stale = br#"{"schema":"microcosm.genome_patch.v5","enzymes":[{"op":"update","index":0,"fields":{"enval_optimum":0.9}}]}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, stale.as_ptr(), stale.len()),
+            STATUS_WORLD_ERROR
+        );
+        for removed in REMOVED_GENOME_FIELDS {
+            let rejected =
+                format!(r#"{{"schema":"microcosm.genome_patch.v6","genome":{{"{removed}":0.9}}}}"#);
+            assert_eq!(
+                microcosm_apply_cell_genome_patch(handle, 0, rejected.as_ptr(), rejected.len()),
+                STATUS_CONFIG_ERROR,
+                "{rejected}"
+            );
+        }
+        assert_eq!(microcosm_inspect_cell_detail(handle, 0, 0), STATUS_OK);
+        assert_eq!(
+            query_json()["cell_detail"]["genome"]["enzymes"][0]["enval_optimum"],
+            0.5
+        );
+        assert_eq!(microcosm_destroy(handle), STATUS_OK);
+    }
+
     #[test]
     fn genome_brush_export_reports_patch_counts() {
         let json = br#"{"seed":"wasm-genome-brush","width":8,"height":6,"initial_cells":4}"#;
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
 
-        let patch = br#"{"schema":"microcosm.genome_patch.v5","genome":{"optimal_enval":0.22}}"#;
+        let patch = br#"{"schema":"microcosm.genome_patch.v6","genome":{"mutation_rate":0.22}}"#;
         assert_eq!(
             microcosm_apply_genome_brush(handle, 0, 0, 8, 6, patch.as_ptr(), patch.len()),
             STATUS_OK
@@ -1889,6 +1979,18 @@ mod tests {
         assert_eq!(stepped.max_exposure, 0.0);
         assert_eq!(stepped.exposed_cell_count, 0);
         assert_eq!(stepped.boundary_digested, 0.0);
+        assert_eq!(stepped.mixed_polarity_cells, 0);
+        assert_eq!(stepped.mean_enval_optimum_spread, 0.0);
+        assert!(stepped.mean_niche_mismatch > 0.0);
+
+        let patch = br#"{"schema":"microcosm.genome_patch.v6","enzymes":[{"op":"update","index":0,"fields":{"enval_optimum":0.5}},{"op":"update","index":1,"fields":{"enval_optimum":-0.5}}]}"#;
+        assert_eq!(
+            microcosm_apply_cell_genome_patch(handle, 0, patch.as_ptr(), patch.len()),
+            STATUS_OK
+        );
+        let patched = unsafe { *microcosm_stats_ptr(handle) };
+        assert_eq!(patched.mixed_polarity_cells, 1);
+        assert!(patched.mean_enval_optimum_spread >= 1.0 / 4.0);
         assert_eq!(microcosm_inspect_cell(handle, 0), STATUS_OK);
         let cell = query_json();
         assert!(cell["field_share"].as_f64().unwrap() > 0.0);

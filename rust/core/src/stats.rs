@@ -6,6 +6,7 @@ use crate::chem::{ELEMENT_COUNT, Element};
 
 pub const ENZYME_COUNT_HISTOGRAM_LEN: usize = 11;
 pub const EXPOSED_CELL_THRESHOLD: f32 = 0.05;
+pub const MIXED_POLARITY_THRESHOLD: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationCounters {
@@ -305,6 +306,9 @@ pub struct WorldStats {
     pub mean_exposure: f64,
     pub max_exposure: f32,
     pub exposed_cell_count: usize,
+    pub mixed_polarity_cells: usize,
+    pub mean_enval_optimum_spread: f64,
+    pub mean_niche_mismatch: f64,
     pub contact_pairs: u64,
     pub cross_lineage_contact_pairs: u64,
     pub interaction: InteractionCounters,
