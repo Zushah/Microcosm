@@ -1,162 +1,96 @@
 <p align="center"><img src="./assets/logo.png" width="25%"></p>
 <hr>
 <h1 align="center">M I C R O C O S M</h1>
-<p align="center">Life simulation of evolving unicellular organisms in a stochastic artificial chemistry.<br><a href="https://zushah.github.io/Microcosm">https://zushah.github.io/Microcosm</a></p>
+<p align="center">Life simulation of evolving unicellular organisms shaping and shaped by an artificial chemistry.<br><a href="https://zushah.github.io/Microcosm">https://zushah.github.io/Microcosm</a></p>
 <hr>
 
-## 1. Atomic Theory, Molecules, and Space
-Microcosm models matter as a discrete artificial chemistry built from six fundamental elements (**A**, **B**, **C**, **D**, **E**, and **F**). Each element carries intrinsic polarity and intrinsic elemental energy; masses are also defined as metadata, but the active dynamics in the current simulation are driven by composition, bond state, polarity, and enval coupling rather than by explicit mechanics.
-- **D** and **E** have the highest positive elemental energies (4.0 and 3.0, respectively) and therefore provide the highest-energy atomic substrates; their abundance remains controlled by seeding, diffusion, and reactions.
-- **F** is a low-energy terminal state and commonly accumulates as the endpoint of downhill transmutation.
-- A molecule is represented by an elemental composition together with a bond multiplier $`\beta`$. Its total stored energy $`E_{\mathrm{mol}}`$ is:
-```math
-E_{\mathrm{mol}} = \beta \sum_i n_i E_i.
-```
-- A molecule of size $`N`$ and mean polarity $`\bar{P}`$ receives a diffusion parameter $`D`$, and therefore larger molecules move more slowly, while smaller and more polar molecules hop more readily through the lattice, and this diffusion is given by:
-```math
-D = \min\left(0.04,\ 0.01 + \frac{\bar{P}}{N + 1} \cdot 0.04\right).
-```
-- The world is a toroidal lattice. Each tile begins with a shared base enval and a seeded molecular inventory: **A** is always present, while **B**, **C**, **D**, **E**, **F**, and a small **BC** dimer are seeded stochastically with default probabilities 0.60, 0.45, 0.12, 0.08, 0.05, and 0.05, respectively.
-- Molecular diffusion is asynchronous and event-scheduled. Each diffusion event moves one molecule to a cardinal neighbor with locally lower composition density (with tie-rotation and short-term backtracking suppression), rather than globally re-sampling every molecule each tick.
+## 1. Elements and Fields
+Matter consists of six elements (**A**, **B**, **C**, **D**, **E**, and **F**) held as continuous amounts. Each carries an intrinsic energy and a polarity; energy sets what reactions yield, polarity sets how easily an element crosses a membrane, and mass is used only for display.
+- Energies: **A** 0.5, **B** 1.0, **C** 0.9, **D** 4.0, **E** 3.0, and **F** -0.2.
+- Polarities: **A** 0.9, **B** 0.4, **C** 0.2, **D** 0.1, **E** 1.0, and **F** 0.6.
 
-## 2. Enzymology, Specificity, and Metabolism
-Life is defined by the possession of a genome encoding functional proteins called enzymes together with a scalar environmental value called the optimal enval. Each enzyme stores a class, a specificity mask over the six elements, an enval response width $`\sigma`$, an enval throughput $`\tau`$, and a secretion probability.
-
-Let $`X(M)`$ be the set of elements present in molecule $`M`$, and let $`S`$ be the enzyme specificity mask. For anabolase and catabolase,
+The world is a 320 x 240 toroidal grid advanced in fixed ticks of $`\Delta t = 0.01`$ s. Each tile stores one concentration per element, starting near **A** 1.00, **B** 0.65, **C** 0.50, **D** 0.12, **E** 0.08, and **F** 0.05 with seeded smooth noise that preserves these means. Each element spreads over the tile's 3 x 3 neighborhood with its own diffusivity $`D`$ (**A** 2.8, **B** 1.8, **C** 1.4, **D** 1.2, **E** 3.0, and **F** 2.2):
 ```math
-X(M) \subseteq S.
+u_i' = u_i + \frac{D\,\Delta t}{9}\left(\sum_{j \in N_9(i)} u_j - 9u_i\right).
 ```
-For transmutase,
-```math
-X(M) \cap S \neq \varnothing.
-```
-Thus synthetic and degradative enzymes are exclusive over their allowed alphabet, whereas transmutases only require access to at least one allowed source element.
+Elements are conserved: every transfer moves an amount between a tile and a cell, or between cells.
 
-### Anabolase
-Anabolase enzymes perform anabolism by sampling accepted substrates from the extracellular and intracellular pools and polymerizing them into a single higher-bond product. The product composition is simply the summed elemental composition of the substrates, but its bond multiplier is elevated above unity. The energetic cost is the increase in bond storage, scaled by a bond-cost fraction $`\lambda`$, together with a fixed catalytic cost $`E_{\mathrm{act}}`$:
+Enval is a signed scalar field that acts as the world's energy source, and every tile has a target $`T_i`$ in a seeded, periodic, smooth landscape that peaks at magnitude 1.0. The field starts on the landscape, diffuses by the same stencil at rate 18, and relaxes back toward its target at rate $`\lambda = 0.2`$:
 ```math
-\Delta E_{\mathrm{cell}} = E_{\mathrm{enval}} - \left(\lambda\,\max\left(0, E_{\mathrm{bond}}^{\mathrm{prod}} - \sum_j E_{\mathrm{bond}}^{(j)}\right) + E_{\mathrm{act}}\right).
+E_i' = E_i + \left(1 - e^{-\lambda\,\Delta t}\right)\left(T_i - E_i\right).
 ```
-This makes anabolism endergonic unless it is subsidized by previously stored energy or by aligned enval harvesting.
+Enval also recharges spent matter. On a tile with $`E \neq 0`$, **F** converts to **D** where enval is positive and to **E** where it is negative, at a rate proportional to $`0.1\,|E|\,c_F`$. Each converted unit spends enval magnitude equal to the energy it gains, 4.2 for **D** and 3.2 for **E**.
 
-### Catabolase
-Catabolase enzymes perform catabolism by selecting one accepted substrate of size at least two and fragmenting it into two lower-bond products. Catabolase does not alter elemental identities during fragmentation; it extracts only released bond energy, scaled by a harvest fraction $`h_b`$ (currently defaulted to 1.0), minus catalytic cost:
+## 2. Enzymes and Metabolism
+A genome holds 1 to 10 enzymes. Each is a stoichiometric catalyst with reactant and product vectors $`r`$ and $`p`$, a rate $`k`$, a half-saturation $`K`$, routing fractions, an enval niche, and an exposure. Enzymes are not consumed, and no enzyme has a fixed class: what one does follows from its numbers.
+
+Each reaction draws on a pool of amounts $`n_i`$ spread over an extent $`\Omega`$, with a saturating response to its limiting reactant. A cell's local enval $`L`$ is the 5 x 5 tile average at the start of the cell phase, sampled bilinearly at its position, and an enzyme with optimum $`\mu`$ and width $`\sigma`$ runs at the Gaussian factor $`f`$:
 ```math
-\Delta E_{\mathrm{cell}} = h_b\,\max\left(0, E_{\mathrm{bond}}^{\mathrm{sub}} - \sum_k E_{\mathrm{bond}}^{(k)}\right) - E_{\mathrm{act}} + E_{\mathrm{enval}}.
+c = \min_i \frac{n_i}{\Omega\,r_i}, \qquad f = \exp\left(-\frac{(L - \mu)^2}{2\sigma^2}\right), \qquad \xi_{\mathrm{req}} = \min\left(k\,\Delta t\,f\,\frac{c}{K + c}\,\frac{A}{A_0}\,\phi,\ \min_i \frac{n_i}{r_i}\right).
 ```
-If the net usable gain is non-positive, the reaction is discarded.
+Here $`A`$ is the cell's area, $`A_0`$ is the area of a cell of radius 0.45, and $`\phi`$ is the share of the enzyme's capacity acting on this pool.
 
-### Transmutase
-Transmutase performs transmutation by acting on one accepted molecule and changing exactly one atom at a time along a directed artificial transmutation ladder.
+The sign of $`\mu`$ sets an enzyme's coupling to enval, and an optimum of exactly zero has none. A coupled enzyme takes up aligned enval $`I = \min(\max(0, \mathrm{sgn}(\mu)L),\ \tau\xi)`$ with throughput $`\tau`$, and converts a fraction $`\eta`$ of it into energy. It releases enval of the opposite sign, made up of a fraction $`\rho`$ of the input and a pumped amount $`\psi\xi`$ that costs one energy per unit. Both exchanges are summed over the cell step and applied through the cell's own bilinear stencil.
 
-Uphill ladder:
+Energy is conserved by an exact ledger. A reaction with harvest fraction $`h`$ changes the cell's energy by:
 ```math
-F \to A \to C \to B \to E \to D
+\Delta e = \Delta e_{\mathrm{chem}} + \eta I - \psi\xi - \Delta e_{\mathrm{asm}}, \qquad \Delta e_{\mathrm{chem}} = \begin{cases} h\,(U_r - U_p)\,\xi, & U_r \geq U_p, \\ (U_r - U_p)\,\xi, & U_r < U_p, \end{cases}
 ```
+where $`U_r`$ and $`U_p`$ are the intrinsic energies of the reactant and product vectors. The executed extent $`\xi \leq \xi_{\mathrm{req}}`$ is the largest the cell can pay for from its energy and this reaction's enval harvest, so a cell never overdraws.
 
-Downhill collapse:
-```math
-A, B, C, D, E \to F
-```
-If the raw elemental change is $`\Delta E_{\mathrm{raw}}`$, then downhill transmutation only harvests a fraction $`h_d`$ of that release, while uphill transmutation pays the full energetic penalty:
-```math
-\Delta E_{\mathrm{trans}} =
-\begin{cases}
-h_d\,\Delta E_{\mathrm{raw}}, & \Delta E_{\mathrm{raw}} \ge 0, \\
-\Delta E_{\mathrm{raw}}, & \Delta E_{\mathrm{raw}} < 0.
-\end{cases}
-```
-The full cellular effect is then:
-```math
-\Delta E_{\mathrm{cell}} = \Delta E_{\mathrm{trans}} - E_{\mathrm{act}} + E_{\mathrm{enval}}.
-```
-When both directions are available, transmutase biases more strongly toward uphill moves when aligned enval is abundant and the cell already has substantial energy reserves.
+Products are routed among four destinations: a fraction $`s`$ is secreted to the field, fractions $`b\,a`$ and $`d\,a`$ build the cell's body and boundary, and the rest stays in the cytoplasm. Building saturates with the cell's energy density, $`a = (e/A) / (2 + e/A)`$, and costs $`\Delta e_{\mathrm{asm}} = 0.5\,(b + d)\,a\,\xi \sum_i p_i`$.
 
-### Enval Coupling
-All metabolic enzyme classes may couple metabolism to the signed environmental scalar $`\mathrm{enval}`$. Let $`s`$ denote the cell polarity induced by genomic optimal enval ($`s = +1`$ for positive-adapted cells, $`s = -1`$ for negative-adapted cells, and random sign if the optimum is exactly zero). If the local field is aligned with that polarity, the harvested input magnitude is:
+An enzyme's exposure $`\varepsilon`$ divides its capacity between the cytoplasm, $`\phi = 1 - \varepsilon`$, and the cell surface. A surface enzyme acts on whatever fills each part of the perimeter. A neighbor at distance $`d`$ within the contact gap $`g = 0.1`$ occupies a share of the perimeter:
 ```math
-I = \min\left(\max(0, sV_{\mathrm{loc}}),\ \tau\right).
+w = \mathrm{clamp}\left(\frac{r + r' + g - d}{g},\ 0,\ 1\right)\frac{\arcsin\left(\min(1,\ r'/d)\right)}{\pi}.
 ```
-By default the harvested energy term is:
+Shares summing above 1 are scaled to 1, and any remainder faces the field. On the field, an enzyme reacts with the concentrations at the cell's stencil, with $`\Omega = 1`$ and $`\phi = \varepsilon(1 - \sum w)`$. On a neighbor, it reacts with that neighbor's boundary, with $`\Omega = 2\pi r'`$ and $`\phi = \varepsilon w`$, and routes the products as its own.
+
+## 3. Cells and Physiology
+A cell is a disk at a continuous position with three element reservoirs: a body, a boundary, and a cytoplasm. Founders start with energy 2.0, material drawn from the field beneath them, and radius 0.45. Geometry follows from composition:
+- The body sets the size, with area $`A = \sum_i B_i`$ and radius $`r = \sqrt{A / \pi}`$ at body density 1.
+- The boundary sets the strain $`\varsigma = \sum_i S_i / (0.2 \cdot 2\pi r)`$.
+- The boundary's mean element polarity is the membrane polarity $`\bar{P}`$, or 0.5 for an empty boundary.
+
+Elements cross the membrane down their concentration gradient, driven by the permeability $`P = 4`$. Each element's transfer depends on how closely its polarity $`P_i`$ matches the membrane's, and moves only what is available:
 ```math
-E_{\mathrm{enval}} = \frac{2}{3}I.
+\Delta n_i = \min\left(0.25,\ \frac{P\,2\pi r\,\Delta t}{2A}\left(0.25 + 1.5\,e^{-(P_i - \bar{P})^2 / (2 \cdot 0.3^2)}\right)\right)\left(c_i - \frac{n_i}{A}\right)A.
 ```
-The reaction simultaneously pumps opposite-sign enval back into the environment. With baseline pump magnitude $`P`$ and recycle fraction $`f_r`$ (default $`P = 0.3`$, $`f_r = 1/3`$), the emitted field term is:
-```math
-V_{\mathrm{out}} = -s\left(P + f_r I\right).
-```
-Operationally, aligned enval is removed from the local tile while opposite-sign enval is deposited into one randomly sampled site in the local Moore neighborhood (including the source tile). Successful metabolism therefore does not merely consume a pre-existing field; it actively reshapes that field.
+Each tick, a cell with maintenance coefficient $`m`$ (0.0786 in founders) and $`N`$ enzymes pays $`(mA + 0.01N)\,\Delta t`$ in energy. There are no other time limits on a cell. A cell dies when its energy reaches zero, and it lyses when its strain falls below 0.7; either way, all its elements return to the field. A cell undergoes fission when its strain reaches 1.485 and both daughters would keep a body of at least 0.05. A uniformly drawn fraction in [0.45, 0.55] of its body, boundary, cytoplasm, and energy forms a daughter, the two separate along a random axis, and the daughter's genome is a mutated copy.
 
-## 3. Reaction Kinetics and Field Dynamics
-The primary environmental variable is a single unbounded signed scalar called $`\mathrm{enval}`$. At initialization the world begins with a random base enval sampled from the interval $`[-1, +1]`$, after which diffusion and metabolism are free to push the field to any real value. Enzymatic efficiency $`\phi`$ is governed by a Gaussian dependence on local enval mismatch:
-```math
-\phi(V_{\mathrm{loc}}, V_{\mathrm{opt}}) = \exp\left(-\frac{(V_{\mathrm{loc}} - V_{\mathrm{opt}})^2}{2\sigma^2}\right).
-```
-- $`V_{\mathrm{loc}}`$ is the mean enval over the $`5 \times 5`$ neighborhood surrounding the cell (Chebyshev radius of two).
-- $`V_{\mathrm{opt}}`$ is stored in the cell genome as the optimal enval.
-- $`\sigma`$ is stored per enzyme as its enval response width.
+Cells also drift. Each tick, a cell moves by a Gaussian step in each axis with $`\sigma = \sqrt{2 D_c\,\Delta t}`$ and $`D_c = 0.2 \cdot 0.45 / r`$, so larger cells drift less. Up to two relaxation passes then push overlapping pairs apart, each cell taking half of the penetration.
 
-The reaction attempt probability is scaled by this efficiency term:
-```math
-p_{\mathrm{rxn}} = \min(1, 1.2R_{\mathrm{base}})\,\phi.
-```
-Current base rates are 0.85 for anabolase, 0.98 for catabolase, and 0.30 for transmutase. Strong mismatch therefore suppresses metabolism primarily by preventing reactions from firing at all; enval harvesting falls indirectly because fewer reactions occur.
+## 4. Heredity and Evolution
+Founders share one genome design and differ in their seeded position, the local composition of their material, one optimum for all their enzymes (the world's average enval plus a uniform offset of up to 0.1), and their lineage label. Each carries three enzymes: downhill **D** to **A**, and an enval engine of **B** to **C** with its reverse **C** to **B**. They have no exposure and a mutation rate $`\nu = 0.06`$. No further cells are added after startup.
 
-The enval field itself diffuses across the toroidal lattice by discrete local averaging:
-```math
-V_{t+1}(x, y) = (1 - \alpha)V_t(x, y) + \alpha\,\bar{V}_{3 \times 3}(x, y), \qquad \alpha = 0.18.
-```
-Because reactions continuously remove aligned enval and emit opposite-sign enval, the field is both smoothed by diffusion and destabilized by metabolic feedback.
+Variation arises only at fission and is blind: no draw depends on the local environment or on fitness. In a daughter's genome:
+- With probability $`0.2\nu`$, an enzyme is replaced by a random one that keeps its optimum.
+- Otherwise, each of its numbers mutates independently with probability $`\nu`$: one stoichiometric coefficient of each vector, the rate, half-saturation, harvest and routing fractions, enval width, throughput, energy and release fractions, pump, exposure, and optimum. The optimum takes an unbounded Gaussian step of 0.3, and products are rescaled to balance total reactants.
+- With probability $`0.3\nu`$, a random enzyme is removed; failing that, with probability $`0.3\nu`$, a random enzyme is added with the optimum of a random donor.
 
-## 4. Cellular Physiology and Evolution
-A cell is a stationary metabolic agent that occupies a tile, stores free energy, stores an internal molecular inventory, and executes its genome each tick.
-- Each cell continuously pays a maintenance cost in stored energy. If energy reaches zero, the cell dies and releases its internal molecules into the environment.
-- If the internal atom count falls below twice the genome's desired reserve target, the cell grabs one random molecule from its tile into its internal pool.
-- In addition to basal maintenance, mismatch between local and optimal enval increases the cell's starvation/decay timer, such that the increase depends on the genome-level stress factor $`k`$ and enzyme count $`n_{\mathrm{enz}}`$, and if the accumulated timer exceeds the decay threshold, the cell dies, according to:
-```math
-\Delta t_{\mathrm{stress}} = k\,|V_{\mathrm{loc}} - V_{\mathrm{opt}}|^{1.6}\max(1, n_{\mathrm{enz}}).
-```
-- Once stored free energy exceeds the reproduction threshold, the cell divides into a nearby empty tile within radius two. Energy is split stochastically around a 50/50 partition, and each internal molecule independently has a 50% chance to go to the offspring.
-- Offspring inherit the parental lineage identifier, so lineage structure tracks ecological descent rather than instantaneous genotype identity.
+A lineage is a label that a daughter inherits from its parent, used for coloring and statistics. No rule reads it to decide what a cell does. Selection is whatever differences in survival and fission follow from these rules, and no outcome is assured: results vary with the seed.
 
-### Predator-Prey Dynamics
-Cells may carry two non-metabolic combat enzymes: defensase and attackase. Founders always begin with one defensase, while attackase is absent from founder genomes and must appear later by mutation during reproduction. Each combat enzyme carries an integer level rather than an element-specificity mask. Founder defensase levels are drawn from a rounded Gaussian distribution centered on 100 (current implementation: $`\sigma = 10`$, clamped to at least 1). During reproduction, inherited combat enzymes keep their current level with 50% probability, step downward by a uniformly sampled integer from 1 to 4 with 25% probability, or step upward by such an integer with 25% probability; combat enzymes can also still be gained, lost, or class-switched by the broader genome-mutation machinery.
-
-Predation is evaluated between Moore-neighbor cells (orthogonal or diagonal adjacency) of different lineages after the ordinary metabolic step. Let $`A_{\mathrm{atk}}`$ and $`A_{\mathrm{def}}`$ denote the summed attackase and defensase levels of cell $`A`$ and similarly for cell $`B`$.
-- If only one cell satisfies $`\text{attack} > \text{opponent defense}`$, that cell engulfs the other.
-- If both cells satisfy that inequality, the larger margin wins: compare $`A_{\mathrm{atk}} - B_{\mathrm{def}}`$ against $`B_{\mathrm{atk}} - A_{\mathrm{def}}`$.
-- If neither cell can exceed the opponent's defense, or if the two margins are equal, nothing happens.
-
-Successful predation performs a phagocytosis-like assimilation event: the loser is removed from the world, while the winner absorbs the loser's stored free energy, internal molecules, and enzyme inventory. Transferred enzymes fill free genome slots and may replace existing enzymes when the predator is at capacity, allowing combat and metabolic repertoires to change through ecological interactions as well as descent.
-
-Founders are seeded with an optimal enval drawn from a narrow band around the current world-average enval and initially carry an anabolase, a catabolase, and a defensase. The metabolic founders still begin with **ABC** specificity, while attackase remains absent until it appears later by mutation or by enzyme class switching.
-
-During division, the offspring optimal enval is inherited by a biased midpoint rule. Let $`P`$ be the parental optimal enval and $`L`$ the dividing cell's current local-average enval. Define:
-```math
-\delta = \max\left(\frac{|P - L|}{2},\ \varepsilon\right), \qquad \varepsilon = 0.03.
-```
-Then the offspring receives:
-```math
-V'_{\mathrm{opt}} =
-\begin{cases}
-P, & \text{with probability } 0.50, \\
-P + \mathrm{sgn}(L - P)\,\delta, & \text{with probability } 0.25, \\
-P - \mathrm{sgn}(L - P)\,\delta, & \text{with probability } 0.25.
-\end{cases}
-```
-Other genome parameters also mutate stochastically: reproduction threshold, decay time, default secretion probability, enval stress factor, enzyme specificity masks, enzyme class, combat-enzyme level, enval response width, secretion probability, enval throughput, anabolase bond multiplier, and transmutase downhill harvest fraction. Enzyme count may also increase or decrease over evolutionary time.
-
-The central ecological consequence is that successful lineages tend to destabilize the very field regime they exploit. Positive-adapted cells deplete positive enval and emit negative enval; negative-adapted cells deplete negative enval and emit positive enval. The intended macrodynamics are therefore cyclical succession, lineage turnover, and repeated ecological boom-bust behavior.
+The authoritative order of one tick is:
+1. Diffuse the element fields.
+2. Step each living cell in store order: react internally, deposit secretions, react at the surface, exchange enval, update the radius, pay maintenance, die if out of energy, transport elements, and then lyse or divide.
+3. Drift the cells, then resolve overlaps.
+4. Diffuse enval, then recharge and relax each tile.
+5. Advance the clock.
 
 ## 5. Runtime and Interface
-The current browser implementation is a browser-hosted Rust simulation compiled to WebAssembly and visualized through WasmGPU. The checked-in WebAssembly module is loaded from `./src/rust/microcosm.wasm`, while its source is maintained in the Rust workspace under `./src/rust`. No backend is required as the browser hosts the simulation locally and communicates with it through a narrow interface.
-- `./src/rust/core/src/config.rs`, `chem.rs`, and `molecule.rs` define the world configuration, elemental chemistry, fixed-composition molecules, bond energetics, and event-scheduled molecular diffusion.
-- `./src/rust/core/src/genome.rs`, `bio.rs`, and `cell.rs` define genomes, metabolic and combat enzymes, reaction execution, cellular energy accounting, mutation, division, and lineage inheritance.
-- `./src/rust/core/src/world.rs` defines the toroidal world and the authoritative step order: molecular diffusion, cellular metabolism and physiology, Moore-neighborhood predation, enval diffusion, and time advancement.
-- `./src/rust/core/src/stats.rs` provides aggregate measurements, `render_buffers.rs` provides compact typed render data, `world.rs` provides authoritative bounded state inspection, and `snapshot.rs` provides serialized snapshot support. The Rust workspace also contains a native CLI for reproducible runs, benchmarks, invariant checks, statistics, and snapshot operations.
-- `./src/rust/wasm/src/lib.rs` exposes creation, reset, fixed-step advancement, render-buffer refresh, statistics, bounded inspection queries, enval editing, and genome editing through the WebAssembly ABI. Frequently updated render arrays are read through typed views; structured inspection and edit results are returned as bounded JSON payloads.
-- `./src/wasmgpu/bridge.js` validates and connects the WebAssembly exports to WasmGPU; `runtime.js` owns the simulation handle and memory views; `render.js` draws the tile field and cell overlay; `interact.js` manages selection and editing; `gui.js` presents diagnostics and inspection; and `./src/main.js` coordinates initialization, fixed-step scheduling, reset, pause, and browser events.
+The simulation is written in Rust and compiled to `./rust/microcosm.wasm`, which the browser hosts with no backend. WasmGPU renders it and Chalkboard computes the analysis panel. The same seed gives the same trajectory on a given build, one tick at a time or in batches, and across a snapshot resume.
+- `./rust/core/src/` holds the model: `chem.rs` (elements), `environment.rs` (landscape and recharge), `genome.rs` (enzymes and mutation), `bio.rs` (reaction kinetics), `cell.rs`, `interaction.rs` (contact shares), `spatial.rs`, `config.rs`, `stats.rs`, `render_buffers.rs`, `snapshot.rs`, `fingerprint.rs`, and `rng.rs`.
+- `./rust/core/src/world/` holds the world: `mod.rs` (state and tick order), `fields.rs`, `cells.rs`, `mechanics.rs`, `census.rs`, `inspect.rs`, and `invariants.rs`.
+- `./rust/cli/src/` holds the native `microcosm` tool, and `./rust/wasm/src/lib.rs` holds the WebAssembly interface.
+- `./wasmgpu/` holds the WasmGPU engine, where `bridge.js` connects the exports, `runtime.js` owns the simulation handle and memory views, `render.js` draws, `interact.js` handles selection and editing, and `gui.js` presents diagnostics and analysis.
+- `./main.js` coordinates startup and the frame schedule, and `index.html` holds the page.
 
-The main entry point supplies a 320 x 240 toroidal world with seed `42` unless the `seed` URL parameter is provided, 32 founder cells, and predation enabled. Every tile is initialized with the configured substrate chemistry, and no additional founder cells are injected after startup; population change thereafter arises from reproduction, mortality, and predation. The simulation advances at a fixed internal step of 10 milliseconds. The browser scheduler consumes those fixed steps and limits work to six simulation steps per rendered frame, while allowing pausing and single-step advancement.
+The native tool has four commands, run with `cargo run --release --manifest-path rust/Cargo.toml -p microcosm-cli --`:
+- `run` advances a world, with optional invariant checks, CSV and JSON output, snapshots, profiling, and a state fingerprint.
+- `bench` measures throughput.
+- `inspect` summarizes a snapshot and checks its invariants.
+- `viability` runs several seeds against fixed health criteria.
 
-WasmGPU renders a single composited `LatticeSpace` whose RGBA records are produced in Rust and uploaded directly from Microcosm's WebAssembly memory without JavaScript repacking. The lattice presents the signed enval field, tile occupancy, molecular mass, molecule count, or element-presence channels (**A** through **F**) as selectable tile views and composites cells with lineage-dependent colors. The interface provides seed control, reset, pause, single-step advancement, fullscreen display, exploration, enval editing, genome editing, tile and cell selection, lineage selection, hover diagnostics, genome and enzyme inspection, internal-molecule and recent-reaction inspection, structured detail display, and JSON copying for inspection results. The visualization is therefore a presentation and control surface for the Rust world state, while the simulation rules and numerical state remain authoritative in the WebAssembly module.
+The page starts a world with seed `42`, or the `seed` URL parameter, and 32 founders. Each frame advances up to 6 ticks, one at a time, until the simulated time is caught up or 12 ms of stepping has been spent, so a crowded world slows its clock rather than its frame rate. Full statistics refresh 5 times a second and immediately on reset, pause, single-step, and edits.
+
+Render data is uploaded directly from WebAssembly memory. The view shows enval, tile occupancy, mass, total elements, or any one element, with cells overlaid by lineage color. The interface offers seed control, reset, pause, single-step, fullscreen, enval and genome editing, tile, cell, and lineage selection, and inspection of genomes, enzymes, element reservoirs, and recent reactions. The Population analysis panel uses Chalkboard to plot the recent history of live, exposed, and mixed-polarity cells, and a live histogram with summary statistics of cell radius, energy, age, or enzyme count.

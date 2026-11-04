@@ -300,7 +300,7 @@ export class MicrocosmRuntime {
         this._handle = handle;
         this._ready = true;
         this.createViews();
-        this.refreshRenderBuffers();
+        this.refreshAfterStatsChange();
         return this;
     }
 
@@ -318,6 +318,17 @@ export class MicrocosmRuntime {
         this.assertStatus(status, "microcosm_refresh_render_buffers");
         this.refreshViews();
         this._renderEpoch = Number(this._functions.renderEpoch(this._handle)) >>> 0;
+    }
+
+    refreshStats() {
+        this.assertReady();
+        this.assertStatus(readUintStatus(this._functions.refreshStats(this._handle)), "microcosm_refresh_stats");
+        this._stats = this.decodeStats();
+        return this._stats;
+    }
+
+    refreshAfterStatsChange() {
+        this.refreshRenderBuffers();
         this._stats = this.decodeStats();
         return this._stats;
     }
@@ -368,7 +379,7 @@ export class MicrocosmRuntime {
         if (!this.ready) return this.createWorld(config);
         const status = this.withConfigBytes(config, (ptr, len) => readUintStatus(this._functions.reset(this._handle, ptr, len)));
         this.assertStatus(status, "microcosm_reset");
-        this.refreshRenderBuffers();
+        this.refreshAfterStatsChange();
         return this;
     }
 
@@ -468,7 +479,7 @@ export class MicrocosmRuntime {
         this.assertReady();
         const status = readUintStatus(this._functions.setTileEnval(this._handle, Number(x) >>> 0, Number(y) >>> 0, Number(value)));
         this.assertStatus(status, "microcosm_set_tile_enval");
-        if (options.refresh !== false) this.refreshRenderBuffers();
+        if (options.refresh !== false) this.refreshAfterStatsChange();
         return this._stats;
     }
 
@@ -476,7 +487,7 @@ export class MicrocosmRuntime {
         this.assertReady();
         const status = readUintStatus(this._functions.adjustTileEnval(this._handle, Number(x) >>> 0, Number(y) >>> 0, Number(delta)));
         this.assertStatus(status, "microcosm_adjust_tile_enval");
-        if (options.refresh !== false) this.refreshRenderBuffers();
+        if (options.refresh !== false) this.refreshAfterStatsChange();
         return this._stats;
     }
 
@@ -491,7 +502,7 @@ export class MicrocosmRuntime {
             Number(delta)
         ));
         this.assertStatus(status, "microcosm_brush_enval_rect");
-        if (options.refresh !== false) this.refreshRenderBuffers();
+        if (options.refresh !== false) this.refreshAfterStatsChange();
         return this._stats;
     }
 
@@ -503,7 +514,7 @@ export class MicrocosmRuntime {
             this.assertStatus(status, "microcosm_apply_cell_genome_patch");
             return this.readQueryResult("microcosm.apply_cell_genome_patch");
         });
-        if (options.refresh !== false) this.refreshRenderBuffers();
+        if (options.refresh !== false) this.refreshAfterStatsChange();
         return result;
     }
 
@@ -521,7 +532,7 @@ export class MicrocosmRuntime {
             this.assertStatus(status, "microcosm_apply_genome_brush");
             return this.readQueryResult("microcosm.apply_genome_brush");
         });
-        if (options.refresh !== false) this.refreshRenderBuffers();
+        if (options.refresh !== false) this.refreshAfterStatsChange();
         return result;
     }
 
@@ -565,9 +576,9 @@ export class MicrocosmRuntime {
             create: get("microcosm_create"),
             destroy: get("microcosm_destroy"),
             reset: get("microcosm_reset"),
-            step: get("microcosm_step"),
             stepNoStats: get("microcosm_step_no_stats"),
             refreshRenderBuffers: get("microcosm_refresh_render_buffers"),
+            refreshStats: get("microcosm_refresh_stats"),
             setRenderVisualState: get("microcosm_set_render_visual_state"),
             statsPtr: get("microcosm_stats_ptr"),
             tileCount: get("microcosm_tile_count"),

@@ -23,6 +23,30 @@ const GENOME_PATCH_SCHEMA = "microcosm.genome_patch.v6";
 const INTEGER_GENOME_FIELDS = new Set();
 const INTEGER_ENZYME_FIELDS = new Set();
 
+const ANALYSIS_SAMPLE_TICKS = 100;
+const ANALYSIS_HISTORY_SAMPLES = 600;
+const ANALYSIS_REDRAW_INTERVAL_MS = 1000;
+const ANALYSIS_BINS = 24;
+const ANALYSIS_LOW_PERCENTILE = 1;
+const ANALYSIS_HIGH_PERCENTILE = 99;
+const ANALYSIS_QUANTITIES = Object.freeze({
+    radius: { label: "Radius", view: "cellRadius" },
+    energy: { label: "Energy", view: "cellEnergy" },
+    age: { label: "Age (s)", view: "cellAgeSeconds" },
+    enzymes: { label: "Enzyme count", view: "cellEnzymeCount" }
+});
+const ANALYSIS_SERIES = Object.freeze([
+    { label: "Live cells", key: "live_cell_count", color: "#111111" },
+    { label: "Exposed cells", key: "exposed_cell_count", color: "#d1495b" },
+    { label: "Mixed-polarity cells", key: "mixed_polarity_cells", color: "#2e86ab" }
+]);
+const ANALYSIS_PLOT_LEFT = 58;
+const ANALYSIS_PLOT_RIGHT = 12;
+const ANALYSIS_HISTORY_TOP = 26;
+const ANALYSIS_HISTORY_HEIGHT = 150;
+const ANALYSIS_DISTRIBUTION_TOP = 244;
+const ANALYSIS_DISTRIBUTION_HEIGHT = 160;
+
 const displayValue = (value) => {
     if (typeof value === "bigint") return value.toString();
     if (typeof value === "number") {
@@ -85,6 +109,12 @@ export class MicrocosmGUI {
             diagnostics: root.getElementById("diagnostics"),
             renderStats: root.getElementById("renderStats"),
             views: root.getElementById("views"),
+            analysisPanel: root.getElementById("analysisPanel"),
+            analysisNote: root.getElementById("analysisNote"),
+            analysisBody: root.getElementById("analysisBody"),
+            analysisQuantity: root.getElementById("analysisQuantity"),
+            analysisCanvas: root.getElementById("analysisCanvas"),
+            analysisSummary: root.getElementById("analysisSummary"),
             samples: root.getElementById("samples"),
             errors: root.getElementById("errors"),
             pauseButton: root.getElementById("pauseButton"),
@@ -380,11 +410,166 @@ export class MicrocosmGUI {
         if (this.elements.errors) this.elements.errors.textContent = "";
     }
 
+    resetAnalysis() {
+        this._analysis = { samples: [], head: 0, nextSampleTick: 0, lastTick: -1, lastDrawMs: -Infinity };
+    }
+
+    updateAnalysis(runtime, stats) {
+        if (!this._analysis) this.resetAnalysis();
+        const analysis = this._analysis;
+        const tick = Number(stats.tick_count);
+        if (tick < analysis.lastTick) this.resetAnalysis();
+        this.recordAnalysisSample(tick, stats);
+        const panel = this.elements.analysisPanel;
+        if (!panel || !panel.open) return;
+        const nowMs = performance.now();
+        if (nowMs - this._analysis.lastDrawMs < ANALYSIS_REDRAW_INTERVAL_MS) return;
+        this._analysis.lastDrawMs = nowMs;
+        try { this.drawAnalysis(runtime); }
+        catch (error) { this.setAnalysisNote(`Population analysis failed: ${error.message}`); }
+    }
+
+    recordAnalysisSample(tick, stats) {
+        const analysis = this._analysis;
+        analysis.lastTick = tick;
+        if (tick < analysis.nextSampleTick) return;
+        analysis.nextSampleTick = (Math.floor(tick / ANALYSIS_SAMPLE_TICKS) + 1) * ANALYSIS_SAMPLE_TICKS;
+        const sample = { tick, values: ANALYSIS_SERIES.map((series) => Number(stats[series.key])) };
+        if (analysis.samples.length < ANALYSIS_HISTORY_SAMPLES) analysis.samples.push(sample);
+        else {
+            analysis.samples[analysis.head] = sample;
+            analysis.head = (analysis.head + 1) % ANALYSIS_HISTORY_SAMPLES;
+        }
+    }
+
+    setAnalysisNote(message) {
+        const { analysisNote, analysisBody } = this.elements;
+        if (analysisNote) {
+            analysisNote.textContent = message;
+            analysisNote.hidden = !message;
+        }
+        if (analysisBody) analysisBody.hidden = Boolean(message);
+    }
+
+    drawAnalysis(runtime) {
+        const Chalkboard = globalThis.Chalkboard;
+        if (!Chalkboard || !Chalkboard.plot || !Chalkboard.stat) { this.setAnalysisNote("Chalkboard unavailable"); return; }
+        const canvas = this.elements.analysisCanvas;
+        const context = canvas ? canvas.getContext("2d") : null;
+        if (!context) { this.setAnalysisNote("Canvas 2D unavailable"); return; }
+        this.setAnalysisNote("");
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.font = "12px sans-serif";
+        this.drawAnalysisHistory(Chalkboard, context, canvas.width);
+        this.drawAnalysisDistribution(Chalkboard, context, canvas.width, runtime);
+    }
+
+    drawAnalysisAxes(context, width, top, height, labels) {
+        const bottom = top + height;
+        const right = width - ANALYSIS_PLOT_RIGHT;
+        context.strokeStyle = "#999999";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(ANALYSIS_PLOT_LEFT, top);
+        context.lineTo(ANALYSIS_PLOT_LEFT, bottom);
+        context.lineTo(right, bottom);
+        context.stroke();
+        context.fillStyle = "#555555";
+        context.textAlign = "right";
+        context.fillText(labels.top, ANALYSIS_PLOT_LEFT - 6, top + 10);
+        context.fillText("0", ANALYSIS_PLOT_LEFT - 6, bottom);
+        context.fillText(labels.right, right, bottom + 15);
+        context.textAlign = "left";
+        context.fillText(labels.left, ANALYSIS_PLOT_LEFT, bottom + 15);
+    }
+
+    drawAnalysisHistory(Chalkboard, context, width) {
+        const { samples, head } = this._analysis;
+        const ordered = samples.slice(head).concat(samples.slice(0, head));
+        const plotWidth = width - ANALYSIS_PLOT_LEFT - ANALYSIS_PLOT_RIGHT;
+        const peak = Math.max(1, ...ordered.flatMap((sample) => sample.values));
+        const unitsPerPixel = peak / ANALYSIS_HISTORY_HEIGHT;
+        const span = Math.max(1, ordered.length - 1);
+        const xs = ordered.map((_, index) => index / span * plotWidth * unitsPerPixel);
+        this.drawAnalysisAxes(context, width, ANALYSIS_HISTORY_TOP, ANALYSIS_HISTORY_HEIGHT, {
+            top: String(peak),
+            left: ordered.length ? `tick ${ordered[0].tick}` : "tick 0",
+            right: ordered.length ? `tick ${ordered[ordered.length - 1].tick}` : ""
+        });
+        let legendX = ANALYSIS_PLOT_LEFT;
+        ANALYSIS_SERIES.forEach((series, seriesIndex) => {
+            Chalkboard.plot.scatterplot(xs, ordered.map((sample) => sample.values[seriesIndex]), {
+                context,
+                x: ANALYSIS_PLOT_LEFT,
+                y: ANALYSIS_HISTORY_TOP + ANALYSIS_HISTORY_HEIGHT,
+                size: unitsPerPixel * 100,
+                fillStyle: series.color,
+                lineWidth: 1.5
+            });
+            context.fillStyle = series.color;
+            context.textAlign = "left";
+            context.fillText(series.label, legendX, 14);
+            legendX += context.measureText(series.label).width + 18;
+        });
+    }
+
+    drawAnalysisDistribution(Chalkboard, context, width, runtime) {
+        const quantity = ANALYSIS_QUANTITIES[this.elements.analysisQuantity?.value] || ANALYSIS_QUANTITIES.radius;
+        const view = runtime.views[quantity.view];
+        const values = view ? Array.from(view.array()) : [];
+        const summary = this.elements.analysisSummary;
+        const top = ANALYSIS_DISTRIBUTION_TOP;
+        const plotHeight = ANALYSIS_DISTRIBUTION_HEIGHT;
+        const plotWidth = width - ANALYSIS_PLOT_LEFT - ANALYSIS_PLOT_RIGHT;
+        if (values.length === 0) {
+            this.drawAnalysisAxes(context, width, top, plotHeight, { top: "", left: "", right: quantity.label });
+            if (summary) summary.textContent = "No live cells.";
+            return;
+        }
+        const sorted = Float64Array.from(values).sort();
+        const valueAtPercentile = (percent) => sorted[Math.round(percent / 100 * (sorted.length - 1))];
+        const low = valueAtPercentile(ANALYSIS_LOW_PERCENTILE);
+        const high = Math.max(valueAtPercentile(ANALYSIS_HIGH_PERCENTILE), low + Number.EPSILON + Math.abs(low) * 1.0e-6);
+        const binWidth = (high - low) / ANALYSIS_BINS;
+        const counts = new Array(ANALYSIS_BINS).fill(0);
+        for (const value of values) {
+            if (value < low || value > high) continue;
+            counts[Math.min(ANALYSIS_BINS - 1, Math.floor((value - low) / binWidth))]++;
+        }
+        const peak = Math.max(1, ...counts);
+        const unitsPerPixel = peak / plotHeight;
+        const toPlot = (value) => (value - low) / (high - low) * plotWidth * unitsPerPixel;
+        const edges = Array.from({ length: ANALYSIS_BINS + 1 }, (_, index) => index / ANALYSIS_BINS * plotWidth * unitsPerPixel);
+        Chalkboard.plot.barplot(values.map(toPlot), edges, {
+            context,
+            x: ANALYSIS_PLOT_LEFT,
+            y: top + plotHeight,
+            size: unitsPerPixel * 100,
+            fillStyle: "#2e86ab",
+            strokeStyle: "#ffffff",
+            lineWidth: 1
+        });
+        this.drawAnalysisAxes(context, width, top, plotHeight, {
+            top: String(peak),
+            left: displayValue(Number(low.toFixed(3))),
+            right: `${displayValue(Number(high.toFixed(3)))} ${quantity.label}`
+        });
+        const statistic = (value) => Number.isFinite(value) ? value.toFixed(3) : "\u2014";
+        if (summary) summary.textContent = [
+            `n ${values.length}`,
+            `mean ${statistic(Chalkboard.stat.mean(values))}`,
+            `median ${statistic(Chalkboard.stat.median(values))}`,
+            `deviation ${statistic(Chalkboard.stat.deviation(values))}`,
+            `skewness ${statistic(Chalkboard.stat.skewness(values))}`
+        ].join(" \u00b7 ");
+    }
+
     update(state) {
         const runtime = state.runtime;
         const renderer = state.renderer;
         if (!runtime || !runtime.ready) return;
         const stats = runtime.stats || {};
+        this.updateAnalysis(runtime, stats);
         const renderStats = renderer ? renderer.diagnostics : {};
         const interaction = state.interaction ? state.interaction.state : null;
         if (interaction) this.setMode(interaction.mode);
@@ -410,15 +595,12 @@ export class MicrocosmGUI {
         ];
         const interactions = [
             ["Mean exposure", stats.mean_exposure],
-            ["Max exposure", stats.max_exposure],
             ["Exposed cells", stats.exposed_cell_count],
             ["Contact pairs", stats.contact_pairs],
             ["Cross-lineage contacts", stats.cross_lineage_contact_pairs],
             ["Field surface extent", stats.field_surface_extent],
             ["Cell surface extent", stats.cell_surface_extent],
-            ["Lyses after digestion", stats.lyses_after_digestion],
             ["Mixed-polarity cells", stats.mixed_polarity_cells],
-            ["Mean optimum spread", stats.mean_enval_optimum_spread],
             ["Mean niche mismatch", stats.mean_niche_mismatch]
         ];
         const energyBudget = [

@@ -583,8 +583,10 @@ mod tests {
                 _
             ))
         ));
-        let mut config = Config::default();
-        config.catalyst_upkeep_per_sec = -1.0;
+        let config = Config {
+            catalyst_upkeep_per_sec: -1.0,
+            ..Config::default()
+        };
         assert!(config.validate().is_err());
     }
 
@@ -601,7 +603,10 @@ mod tests {
             config.cell_motion.diffusivity = diffusivity;
             assert!(matches!(
                 config.validate(),
-                Err(ConfigError::InvalidNonnegative("cell_motion.diffusivity", _))
+                Err(ConfigError::InvalidNonnegative(
+                    "cell_motion.diffusivity",
+                    _
+                ))
             ));
         }
         for contact_gap in [0.0, -0.1, f32::NAN] {

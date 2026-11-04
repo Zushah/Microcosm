@@ -91,6 +91,24 @@ pub const ELEMENT_PROPERTIES: [ElementProperties; ELEMENT_COUNT] = [
     },
 ];
 
+const ELEMENT_ENERGIES: [f64; ELEMENT_COUNT] = [
+    ELEMENT_PROPERTIES[0].energy as f64,
+    ELEMENT_PROPERTIES[1].energy as f64,
+    ELEMENT_PROPERTIES[2].energy as f64,
+    ELEMENT_PROPERTIES[3].energy as f64,
+    ELEMENT_PROPERTIES[4].energy as f64,
+    ELEMENT_PROPERTIES[5].energy as f64,
+];
+
+pub(crate) const ELEMENT_POLARITIES: [f64; ELEMENT_COUNT] = [
+    ELEMENT_PROPERTIES[0].polarity as f64,
+    ELEMENT_PROPERTIES[1].polarity as f64,
+    ELEMENT_PROPERTIES[2].polarity as f64,
+    ELEMENT_PROPERTIES[3].polarity as f64,
+    ELEMENT_PROPERTIES[4].polarity as f64,
+    ELEMENT_PROPERTIES[5].polarity as f64,
+];
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct ElementAmounts([f32; ELEMENT_COUNT]);
@@ -102,10 +120,12 @@ impl ElementAmounts {
         Self(values)
     }
 
+    #[inline]
     pub const fn as_array(&self) -> &[f32; ELEMENT_COUNT] {
         &self.0
     }
 
+    #[inline]
     pub fn as_mut_array(&mut self) -> &mut [f32; ELEMENT_COUNT] {
         &mut self.0
     }
@@ -118,18 +138,21 @@ impl ElementAmounts {
         self.0[element.index()] = value;
     }
 
-    pub fn total(self) -> f64 {
+    #[inline]
+    pub fn total(&self) -> f64 {
         self.0.iter().map(|value| f64::from(*value)).sum()
     }
 
-    pub fn intrinsic_energy(self) -> f64 {
-        ELEMENT_ORDER
+    #[inline]
+    pub fn intrinsic_energy(&self) -> f64 {
+        self.0
             .iter()
-            .map(|element| f64::from(self.get(*element)) * f64::from(element.properties().energy))
+            .zip(&ELEMENT_ENERGIES)
+            .map(|(amount, energy)| f64::from(*amount) * *energy)
             .sum()
     }
 
-    pub fn mass(self) -> f64 {
+    pub fn mass(&self) -> f64 {
         ELEMENT_ORDER
             .iter()
             .map(|element| f64::from(self.get(*element)) * f64::from(element.properties().mass))

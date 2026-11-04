@@ -5,12 +5,13 @@ const COINCIDENT_DISTANCE: f64 = 1.0e-6;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Contact {
     pub cell_id: CellId,
+    pub slot: usize,
     pub distance: f64,
     pub share: f64,
 }
 
 pub fn contact_closeness(radius_a: f64, radius_b: f64, distance: f64, gap: f64) -> f64 {
-    if !(gap > 0.0) {
+    if gap.is_nan() || gap <= 0.0 {
         return 0.0;
     }
     ((radius_a + radius_b + gap - distance) / gap).clamp(0.0, 1.0)
@@ -66,6 +67,7 @@ mod tests {
     fn crowded_shares_are_scaled_to_one_and_leave_no_field() {
         let contact = |index: usize, share: f64| Contact {
             cell_id: CellId(index),
+            slot: index,
             distance: 0.9,
             share,
         };
@@ -75,7 +77,7 @@ mod tests {
         let mut crowded = vec![contact(1, 0.5), contact(2, 0.5), contact(3, 1.0)];
         assert_eq!(normalize_shares(&mut crowded), 0.0);
         let total = crowded.iter().map(|contact| contact.share).sum::<f64>();
-        assert!(total <= 1.0 + 1.0e-15 && total >= 1.0 - 1.0e-15);
+        assert!((1.0 - 1.0e-15..=1.0 + 1.0e-15).contains(&total));
         assert_eq!(crowded[2].share, 0.5);
         assert_eq!(normalize_shares(&mut []), 1.0);
     }

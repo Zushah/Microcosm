@@ -3,7 +3,8 @@
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
 ## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-11-04) 2026-11-04
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Bump Chalkboard from v3.0.5 to v3.1.0 and KaTeX from v0.18.7 to v0.19.1
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Release v0.13.0
+- [`90938ca`](https://github.com/Zushah/Microcosm/commit/90938ca) Bump Chalkboard from v3.0.5 to v3.1.0 and KaTeX from v0.18.7 to v0.19.1
 - [`7584c7b`](https://github.com/Zushah/Microcosm/commit/7584c7b) Relocate enval niches from the genomes to the enzymes
 - [`24f4dce`](https://github.com/Zushah/Microcosm/commit/24f4dce) Replace the enval poles with the enval landscape
 - [`ed2d890`](https://github.com/Zushah/Microcosm/commit/ed2d890) Replace combat enzymes and predation with surface catalysis and drift

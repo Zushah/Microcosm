@@ -21,6 +21,7 @@ impl Position {
         self.x.is_finite() && self.y.is_finite()
     }
 
+    #[inline]
     pub fn wrapped(self, width: f32, height: f32) -> Option<Self> {
         if !self.is_finite()
             || !width.is_finite()
@@ -37,6 +38,7 @@ impl Position {
     }
 }
 
+#[inline]
 pub fn wrap_coordinate(value: f32, extent: f32) -> f32 {
     let wrapped = rem_euclid(value, extent);
     if wrapped >= extent { 0.0 } else { wrapped }
@@ -53,6 +55,7 @@ fn rem_euclid(value: f32, extent: f32) -> f32 {
     }
 }
 
+#[inline]
 pub fn minimum_image_delta(delta: f32, extent: f32) -> f32 {
     debug_assert!(delta.is_finite());
     debug_assert!(extent.is_finite() && extent > 0.0);
@@ -63,6 +66,7 @@ pub fn minimum_image_delta(delta: f32, extent: f32) -> f32 {
     wrapped
 }
 
+#[inline]
 pub fn minimum_image_displacement(
     from: Position,
     to: Position,
@@ -75,9 +79,22 @@ pub fn minimum_image_displacement(
     }
 }
 
+#[inline]
 pub fn toroidal_distance_squared(a: Position, b: Position, width: f32, height: f32) -> f32 {
     let delta = minimum_image_displacement(a, b, width, height);
-    delta.x.mul_add(delta.x, delta.y * delta.y)
+    fused_multiply_add(delta.x, delta.x, delta.y * delta.y)
+}
+
+#[inline]
+pub(crate) fn fused_multiply_add(a: f32, b: f32, c: f32) -> f32 {
+    let sum = f64::from(a) * f64::from(b) + f64::from(c);
+    const F32_ROUNDING_BITS: u64 = (1 << 29) - 1;
+    const HALFWAY: u64 = 1 << 28;
+    const SMALLEST_NORMAL: f64 = f32::MIN_POSITIVE as f64;
+    if sum.to_bits() & F32_ROUNDING_BITS == HALFWAY || sum.abs() < SMALLEST_NORMAL {
+        return a.mul_add(b, c);
+    }
+    sum as f32
 }
 
 pub fn toroidal_distance(a: Position, b: Position, width: f32, height: f32) -> f32 {
@@ -134,7 +151,8 @@ impl BilinearStencil {
         })
     }
 
-    pub fn weight_sum(self) -> f32 {
+    #[cfg(test)]
+    pub(crate) fn weight_sum(self) -> f32 {
         self.samples.iter().map(|sample| sample.weight).sum()
     }
 }
@@ -143,7 +161,17 @@ impl BilinearStencil {
 struct SpatialEntry {
     id: CellId,
     position: Position,
+    slot_hint: u32,
 }
+
+const NO_SLOT_HINT: u32 = u32::MAX;
+const REMOVED_ENTRY: SpatialEntry = SpatialEntry {
+    id: CellId(usize::MAX),
+    position: Position::new(0.0, 0.0),
+    slot_hint: NO_SLOT_HINT,
+};
+const BUCKET_RANGE_EPSILON: f32 = 1.0e-3;
+const MAX_RECENT_ENTRIES: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 pub struct SpatialIndex {
@@ -151,31 +179,24 @@ pub struct SpatialIndex {
     height: f32,
     columns: usize,
     rows: usize,
-    bucket_width: f32,
-    bucket_height: f32,
-    buckets: Vec<Vec<SpatialEntry>>,
+    starts: Vec<u32>,
+    entries: Vec<SpatialEntry>,
+    recent: Vec<SpatialEntry>,
     len: usize,
 }
-
-const BUCKET_RANGE_EPSILON: f32 = 1.0e-3;
-const INITIAL_BUCKET_CAPACITY: usize = 4;
 
 impl SpatialIndex {
     pub fn new(width: usize, height: usize) -> Self {
         let columns = width.max(1);
         let rows = height.max(1);
-        let width = width.max(1) as f32;
-        let height = height.max(1) as f32;
         Self {
-            width,
-            height,
+            width: columns as f32,
+            height: rows as f32,
             columns,
             rows,
-            bucket_width: width / columns as f32,
-            bucket_height: height / rows as f32,
-            buckets: (0..columns.saturating_mul(rows))
-                .map(|_| Vec::with_capacity(INITIAL_BUCKET_CAPACITY))
-                .collect(),
+            starts: vec![0; columns.saturating_mul(rows) + 1],
+            entries: Vec::new(),
+            recent: Vec::new(),
             len: 0,
         }
     }
@@ -200,34 +221,80 @@ impl SpatialIndex {
         let Some(position) = position.wrapped(self.width, self.height) else {
             return false;
         };
-        let bucket = &self.buckets[self.bucket_for(position)];
-        bucket
-            .binary_search_by_key(&cell_id.index(), |entry| entry.id.index())
-            .is_ok_and(|index| bucket[index].position == position)
+        let bucket = self.bucket_for(position);
+        self.bucket_entries(bucket)
+            .iter()
+            .chain(&self.recent)
+            .any(|entry| entry.id == cell_id && entry.position == position)
     }
 
     pub fn rebuild<I>(&mut self, entries: I)
     where
         I: IntoIterator<Item = (CellId, Position)>,
     {
-        for bucket in &mut self.buckets {
-            bucket.clear();
-        }
-        self.len = 0;
-        let mut entries = entries.into_iter().collect::<Vec<_>>();
+        let mut entries = entries
+            .into_iter()
+            .filter_map(|(cell_id, position)| {
+                Some((cell_id, position.wrapped(self.width, self.height)?))
+            })
+            .collect::<Vec<_>>();
         entries.sort_by_key(|(cell_id, _)| cell_id.index());
         entries.dedup_by_key(|(cell_id, _)| *cell_id);
-        for (cell_id, position) in entries {
-            self.insert(cell_id, position);
+        self.rebuild_canonical(entries.len(), |index| entries[index], false);
+    }
+
+    pub(crate) fn rebuild_canonical<F>(&mut self, count: usize, cell_at: F, hint_slots: bool)
+    where
+        F: Fn(usize) -> (CellId, Position),
+    {
+        let (columns, rows) = (self.columns, self.rows);
+        let bucket_of = |position: Position| {
+            (position.x as usize).min(columns - 1) * rows + (position.y as usize).min(rows - 1)
+        };
+        self.recent.clear();
+        self.starts.clear();
+        self.starts.resize(columns * rows + 1, 0);
+        for index in 0..count {
+            self.starts[bucket_of(cell_at(index).1)] += 1;
+        }
+        let mut running = 0_u32;
+        for start in self.starts.iter_mut() {
+            running += *start;
+            *start = running;
+        }
+        self.entries.clear();
+        self.entries.resize(count, REMOVED_ENTRY);
+        for index in 0..count {
+            let (id, position) = cell_at(index);
+            let bucket = bucket_of(position);
+            self.starts[bucket] -= 1;
+            self.entries[self.starts[bucket] as usize] = SpatialEntry {
+                id,
+                position,
+                slot_hint: if hint_slots {
+                    index as u32
+                } else {
+                    NO_SLOT_HINT
+                },
+            };
+        }
+        self.len = count;
+    }
+
+    pub(crate) fn write_bucket_counts(&self, counts: &mut [u32]) {
+        debug_assert!(self.recent.is_empty());
+        for (count, range) in counts.iter_mut().zip(self.starts.windows(2)) {
+            *count = range[1] - range[0];
         }
     }
 
     #[cfg(test)]
     fn sorted_ids(&self) -> Vec<CellId> {
         let mut ids = self
-            .buckets
+            .entries
             .iter()
-            .flatten()
+            .chain(&self.recent)
+            .filter(|entry| entry.id != REMOVED_ENTRY.id)
             .map(|entry| entry.id)
             .collect::<Vec<_>>();
         ids.sort_unstable_by_key(|cell_id| cell_id.index());
@@ -238,35 +305,66 @@ impl SpatialIndex {
         let Some(position) = position.wrapped(self.width, self.height) else {
             return false;
         };
-        let bucket_index = self.bucket_for(position);
-        let bucket = &mut self.buckets[bucket_index];
-        match bucket.binary_search_by_key(&cell_id.index(), |entry| entry.id.index()) {
-            Ok(_) => false,
-            Err(index) => {
-                bucket.insert(
-                    index,
-                    SpatialEntry {
-                        id: cell_id,
-                        position,
-                    },
-                );
-                self.len += 1;
-                true
-            }
+        let bucket = self.bucket_for(position);
+        if self
+            .bucket_entries(bucket)
+            .iter()
+            .chain(&self.recent)
+            .any(|entry| entry.id == cell_id)
+        {
+            return false;
         }
+        self.len += 1;
+        self.push_recent(cell_id, position);
+        true
+    }
+
+    fn push_recent(&mut self, id: CellId, position: Position) {
+        self.recent.push(SpatialEntry {
+            id,
+            position,
+            slot_hint: NO_SLOT_HINT,
+        });
+        if self.recent.len() > MAX_RECENT_ENTRIES {
+            self.compact();
+        }
+    }
+
+    fn compact(&mut self) {
+        let live = self
+            .entries
+            .iter()
+            .chain(&self.recent)
+            .filter(|entry| entry.id != REMOVED_ENTRY.id)
+            .map(|entry| (entry.id, entry.position))
+            .collect::<Vec<_>>();
+        self.rebuild_canonical(live.len(), |index| live[index], false);
+    }
+
+    fn take_entry(&mut self, cell_id: CellId, position: Position) -> bool {
+        let bucket = self.bucket_for(position);
+        let range = self.starts[bucket] as usize..self.starts[bucket + 1] as usize;
+        if let Some(entry) = self.entries[range]
+            .iter_mut()
+            .find(|entry| entry.id == cell_id)
+        {
+            *entry = REMOVED_ENTRY;
+            return true;
+        }
+        if let Some(index) = self.recent.iter().position(|entry| entry.id == cell_id) {
+            self.recent.swap_remove(index);
+            return true;
+        }
+        false
     }
 
     pub fn remove(&mut self, cell_id: CellId, position: Position) -> bool {
         let Some(position) = position.wrapped(self.width, self.height) else {
             return false;
         };
-        let bucket_index = self.bucket_for(position);
-        let bucket = &mut self.buckets[bucket_index];
-        let Ok(index) = bucket.binary_search_by_key(&cell_id.index(), |entry| entry.id.index())
-        else {
+        if !self.take_entry(cell_id, position) {
             return false;
-        };
-        bucket.remove(index);
+        }
         self.len -= 1;
         true
     }
@@ -283,43 +381,45 @@ impl SpatialIndex {
         ) else {
             return false;
         };
-        let old_bucket = self.bucket_for(old_position);
-        let new_bucket = self.bucket_for(position);
-        let Ok(index) = self.buckets[old_bucket]
-            .binary_search_by_key(&cell_id.index(), |entry| entry.id.index())
-        else {
+        if !self.take_entry(cell_id, old_position) {
             return false;
-        };
-        if old_bucket == new_bucket {
-            self.buckets[old_bucket][index].position = position;
-            return true;
         }
-        self.buckets[old_bucket].remove(index);
-        let bucket = &mut self.buckets[new_bucket];
-        let new_index = bucket
-            .binary_search_by_key(&cell_id.index(), |entry| entry.id.index())
-            .unwrap_or_else(|index| index);
-        bucket.insert(
-            new_index,
-            SpatialEntry {
-                id: cell_id,
-                position,
-            },
-        );
+        self.push_recent(cell_id, position);
         true
     }
 
-    pub fn find_within<F>(&self, position: Position, radius: f32, visit: F) -> Option<CellId>
+    pub fn find_within<F>(&self, position: Position, radius: f32, mut visit: F) -> Option<CellId>
     where
-        F: FnMut(CellId, Position) -> bool,
+        F: FnMut(CellId, Position, u32) -> bool,
     {
         if radius < 0.0 || !radius.is_finite() {
             return None;
         }
         let position = position.wrapped(self.width, self.height)?;
-        self.find_within_canonical(position, radius, visit)
+        self.find_within_canonical(position, radius, |entry, _| {
+            visit(entry.id, entry.position, entry.slot_hint)
+        })
     }
 
+    pub(crate) fn find_within_hinted<F>(
+        &self,
+        position: Position,
+        radius: f32,
+        mut visit: F,
+    ) -> Option<CellId>
+    where
+        F: FnMut(CellId, f32, u32) -> bool,
+    {
+        if radius < 0.0 || !radius.is_finite() {
+            return None;
+        }
+        let position = position.wrapped(self.width, self.height)?;
+        self.find_within_canonical(position, radius, |entry, distance_squared| {
+            visit(entry.id, distance_squared, entry.slot_hint)
+        })
+    }
+
+    #[inline]
     fn find_within_canonical<F>(
         &self,
         position: Position,
@@ -327,32 +427,53 @@ impl SpatialIndex {
         mut visit: F,
     ) -> Option<CellId>
     where
-        F: FnMut(CellId, Position) -> bool,
+        F: FnMut(&SpatialEntry, f32) -> bool,
     {
         let radius_squared = radius * radius;
-        let (column_start, column_count) =
-            bucket_span(position.x, radius, self.bucket_width, self.columns);
-        let (row_start, row_count) = bucket_span(position.y, radius, self.bucket_height, self.rows);
+        let (column_start, column_count) = bucket_span(position.x, radius, self.columns);
+        let (row_start, row_count) = bucket_span(position.y, radius, self.rows);
+        let first_row = wrap_bucket(row_start, self.rows);
+        let unwrapped_rows = row_count.min(self.rows - first_row);
+        let spans = [(first_row, unwrapped_rows), (0, row_count - unwrapped_rows)];
         for column_offset in 0..column_count {
             let column = wrap_bucket(column_start + column_offset as isize, self.columns);
-            for row_offset in 0..row_count {
-                let row = wrap_bucket(row_start + row_offset as isize, self.rows);
-                for entry in &self.buckets[self.bucket_index(column, row)] {
-                    if toroidal_distance_squared(position, entry.position, self.width, self.height)
-                        <= radius_squared
-                        && visit(entry.id, entry.position)
-                    {
+            let base = column * self.rows;
+            for (row, rows) in spans {
+                if rows == 0 {
+                    continue;
+                }
+                let start = self.starts[base + row] as usize;
+                let end = self.starts[base + row + rows] as usize;
+                for entry in &self.entries[start..end] {
+                    if entry.id == REMOVED_ENTRY.id {
+                        continue;
+                    }
+                    let distance_squared = toroidal_distance_squared(
+                        position,
+                        entry.position,
+                        self.width,
+                        self.height,
+                    );
+                    if distance_squared <= radius_squared && visit(entry, distance_squared) {
                         return Some(entry.id);
                     }
                 }
             }
         }
+        for entry in &self.recent {
+            let distance_squared =
+                toroidal_distance_squared(position, entry.position, self.width, self.height);
+            if distance_squared <= radius_squared && visit(entry, distance_squared) {
+                return Some(entry.id);
+            }
+        }
         None
     }
 
-    pub fn query_radius(&self, position: Position, radius: f32) -> Vec<CellId> {
+    #[cfg(test)]
+    pub(crate) fn query_radius(&self, position: Position, radius: f32) -> Vec<CellId> {
         let mut result = Vec::new();
-        self.find_within(position, radius, |cell_id, _| {
+        self.find_within(position, radius, |cell_id, _, _| {
             result.push(cell_id);
             false
         });
@@ -360,8 +481,13 @@ impl SpatialIndex {
         result
     }
 
-    pub fn collect_pairs_within<I>(&self, radius: f32, cells: I, pairs: &mut Vec<(CellId, CellId)>)
-    where
+    #[cfg(test)]
+    pub(crate) fn collect_pairs_within<I>(
+        &self,
+        radius: f32,
+        cells: I,
+        pairs: &mut Vec<(CellId, CellId)>,
+    ) where
         I: IntoIterator<Item = (CellId, Position)>,
     {
         pairs.clear();
@@ -372,9 +498,9 @@ impl SpatialIndex {
             let Some(position) = position.wrapped(self.width, self.height) else {
                 continue;
             };
-            self.find_within_canonical(position, radius, |cell_b, _| {
-                if cell_b.index() > cell_a.index() {
-                    pairs.push((cell_a, cell_b));
+            self.find_within_canonical(position, radius, |entry, _| {
+                if entry.id.index() > cell_a.index() {
+                    pairs.push((cell_a, entry.id));
                 }
                 false
             });
@@ -382,11 +508,13 @@ impl SpatialIndex {
         pairs.sort_unstable_by_key(|(a, b)| (a.index(), b.index()));
     }
 
-    pub fn unique_pairs_within(&self, radius: f32) -> Vec<(CellId, CellId)> {
+    #[cfg(test)]
+    pub(crate) fn unique_pairs_within(&self, radius: f32) -> Vec<(CellId, CellId)> {
         let entries = self
-            .buckets
+            .entries
             .iter()
-            .flatten()
+            .chain(&self.recent)
+            .filter(|entry| entry.id != REMOVED_ENTRY.id)
             .map(|entry| (entry.id, entry.position))
             .collect::<Vec<_>>();
         let mut pairs = Vec::new();
@@ -394,14 +522,14 @@ impl SpatialIndex {
         pairs
     }
 
+    #[inline]
     fn bucket_for(&self, position: Position) -> usize {
-        let column = ((position.x / self.bucket_width).floor() as usize).min(self.columns - 1);
-        let row = ((position.y / self.bucket_height).floor() as usize).min(self.rows - 1);
-        self.bucket_index(column, row)
+        (position.x as usize).min(self.columns - 1) * self.rows
+            + (position.y as usize).min(self.rows - 1)
     }
 
-    fn bucket_index(&self, column: usize, row: usize) -> usize {
-        column * self.rows + row
+    fn bucket_entries(&self, bucket: usize) -> &[SpatialEntry] {
+        &self.entries[self.starts[bucket] as usize..self.starts[bucket + 1] as usize]
     }
 }
 
@@ -417,9 +545,20 @@ fn wrap_bucket(index: isize, buckets: usize) -> usize {
     }
 }
 
-fn bucket_span(center: f32, radius: f32, bucket_size: f32, buckets: usize) -> (isize, usize) {
-    let first = ((center - radius - BUCKET_RANGE_EPSILON) / bucket_size).floor() as isize;
-    let last = ((center + radius + BUCKET_RANGE_EPSILON) / bucket_size).floor() as isize;
+#[inline]
+fn floor_to_isize(value: f32) -> isize {
+    let truncated = value as isize;
+    if (truncated as f32) > value {
+        truncated - 1
+    } else {
+        truncated
+    }
+}
+
+#[inline]
+fn bucket_span(center: f32, radius: f32, buckets: usize) -> (isize, usize) {
+    let first = floor_to_isize(center - radius - BUCKET_RANGE_EPSILON);
+    let last = floor_to_isize(center + radius + BUCKET_RANGE_EPSILON);
     let count = (last - first + 1) as usize;
     if count >= buckets {
         (0, buckets)
@@ -650,15 +789,139 @@ mod tests {
         let mut index = SpatialIndex::new(320, 240);
         index.rebuild(entries);
 
-        let buckets_ptr = index.buckets.as_ptr();
-        let occupied_bucket = index.bucket_for(entries[0].1);
-        let occupied_bucket_ptr = index.buckets[occupied_bucket].as_ptr();
+        let starts_ptr = index.starts.as_ptr();
+        let entries_ptr = index.entries.as_ptr();
 
         index.rebuild(entries.into_iter().rev());
 
-        assert_eq!(index.buckets.as_ptr(), buckets_ptr);
-        assert_eq!(index.buckets[occupied_bucket].as_ptr(), occupied_bucket_ptr);
+        assert_eq!(index.starts.as_ptr(), starts_ptr);
+        assert_eq!(index.entries.as_ptr(), entries_ptr);
         assert_eq!(index.sorted_ids(), ids(&[0, 1, 2]));
+    }
+
+    #[test]
+    fn fused_multiply_add_matches_the_library_bit_for_bit() {
+        let mut rng = crate::rng::Rng::from_seed_str("fused-multiply-add");
+        let mut values = vec![
+            0.0_f32,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            1.5,
+            f32::MIN_POSITIVE,
+            1.0e-30,
+            3.0e30,
+        ];
+        for _ in 0..40 {
+            values.push(rng.range(-320.0, 320.0));
+            values.push(rng.range(-1.0, 1.0) * 1.0e-3);
+        }
+        let check = |a: f32, b: f32, c: f32| {
+            assert_eq!(
+                fused_multiply_add(a, b, c).to_bits(),
+                a.mul_add(b, c).to_bits(),
+                "{a} * {b} + {c}"
+            );
+        };
+        for &a in &values {
+            for &b in &values {
+                for &c in &values {
+                    check(a, b, c);
+                }
+            }
+        }
+        for _ in 0..2_000_000 {
+            let scale = 2.0_f32.powi(rng.usize(40) as i32 - 20);
+            let a = rng.range(-1.0, 1.0) * scale;
+            let c = rng.range(-1.0, 1.0) * scale * scale;
+            check(a, a, c);
+            check(a, rng.range(-1.0, 1.0), c);
+        }
+        for exponent in 0..24 {
+            let a = 1.0 + f32::EPSILON * (1 << exponent) as f32;
+            for offset in [1.0, 2.0, 0.5, -1.0, f32::EPSILON, 1.0 + f32::EPSILON] {
+                check(a, a, offset);
+                check(a, 1.0 / a, offset);
+            }
+        }
+    }
+
+    #[test]
+    fn edits_between_rebuilds_match_a_brute_force_model() {
+        let (width, height) = (23_usize, 17_usize);
+        let mut rng = crate::rng::Rng::from_seed_str("spatial-edits");
+        let mut index = SpatialIndex::new(width, height);
+        let mut model: Vec<(CellId, Position)> = Vec::new();
+        let mut next_id = 0;
+        let random_position = |rng: &mut crate::rng::Rng| {
+            Position::new(rng.range(0.0, width as f32), rng.range(0.0, height as f32))
+        };
+        for round in 0..4_000 {
+            match rng.usize(5) {
+                0 | 1 => {
+                    let position = random_position(&mut rng);
+                    assert!(index.insert(CellId(next_id), position));
+                    assert!(!index.insert(CellId(next_id), position));
+                    model.push((CellId(next_id), position));
+                    next_id += 1;
+                }
+                2 if !model.is_empty() => {
+                    let (id, position) = model.swap_remove(rng.usize(model.len()));
+                    assert!(index.remove(id, position));
+                    assert!(!index.remove(id, position));
+                    assert!(!index.contains_at(id, position));
+                }
+                3 if !model.is_empty() => {
+                    let entry = rng.usize(model.len());
+                    let (id, old) = model[entry];
+                    let position = random_position(&mut rng);
+                    assert!(index.update_position(id, old, position));
+                    model[entry].1 = position;
+                    assert!(index.contains_at(id, position));
+                }
+                4 if round % 40 == 0 => {
+                    let snapshot = model.clone();
+                    index.rebuild_canonical(snapshot.len(), |slot| snapshot[slot], true);
+                }
+                _ => {}
+            }
+            assert_eq!(index.len(), model.len());
+            let center = random_position(&mut rng);
+            let radius = rng.range(0.0, 6.0);
+            let mut expected = model
+                .iter()
+                .filter(|(_, position)| {
+                    toroidal_distance_squared(center, *position, width as f32, height as f32)
+                        <= radius * radius
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            expected.sort_unstable_by_key(|id| id.index());
+            assert_eq!(
+                index.query_radius(center, radius),
+                expected,
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn hinted_rebuild_reports_slots_and_later_additions_have_no_hint() {
+        let cells = [
+            (CellId(9), Position::new(1.5, 1.5)),
+            (CellId(4), Position::new(1.6, 1.5)),
+        ];
+        let mut index = SpatialIndex::new(8, 8);
+        index.rebuild_canonical(cells.len(), |slot| cells[slot], true);
+        assert!(index.insert(CellId(11), Position::new(1.7, 1.5)));
+        let mut seen = Vec::new();
+        index.find_within(Position::new(1.5, 1.5), 1.0, |id, _, hint| {
+            seen.push((id.index(), hint));
+            false
+        });
+        seen.sort_unstable();
+        assert_eq!(seen, vec![(4, 1), (9, 0), (11, u32::MAX)]);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::chem::{ELEMENT_COUNT, Element};
+use crate::chem::ELEMENT_COUNT;
 
 pub const ENZYME_COUNT_HISTOGRAM_LEN: usize = 11;
 pub const EXPOSED_CELL_THRESHOLD: f32 = 0.05;
@@ -19,8 +19,6 @@ pub struct OperationCounters {
     pub cell_divisions: u64,
     pub cell_deaths: u64,
     pub local_enval_average_calls: u64,
-    pub enzyme_list_clones: u64,
-    pub genome_clones: u64,
     pub spatial_candidate_checks: u64,
     pub overlap_candidates: u64,
     pub overlap_corrections: u64,
@@ -51,10 +49,6 @@ impl OperationCounters {
             local_enval_average_calls: self
                 .local_enval_average_calls
                 .saturating_sub(previous.local_enval_average_calls),
-            enzyme_list_clones: self
-                .enzyme_list_clones
-                .saturating_sub(previous.enzyme_list_clones),
-            genome_clones: self.genome_clones.saturating_sub(previous.genome_clones),
             spatial_candidate_checks: self
                 .spatial_candidate_checks
                 .saturating_sub(previous.spatial_candidate_checks),
@@ -92,10 +86,6 @@ impl OperationCounters {
         self.local_enval_average_calls = self
             .local_enval_average_calls
             .saturating_add(other.local_enval_average_calls);
-        self.enzyme_list_clones = self
-            .enzyme_list_clones
-            .saturating_add(other.enzyme_list_clones);
-        self.genome_clones = self.genome_clones.saturating_add(other.genome_clones);
         self.spatial_candidate_checks = self
             .spatial_candidate_checks
             .saturating_add(other.spatial_candidate_checks);
@@ -318,20 +308,6 @@ pub struct WorldStats {
     pub enval_ledger: EnvalLedger,
     pub energy_ledger_residual: f64,
     pub renewable_coverage: f64,
-}
-
-impl WorldStats {
-    pub fn extracellular_element_amount(&self, element: Element) -> f64 {
-        self.extracellular_element_amounts[element.index()]
-    }
-
-    pub fn intracellular_element_amount(&self, element: Element) -> f64 {
-        self.intracellular_element_amounts[element.index()]
-    }
-
-    pub fn system_element_amount(&self, element: Element) -> f64 {
-        self.system_element_amounts[element.index()]
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -607,3 +607,25 @@ tr.isBad td {
     font-size: 12px;
     line-height: 1.2;
 }
+
+.analysisPanel {
+    margin-top: 14px;
+}
+
+.analysisPanel summary {
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.analysisControl {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+#analysisCanvas {
+    display: block;
+    width: 100%;
+    height: auto;
+}

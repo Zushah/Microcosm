@@ -357,7 +357,6 @@ impl WasmInstance {
     fn refresh_render_buffers(&mut self) {
         self.world
             .write_render_buffers_with_visual(&mut self.render_buffers, &self.render_visual_state);
-        self.refresh_stats();
     }
 
     fn refresh_lattice_rgba(&mut self) {
@@ -559,8 +558,11 @@ pub extern "C" fn microcosm_alloc(len: usize, align: usize) -> *mut u8 {
     unsafe { alloc(layout) }
 }
 
+/// # Safety
+/// `ptr` must be null or a pointer returned by `microcosm_alloc` with the same
+/// `len` and `align`, and it must not be used or freed again afterwards.
 #[unsafe(no_mangle)]
-pub extern "C" fn microcosm_free(ptr: *mut u8, len: usize, align: usize) {
+pub unsafe extern "C" fn microcosm_free(ptr: *mut u8, len: usize, align: usize) {
     if ptr.is_null() || len == 0 || align == 0 || !align.is_power_of_two() {
         return;
     }
@@ -643,22 +645,6 @@ pub extern "C" fn microcosm_reset(handle: u32, config_ptr: *const u8, config_len
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn microcosm_step(handle: u32, ticks: u32) -> u32 {
-    match lock_runtime() {
-        Ok(mut runtime) => {
-            let Some(instance) = runtime.instance_mut(handle) else {
-                return STATUS_INVALID_HANDLE;
-            };
-            instance.world.step_many(ticks);
-            instance.refresh_stats();
-            runtime.last_error.clear();
-            STATUS_OK
-        }
-        Err(err) => err,
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn microcosm_step_no_stats(handle: u32, ticks: u32) -> u32 {
     match lock_runtime() {
         Ok(mut runtime) => {
@@ -681,6 +667,21 @@ pub extern "C" fn microcosm_refresh_render_buffers(handle: u32) -> u32 {
                 return STATUS_INVALID_HANDLE;
             };
             instance.refresh_render_buffers();
+            runtime.last_error.clear();
+            STATUS_OK
+        }
+        Err(err) => err,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn microcosm_refresh_stats(handle: u32) -> u32 {
+    match lock_runtime() {
+        Ok(mut runtime) => {
+            let Some(instance) = runtime.instance_mut(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            instance.refresh_stats();
             runtime.last_error.clear();
             STATUS_OK
         }
@@ -1077,6 +1078,7 @@ pub extern "C" fn microcosm_apply_cell_genome_patch(
                     .map_err(|err| err.to_string());
                 if result.is_ok() {
                     instance.refresh_render_buffers();
+                    instance.refresh_stats();
                 }
                 result
             };
@@ -1128,6 +1130,7 @@ pub extern "C" fn microcosm_apply_genome_brush(
                     .map_err(|err| err.to_string());
                 if result.is_ok() {
                     instance.refresh_render_buffers();
+                    instance.refresh_stats();
                 }
                 result
             };
@@ -1404,8 +1407,7 @@ mod tests {
 
     #[test]
     fn json_config_overrides_core_fields() {
-        let json =
-            br#"{"seed":"wasm-test","width":8,"height":6,"initial_cells":3}"#;
+        let json = br#"{"seed":"wasm-test","width":8,"height":6,"initial_cells":3}"#;
         let config = parse_config_from_bytes(json.as_ptr(), json.len()).unwrap();
         assert_eq!(config.seed, "wasm-test");
         assert_eq!(config.width, 8);
@@ -1469,15 +1471,16 @@ mod tests {
                 && color[2] < 0.1
                 && color[3] == 1.0)
         );
-        assert_eq!(microcosm_step(handle, 5), STATUS_OK);
+        assert_eq!(microcosm_step_no_stats(handle, 5), STATUS_OK);
         assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
         assert!(microcosm_render_epoch(handle) >= 5);
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
-        assert_eq!(microcosm_step(handle, 1), STATUS_INVALID_HANDLE);
+        assert_eq!(microcosm_step_no_stats(handle, 1), STATUS_INVALID_HANDLE);
+        assert_eq!(microcosm_refresh_stats(handle), STATUS_INVALID_HANDLE);
     }
 
     #[test]
-    fn no_stats_step_defers_stats_until_render_refresh() {
+    fn stats_change_only_on_an_explicit_refresh_and_never_during_a_render_refresh() {
         let json = br#"{"seed":"wasm-no-stats-step","width":8,"height":6,"initial_cells":4}"#;
         let handle = microcosm_create(json.as_ptr(), json.len());
         assert!(handle > 0);
@@ -1487,10 +1490,13 @@ mod tests {
         assert_eq!(unsafe { *microcosm_stats_ptr(handle) }.tick_count, before);
 
         assert_eq!(microcosm_refresh_render_buffers(handle), STATUS_OK);
-        assert_eq!(
-            unsafe { *microcosm_stats_ptr(handle) }.tick_count,
-            before + 3
-        );
+        assert!(microcosm_render_epoch(handle) >= 3);
+        assert_eq!(unsafe { *microcosm_stats_ptr(handle) }.tick_count, before);
+
+        assert_eq!(microcosm_refresh_stats(handle), STATUS_OK);
+        let refreshed = unsafe { *microcosm_stats_ptr(handle) };
+        assert_eq!(refreshed.tick_count, before + 3);
+        assert_eq!(refreshed.render_epoch, microcosm_render_epoch(handle));
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 
@@ -1657,11 +1663,10 @@ mod tests {
         assert_eq!(detail["schema"], "microcosm.cell_detail.v1");
         assert_eq!(detail["cell_detail"]["cell"]["cell_id"], 0);
         assert!(
-            detail["cell_detail"]["genome"]["enzymes"]
+            !detail["cell_detail"]["genome"]["enzymes"]
                 .as_array()
                 .unwrap()
-                .len()
-                >= 1
+                .is_empty()
         );
         assert!(
             detail["cell_detail"]["internal_elements"]
@@ -1744,7 +1749,11 @@ mod tests {
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 2), STATUS_OK);
         let detail = query_json();
         assert!(
-            (detail["cell_detail"]["genome"]["mutation_rate"].as_f64().unwrap() - 0.02).abs()
+            (detail["cell_detail"]["genome"]["mutation_rate"]
+                .as_f64()
+                .unwrap()
+                - 0.02)
+                .abs()
                 <= 1.0e-6
         );
         assert!(
@@ -1805,9 +1814,15 @@ mod tests {
         );
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 1), STATUS_OK);
         let detail = query_json();
-        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][0]["exposure"], 0.0);
-        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][1]["exposure"], 0.375);
-        assert_eq!(microcosm_step(handle, 20), STATUS_OK);
+        assert_eq!(
+            detail["cell_detail"]["genome"]["enzymes"][0]["exposure"],
+            0.0
+        );
+        assert_eq!(
+            detail["cell_detail"]["genome"]["enzymes"][1]["exposure"],
+            0.375
+        );
+        assert_eq!(microcosm_step_no_stats(handle, 20), STATUS_OK);
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 64), STATUS_OK);
         let fluxes = query_json()["cell_detail"]["recent_fluxes"]["fluxes"].clone();
         let sites = fluxes
@@ -1851,8 +1866,10 @@ mod tests {
         assert_eq!(microcosm_destroy(handle), STATUS_OK);
     }
 
-    const REMOVED_GENOME_FIELDS: [&str; 2] =
-        [concat!("optimal", "_enval"), concat!("enval_mutation", "_floor")];
+    const REMOVED_GENOME_FIELDS: [&str; 2] = [
+        concat!("optimal", "_enval"),
+        concat!("enval_mutation", "_floor"),
+    ];
 
     #[test]
     fn genome_patch_json_round_trips_enval_optimum_and_rejects_v5_and_removed_fields() {
@@ -1875,8 +1892,14 @@ mod tests {
         );
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 1), STATUS_OK);
         let detail = query_json();
-        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][0]["enval_optimum"], 0.5);
-        assert_eq!(detail["cell_detail"]["genome"]["enzymes"][1]["enval_optimum"], -0.25);
+        assert_eq!(
+            detail["cell_detail"]["genome"]["enzymes"][0]["enval_optimum"],
+            0.5
+        );
+        assert_eq!(
+            detail["cell_detail"]["genome"]["enzymes"][1]["enval_optimum"],
+            -0.25
+        );
         for removed in REMOVED_GENOME_FIELDS {
             assert!(detail["cell_detail"]["genome"].get(removed).is_none());
         }
@@ -1893,10 +1916,12 @@ mod tests {
         assert_eq!(microcosm_inspect_lineage(handle, lineage), STATUS_OK);
         assert_eq!(query_json()["lineage"]["mean_enval_optimum"], 0.125);
 
-        assert_eq!(microcosm_step(handle, 5), STATUS_OK);
+        assert_eq!(microcosm_step_no_stats(handle, 5), STATUS_OK);
         assert_eq!(microcosm_inspect_cell_detail(handle, 0, 8), STATUS_OK);
         let detail = query_json();
-        let fluxes = detail["cell_detail"]["recent_fluxes"]["fluxes"].as_array().unwrap();
+        let fluxes = detail["cell_detail"]["recent_fluxes"]["fluxes"]
+            .as_array()
+            .unwrap();
         assert!(!fluxes.is_empty());
         for record in fluxes {
             let index = record["catalyst_index"].as_u64().unwrap() as usize;
@@ -1968,7 +1993,8 @@ mod tests {
         assert!(stats.energy_founder > 0.0);
         assert!(stats.enval_source_inflow == 0.0);
 
-        assert_eq!(microcosm_step(handle, 3), STATUS_OK);
+        assert_eq!(microcosm_step_no_stats(handle, 3), STATUS_OK);
+        assert_eq!(microcosm_refresh_stats(handle), STATUS_OK);
         let stepped = unsafe { *microcosm_stats_ptr(handle) };
         assert!(stepped.cell_steps >= 4);
         assert!(stepped.metabolic_enzyme_attempts > 0);

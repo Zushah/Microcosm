@@ -799,8 +799,8 @@ fn probability_f32(name: &str, value: f32) -> Result<f32, GenomePatchError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Enzyme, EnzymeFieldPatch, EnzymePatchOperation, GENOME_PATCH_SCHEMA, Genome,
-        GenomePatch, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+        Enzyme, EnzymeFieldPatch, EnzymePatchOperation, GENOME_PATCH_SCHEMA, Genome, GenomePatch,
+        MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
     };
     use crate::rng::Rng;
 
@@ -1356,7 +1356,11 @@ mod tests {
             "microcosm.genome_patch.v3",
         ] {
             let mut target = original.clone();
-            assert!(exposure_patch(schema, 0.35).apply_to_genome(&mut target).is_err());
+            assert!(
+                exposure_patch(schema, 0.35)
+                    .apply_to_genome(&mut target)
+                    .is_err()
+            );
             assert_eq!(target, original);
         }
         for invalid in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
@@ -1402,7 +1406,10 @@ mod tests {
             .unwrap();
         assert_eq!(changed, vec!["enzyme[1].enval_optimum".to_owned()]);
         assert_eq!(genome.enzymes[1].enval_optimum, -3.5);
-        assert_eq!(genome.enzymes[0].enval_optimum, original.enzymes[0].enval_optimum);
+        assert_eq!(
+            genome.enzymes[0].enval_optimum,
+            original.enzymes[0].enval_optimum
+        );
         let decoded: Genome = bincode::deserialize(&bincode::serialize(&genome).unwrap()).unwrap();
         assert_eq!(decoded, genome);
 

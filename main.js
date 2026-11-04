@@ -7,6 +7,7 @@ import { MicrocosmInteraction } from "./wasmgpu/interact.js";
 const SEED_QUERY_PARAM = "seed";
 const STEP_MS = 10;
 const MAX_STEPS_PER_FRAME = 6;
+const STEP_BUDGET_MS = 12;
 const HUD_UPDATE_INTERVAL_MS = 200;
 
 const gui = MicrocosmGUI.bind();
@@ -129,6 +130,21 @@ const stepRuntime = (steps) => {
     tpsTicks += steps;
 };
 
+const stepWithinBudget = () => {
+    const budgetStartMs = performance.now();
+    let steps = 0;
+    while (accumulatorMs >= STEP_MS && steps < MAX_STEPS_PER_FRAME) {
+        if (performance.now() - budgetStartMs >= STEP_BUDGET_MS) {
+            accumulatorMs = 0;
+            break;
+        }
+        runtime.step(1, { refresh: false });
+        accumulatorMs -= STEP_MS;
+        steps++;
+    }
+    return steps;
+};
+
 const resetRuntime = () => {
     if (!runtime || !renderer) return;
     gui.clearError();
@@ -136,6 +152,7 @@ const resetRuntime = () => {
     gui.clearGenomeEditResult();
     const config = buildConfig();
     runtime.reset(config);
+    gui.resetAnalysis();
     renderer.invalidateVisualState();
     window.history.replaceState(null, "", seedUrl(config.seed).toString());
     if (interaction) interaction.clearSelection();
@@ -152,6 +169,7 @@ const stepOnce = () => {
     renderer.setPausedVisualState(paused);
     gui.setPaused(paused);
     stepRuntime(1);
+    runtime.refreshStats();
     renderer.updateFromRuntime(runtime);
     renderer.render();
     updateGui();
@@ -161,7 +179,10 @@ const setPaused = (value) => {
     paused = !!value;
     if (renderer) renderer.setPausedVisualState(paused);
     gui.setPaused(paused);
-    updateGui();
+    try {
+        if (runtime && runtime.ready) runtime.refreshStats();
+        updateGui();
+    } catch (error) { gui.setError(error); }
 };
 
 const applyDisplayMode = (mode) => {
@@ -214,10 +235,10 @@ const frame = () => {
             accumulatorMs += frameElapsedMs;
             const maxAccumulatedMs = STEP_MS * MAX_STEPS_PER_FRAME;
             if (accumulatorMs > maxAccumulatedMs) accumulatorMs = maxAccumulatedMs;
-            const steps = Math.min(MAX_STEPS_PER_FRAME, Math.floor(accumulatorMs / STEP_MS));
+            const steps = stepWithinBudget();
             if (steps > 0) {
-                stepRuntime(steps);
-                accumulatorMs -= steps * STEP_MS;
+                runtime.refreshRenderBuffers();
+                tpsTicks += steps;
                 renderer.updateFromRuntime(runtime);
             }
         } else accumulatorMs = 0;
@@ -238,8 +259,14 @@ const frame = () => {
         tpsLastSampleMs = nowMs;
     }
     if (nowMs - lastHudUpdateMs >= HUD_UPDATE_INTERVAL_MS) {
-        if (interaction) interaction.refreshSelection();
-        updateGui();
+        try {
+            if (!paused) runtime.refreshStats();
+            if (interaction) interaction.refreshSelection();
+            updateGui();
+        } catch (error) {
+            setPaused(true);
+            gui.setError(error);
+        }
         lastHudUpdateMs = nowMs;
     }
 };

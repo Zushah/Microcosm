@@ -7,7 +7,7 @@ use crate::chem::{ELEMENT_COUNT, ElementAmounts};
 use crate::genome::{Genome, LineageId};
 use crate::spatial::Position;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CellId(pub usize);
 
 impl CellId {
@@ -91,6 +91,7 @@ pub struct FluxRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[repr(C)]
 pub struct Cell {
     pub id: CellId,
     pub position: Position,
@@ -134,6 +135,7 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn area(&self, body_density: f32) -> f64 {
         self.body.total() / f64::from(body_density)
     }
@@ -142,20 +144,22 @@ impl Cell {
         self.radius = (self.area(body_density) / std::f64::consts::PI).sqrt() as f32;
     }
 
+    #[inline]
     pub fn membrane_polarity(&self) -> f64 {
         let total = self.boundary.total();
         if total <= 0.0 {
             return 0.5;
         }
-        crate::chem::ELEMENT_ORDER
+        self.boundary
+            .as_array()
             .iter()
-            .map(|element| {
-                f64::from(self.boundary[*element]) * f64::from(element.properties().polarity)
-            })
+            .zip(&crate::chem::ELEMENT_POLARITIES)
+            .map(|(amount, polarity)| f64::from(*amount) * *polarity)
             .sum::<f64>()
             / total
     }
 
+    #[inline]
     pub fn strain(&self, boundary_density: f32) -> f64 {
         self.boundary.total()
             / f64::from(boundary_density)
@@ -196,7 +200,8 @@ impl CellFluxLog {
         older.iter().rev().chain(newer.iter().rev())
     }
 
-    pub fn latest_flux(&self) -> Option<&FluxRecord> {
+    #[cfg(test)]
+    pub(crate) fn latest_flux(&self) -> Option<&FluxRecord> {
         self.fluxes_newest_first().next()
     }
 }
@@ -220,10 +225,11 @@ impl CellStore {
         self.cells.is_empty()
     }
 
-    pub fn issued_ids(&self) -> usize {
+    pub(crate) fn issued_ids(&self) -> usize {
         self.next_id
     }
 
+    #[inline]
     pub fn slot(&self, id: CellId) -> Option<usize> {
         match self.slots.get(id.index()) {
             Some(slot) if *slot != NO_SLOT => Some(*slot as usize),
@@ -243,10 +249,23 @@ impl CellStore {
         self.slot(id).map(|slot| &mut self.cells[slot])
     }
 
+    #[inline]
+    pub(crate) fn find_near_slot(&self, id: CellId, slot: usize) -> Option<(usize, &Cell)> {
+        match self.cells.get(slot) {
+            Some(cell) if cell.id == id => Some((slot, cell)),
+            _ => {
+                let slot = self.slot(id)?;
+                Some((slot, &self.cells[slot]))
+            }
+        }
+    }
+
+    #[inline]
     pub fn at_slot(&self, slot: usize) -> &Cell {
         &self.cells[slot]
     }
 
+    #[inline]
     pub fn at_slot_mut(&mut self, slot: usize) -> &mut Cell {
         &mut self.cells[slot]
     }
@@ -414,7 +433,8 @@ mod tests {
         assert!("surface".parse::<ReactionSite>().is_err());
         let mut flux = record(3);
         flux.site = ReactionSite::Cell(CellId(7));
-        let decoded: FluxRecord = bincode::deserialize(&bincode::serialize(&flux).unwrap()).unwrap();
+        let decoded: FluxRecord =
+            bincode::deserialize(&bincode::serialize(&flux).unwrap()).unwrap();
         assert_eq!(decoded, flux);
     }
 

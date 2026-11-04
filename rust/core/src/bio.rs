@@ -5,6 +5,7 @@ use crate::spatial::REFERENCE_CELL_AREA;
 
 pub const ENVAL_PUMP_ENERGY_COST: f64 = 1.0;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactionEnv {
     pub local_enval: f32,
@@ -14,6 +15,7 @@ pub struct ReactionEnv {
     pub pool_extent: Option<f32>,
 }
 
+#[cfg(test)]
 impl ReactionEnv {
     pub fn internal(local_enval: f32, cell_area: f32, cell_body: CellBodyConfig) -> Self {
         Self {
@@ -46,13 +48,20 @@ pub struct FluxOutcome {
     pub enval_output: f32,
 }
 
+#[cfg(test)]
 pub fn compute_enval_factor(enzyme: &Enzyme, env: ReactionEnv) -> f32 {
+    compute_enval_factor_at(enzyme, env.local_enval)
+}
+
+#[inline]
+fn compute_enval_factor_at(enzyme: &Enzyme, local_enval: f32) -> f32 {
     let sigma = enzyme.enval_sigma.max(1.0e-6);
-    let distance = env.local_enval - enzyme.enval_optimum;
+    let distance = local_enval - enzyme.enval_optimum;
     (-(distance * distance) / (2.0 * sigma * sigma)).exp()
 }
 
-pub fn compute_saturation(enzyme: &Enzyme, reservoir: ElementAmounts, pool_extent: f32) -> f64 {
+#[cfg(test)]
+fn compute_saturation(enzyme: &Enzyme, reservoir: ElementAmounts, pool_extent: f32) -> f64 {
     let extent = f64::from(pool_extent);
     if !extent.is_finite() || extent <= 0.0 {
         return 0.0;
@@ -70,6 +79,72 @@ pub fn compute_saturation(enzyme: &Enzyme, reservoir: ElementAmounts, pool_exten
     limiting / (f64::from(enzyme.half_saturation) + limiting)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluxExtent {
+    pub requested_extent: f64,
+    pub executed_extent: f64,
+    pub secretion_fraction: f64,
+    pub body_fraction: f64,
+    pub boundary_fraction: f64,
+    pub retained_fraction: f64,
+    pub assembly_cost: f64,
+    pub energy_delta: f64,
+    pub raw_chemical_energy: f64,
+    pub chemical_energy_delta: f64,
+    pub enval_energy: f64,
+    pub pump_cost: f64,
+    pub enval_input: f32,
+    pub enval_output: f32,
+}
+
+impl FluxExtent {
+    pub fn executed_extent_f32(&self) -> f32 {
+        self.executed_extent as f32
+    }
+
+    pub fn consumed(&self, coefficient: f32) -> f32 {
+        (f64::from(coefficient) * self.executed_extent) as f32
+    }
+
+    pub fn outcome(&self, enzyme: &Enzyme) -> FluxOutcome {
+        let mut consumed = ElementAmounts::ZERO;
+        let mut retained_products = ElementAmounts::ZERO;
+        let mut secreted_products = ElementAmounts::ZERO;
+        let mut body_products = ElementAmounts::ZERO;
+        let mut boundary_products = ElementAmounts::ZERO;
+        let mut element_deltas = [0.0_f32; ELEMENT_COUNT];
+        for element in ELEMENT_ORDER {
+            let consumed_value = f64::from(enzyme.reactants[element]) * self.executed_extent;
+            let produced_value = f64::from(enzyme.products[element]) * self.executed_extent;
+            consumed[element] = consumed_value as f32;
+            secreted_products[element] = (produced_value * self.secretion_fraction) as f32;
+            body_products[element] = (produced_value * self.body_fraction) as f32;
+            boundary_products[element] = (produced_value * self.boundary_fraction) as f32;
+            retained_products[element] = (produced_value * self.retained_fraction) as f32;
+            element_deltas[element.index()] = (produced_value - consumed_value) as f32;
+        }
+        FluxOutcome {
+            requested_extent: self.requested_extent as f32,
+            executed_extent: self.executed_extent as f32,
+            consumed,
+            retained_products,
+            secreted_products,
+            body_products,
+            boundary_products,
+            assembly_cost: self.assembly_cost,
+            element_deltas,
+            energy_delta: self.energy_delta,
+            raw_chemical_energy: self.raw_chemical_energy,
+            chemical_energy_delta: self.chemical_energy_delta,
+            enval_energy: self.enval_energy,
+            pump_cost: self.pump_cost,
+            enval_input: self.enval_input,
+            enval_output: self.enval_output,
+        }
+    }
+}
+
+#[cfg(test)]
 pub fn compute_flux(
     enzyme: &Enzyme,
     reservoir: ElementAmounts,
@@ -77,136 +152,227 @@ pub fn compute_flux(
     dt_seconds: f64,
     env: ReactionEnv,
 ) -> Option<FluxOutcome> {
-    if !cell_energy.is_finite()
-        || cell_energy < 0.0
-        || !dt_seconds.is_finite()
-        || dt_seconds <= 0.0
-        || !(env.capacity_fraction > 0.0)
-    {
+    if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
         return None;
     }
-
+    let cell = FluxCell::new(env.local_enval, env.cell_area, env.cell_body);
+    let terms = EnzymeTerms::new(enzyme, &cell, dt_seconds);
     let pool_extent = f64::from(env.pool_extent.unwrap_or(env.cell_area));
-    let mut substrate_limit = f64::INFINITY;
-    let mut limiting = f64::INFINITY;
-    for element in ELEMENT_ORDER {
-        let coefficient = f64::from(enzyme.reactants[element]);
-        if coefficient > 0.0 {
-            let available = f64::from(reservoir[element]);
-            substrate_limit = substrate_limit.min(available / coefficient);
-            limiting = limiting.min(available / pool_extent / coefficient);
+    compute_extent(
+        &terms,
+        enzyme,
+        &reservoir,
+        cell_energy,
+        env.capacity_fraction,
+        pool_extent,
+        &cell,
+    )
+    .map(|flux| flux.outcome(enzyme))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FluxCell {
+    pub local_enval: f32,
+    pub cell_area: f64,
+    area_scale: f64,
+    assembly_half_saturation: f64,
+    assembly_energy_per_unit: f64,
+}
+
+impl FluxCell {
+    pub fn new(local_enval: f32, cell_area: f32, cell_body: CellBodyConfig) -> Self {
+        Self {
+            local_enval,
+            cell_area: f64::from(cell_area),
+            area_scale: f64::from(cell_area / REFERENCE_CELL_AREA),
+            assembly_half_saturation: f64::from(cell_body.assembly_half_saturation),
+            assembly_energy_per_unit: cell_body.assembly_energy_per_unit,
         }
     }
-    if !substrate_limit.is_finite() || substrate_limit <= 0.0 {
+}
+
+#[inline]
+pub fn mask_elements(mut mask: u8) -> impl Iterator<Item = usize> {
+    std::iter::from_fn(move || {
+        if mask == 0 {
+            return None;
+        }
+        let index = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        Some(index)
+    })
+}
+
+#[inline]
+fn element_mask(values: &[f32; ELEMENT_COUNT], present: impl Fn(f32) -> bool) -> u8 {
+    let mut mask = 0_u8;
+    for (index, value) in values.iter().enumerate() {
+        mask |= u8::from(present(*value)) << index;
+    }
+    mask
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EnzymeTerms {
+    pub reactant_mask: u8,
+    pub product_mask: u8,
+    rate_extent: f64,
+    half_saturation: f64,
+    reactant_energy: f64,
+    product_energy: f64,
+    product_total: f64,
+    polarity: f64,
+    pump_per_extent: f64,
+    aligned_available: f64,
+    throughput: f64,
+    energy_fraction: f64,
+    release_fraction: f64,
+    harvest_fraction: f64,
+    secretion_fraction: f64,
+    body_fraction: f64,
+    boundary_fraction: f64,
+}
+
+impl EnzymeTerms {
+    #[inline]
+    pub fn new(enzyme: &Enzyme, cell: &FluxCell, dt_seconds: f64) -> Self {
+        let enval_factor = f64::from(compute_enval_factor_at(enzyme, cell.local_enval));
+        let polarity = enval_polarity(enzyme.enval_optimum);
+        Self {
+            reactant_mask: element_mask(enzyme.reactants.as_array(), |value| value > 0.0),
+            product_mask: element_mask(enzyme.products.as_array(), |value| value != 0.0),
+            rate_extent: f64::from(enzyme.rate) * dt_seconds * enval_factor,
+            half_saturation: f64::from(enzyme.half_saturation),
+            reactant_energy: enzyme.reactants.intrinsic_energy(),
+            product_energy: enzyme.products.intrinsic_energy(),
+            product_total: enzyme.products.total(),
+            polarity: f64::from(polarity),
+            pump_per_extent: f64::from(enzyme.enval_pump) * f64::from(polarity.abs()),
+            aligned_available: f64::from((polarity * cell.local_enval).max(0.0)),
+            throughput: f64::from(enzyme.enval_throughput),
+            energy_fraction: f64::from(enzyme.enval_energy_fraction),
+            release_fraction: f64::from(enzyme.enval_release_fraction),
+            harvest_fraction: f64::from(enzyme.energy_harvest_fraction),
+            secretion_fraction: f64::from(enzyme.secretion_fraction),
+            body_fraction: f64::from(enzyme.body_fraction),
+            boundary_fraction: f64::from(enzyme.boundary_fraction),
+        }
+    }
+}
+
+#[inline(always)]
+pub fn compute_extent(
+    terms: &EnzymeTerms,
+    enzyme: &Enzyme,
+    reservoir: &ElementAmounts,
+    cell_energy: f64,
+    capacity_fraction: f64,
+    pool_extent: f64,
+    cell: &FluxCell,
+) -> Option<FluxExtent> {
+    let reactive = (0.0..f64::INFINITY).contains(&cell_energy) && capacity_fraction > 0.0;
+    if !reactive {
         return None;
     }
 
-    let enval_factor = f64::from(compute_enval_factor(enzyme, env));
-    let saturation = if !pool_extent.is_finite()
-        || pool_extent <= 0.0
-        || !limiting.is_finite()
-        || limiting <= 0.0
-    {
-        0.0
+    let reactants = enzyme.reactants.as_array();
+    let available_amounts = reservoir.as_array();
+    let mut substrate_limit = f64::INFINITY;
+    let mut limiting = f64::INFINITY;
+    for index in mask_elements(terms.reactant_mask) {
+        let coefficient = reactants[index];
+        let available = f64::from(available_amounts[index]);
+        let per_extent = available / pool_extent;
+        let (by_amount, by_concentration) = if coefficient == 1.0 {
+            (available, per_extent)
+        } else {
+            let coefficient = f64::from(coefficient);
+            (available / coefficient, per_extent / coefficient)
+        };
+        if by_amount < substrate_limit {
+            substrate_limit = by_amount;
+        }
+        if by_concentration < limiting {
+            limiting = by_concentration;
+        }
+    }
+    if !(substrate_limit > 0.0 && substrate_limit < f64::INFINITY) {
+        return None;
+    }
+
+    let saturates = pool_extent > 0.0
+        && pool_extent < f64::INFINITY
+        && limiting > 0.0
+        && limiting < f64::INFINITY;
+    let saturation = if saturates {
+        limiting / (terms.half_saturation + limiting)
     } else {
-        limiting / (f64::from(enzyme.half_saturation) + limiting)
+        0.0
     };
-    let nominal_extent = f64::from(enzyme.rate)
-        * dt_seconds
-        * enval_factor
-        * saturation
-        * f64::from(env.cell_area / REFERENCE_CELL_AREA)
-        * env.capacity_fraction;
+    let nominal_extent = terms.rate_extent * saturation * cell.area_scale * capacity_fraction;
     let requested_extent = nominal_extent.min(substrate_limit).max(0.0);
     if requested_extent <= 1.0e-12 {
         return None;
     }
 
-    let reactant_energy = enzyme.reactants.intrinsic_energy();
-    let product_energy = enzyme.products.intrinsic_energy();
-    let energy_deficit_per_extent = (product_energy - reactant_energy).max(0.0);
-    let polarity = enval_polarity(enzyme.enval_optimum);
-    let pump_per_extent = f64::from(enzyme.enval_pump) * f64::from(polarity.abs());
-    let pump_cost_per_extent = ENVAL_PUMP_ENERGY_COST * pump_per_extent;
-    let energy_density = cell_energy / f64::from(env.cell_area);
-    let assembly_saturation =
-        energy_density / (f64::from(env.cell_body.assembly_half_saturation) + energy_density);
-    let body_fraction = f64::from(enzyme.body_fraction) * assembly_saturation;
-    let boundary_fraction = f64::from(enzyme.boundary_fraction) * assembly_saturation;
-    let assembly_cost_per_extent = env.cell_body.assembly_energy_per_unit
-        * enzyme.products.total()
-        * (body_fraction + boundary_fraction);
+    let energy_deficit_per_extent = (terms.product_energy - terms.reactant_energy).max(0.0);
+    let pump_cost_per_extent = ENVAL_PUMP_ENERGY_COST * terms.pump_per_extent;
+    let energy_density = cell_energy / cell.cell_area;
+    let assembly_saturation = energy_density / (cell.assembly_half_saturation + energy_density);
+    let body_fraction = terms.body_fraction * assembly_saturation;
+    let boundary_fraction = terms.boundary_fraction * assembly_saturation;
+    let assembly_cost_per_extent =
+        cell.assembly_energy_per_unit * terms.product_total * (body_fraction + boundary_fraction);
     let cost_per_extent =
         energy_deficit_per_extent + pump_cost_per_extent + assembly_cost_per_extent;
-    let aligned_available = f64::from((polarity * env.local_enval).max(0.0));
+    let aligned_available = terms.aligned_available;
 
     let executed_extent = affordable_extent(
         requested_extent,
         cost_per_extent,
         cell_energy,
         aligned_available,
-        f64::from(enzyme.enval_throughput),
-        f64::from(enzyme.enval_energy_fraction),
+        terms.throughput,
+        terms.energy_fraction,
     );
     if executed_extent <= 1.0e-12 {
         return None;
     }
 
-    let input_magnitude =
-        aligned_available.min(f64::from(enzyme.enval_throughput) * executed_extent);
-    let enval_energy = input_magnitude * f64::from(enzyme.enval_energy_fraction);
-    let output_magnitude = input_magnitude * f64::from(enzyme.enval_release_fraction)
-        + pump_per_extent * executed_extent;
-    let raw_chemical_energy = (reactant_energy - product_energy) * executed_extent;
+    let input_magnitude = aligned_available.min(terms.throughput * executed_extent);
+    let enval_energy = input_magnitude * terms.energy_fraction;
+    let output_magnitude =
+        input_magnitude * terms.release_fraction + terms.pump_per_extent * executed_extent;
+    let raw_chemical_energy = (terms.reactant_energy - terms.product_energy) * executed_extent;
     let chemical_energy_delta = if raw_chemical_energy >= 0.0 {
-        raw_chemical_energy * f64::from(enzyme.energy_harvest_fraction)
+        raw_chemical_energy * terms.harvest_fraction
     } else {
         raw_chemical_energy
     };
     let pump_cost = pump_cost_per_extent * executed_extent;
     let assembly_cost = assembly_cost_per_extent * executed_extent;
     let energy_delta = chemical_energy_delta + enval_energy - pump_cost - assembly_cost;
+    let secretion_fraction = terms.secretion_fraction;
 
-    let mut consumed = ElementAmounts::ZERO;
-    let mut retained_products = ElementAmounts::ZERO;
-    let mut secreted_products = ElementAmounts::ZERO;
-    let mut body_products = ElementAmounts::ZERO;
-    let mut boundary_products = ElementAmounts::ZERO;
-    let mut element_deltas = [0.0_f32; ELEMENT_COUNT];
-    for element in ELEMENT_ORDER {
-        let consumed_value = f64::from(enzyme.reactants[element]) * executed_extent;
-        let produced_value = f64::from(enzyme.products[element]) * executed_extent;
-        let secreted_value = produced_value * f64::from(enzyme.secretion_fraction);
-        consumed[element] = consumed_value as f32;
-        secreted_products[element] = secreted_value as f32;
-        body_products[element] = (produced_value * body_fraction) as f32;
-        boundary_products[element] = (produced_value * boundary_fraction) as f32;
-        retained_products[element] = (produced_value
-            * (1.0 - f64::from(enzyme.secretion_fraction) - body_fraction - boundary_fraction)
-                .max(0.0)) as f32;
-        element_deltas[element.index()] = (produced_value - consumed_value) as f32;
-    }
-
-    Some(FluxOutcome {
-        requested_extent: requested_extent as f32,
-        executed_extent: executed_extent as f32,
-        consumed,
-        retained_products,
-        secreted_products,
-        body_products,
-        boundary_products,
+    Some(FluxExtent {
+        requested_extent,
+        executed_extent,
+        secretion_fraction,
+        body_fraction,
+        boundary_fraction,
+        retained_fraction: (1.0 - secretion_fraction - body_fraction - boundary_fraction).max(0.0),
         assembly_cost,
-        element_deltas,
         energy_delta,
         raw_chemical_energy,
         chemical_energy_delta,
         enval_energy,
         pump_cost,
-        enval_input: (f64::from(polarity) * input_magnitude) as f32,
-        enval_output: (-f64::from(polarity) * output_magnitude) as f32,
+        enval_input: (terms.polarity * input_magnitude) as f32,
+        enval_output: (-terms.polarity * output_magnitude) as f32,
     })
 }
 
+#[inline]
 fn affordable_extent(
     requested_extent: f64,
     cost_per_extent: f64,
@@ -250,8 +416,8 @@ fn enval_polarity(enval_optimum: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ENVAL_PUMP_ENERGY_COST, ReactionEnv, affordable_extent, compute_enval_factor,
-        compute_flux, compute_saturation,
+        ENVAL_PUMP_ENERGY_COST, ReactionEnv, affordable_extent, compute_enval_factor, compute_flux,
+        compute_saturation,
     };
     use crate::chem::{Element, ElementAmounts};
     use crate::genome::Enzyme;
@@ -321,15 +487,9 @@ mod tests {
             let mut env = environment(0.25);
             env.cell_area = area;
             let reservoir = ElementAmounts::new([0.0, 0.0, 0.0, 10.0 * area, 0.0, 0.0]);
-            compute_flux(
-                &enzyme,
-                reservoir,
-                20.0,
-                0.01,
-                env,
-            )
-            .unwrap()
-            .requested_extent
+            compute_flux(&enzyme, reservoir, 20.0, 0.01, env)
+                .unwrap()
+                .requested_extent
         };
         assert_eq!(at_area(2.0), at_area(1.0) * 2.0);
     }
@@ -344,13 +504,7 @@ mod tests {
                 capacity_fraction: 1.0 - f64::from(enzyme.exposure),
                 ..environment(0.25)
             };
-            compute_flux(
-                &enzyme,
-                reservoir,
-                20.0,
-                0.01,
-                env,
-            )
+            compute_flux(&enzyme, reservoir, 20.0, 0.01, env)
         };
         let reference = compute_flux(
             &tuned(Enzyme::founder_downhill()),
@@ -436,16 +590,7 @@ mod tests {
         let enzyme = Enzyme::founder_downhill();
         let reservoir = ElementAmounts::new([5.0, 5.0, 5.0, 0.0, 5.0, 5.0]);
         assert_eq!(compute_saturation(&enzyme, reservoir, 0.6), 0.0);
-        assert!(
-            compute_flux(
-                &enzyme,
-                reservoir,
-                1.0,
-                0.01,
-                environment(0.25),
-            )
-            .is_none()
-        );
+        assert!(compute_flux(&enzyme, reservoir, 1.0, 0.01, environment(0.25),).is_none());
     }
 
     #[test]
@@ -476,14 +621,7 @@ mod tests {
         let enzyme = tuned(Enzyme::founder_downhill());
         let mut reservoir = ElementAmounts::ZERO;
         reservoir[Element::D] = 1.0;
-        let outcome = compute_flux(
-            &enzyme,
-            reservoir,
-            1.0,
-            0.1,
-            environment(0.0),
-        )
-        .unwrap();
+        let outcome = compute_flux(&enzyme, reservoir, 1.0, 0.1, environment(0.0)).unwrap();
         assert!(outcome.raw_chemical_energy > 0.0);
         assert!(outcome.energy_delta > 0.0);
     }
@@ -495,14 +633,7 @@ mod tests {
         enzyme.enval_throughput = 0.0;
         enzyme.enval_pump = 0.0;
         let reservoir = ElementAmounts::new([0.0, 0.0, 10.0, 0.0, 0.0, 0.0]);
-        let outcome = compute_flux(
-            &enzyme,
-            reservoir,
-            0.1,
-            1.0,
-            environment(0.0),
-        )
-        .unwrap();
+        let outcome = compute_flux(&enzyme, reservoir, 0.1, 1.0, environment(0.0)).unwrap();
         assert!(outcome.executed_extent < outcome.requested_extent);
         assert!(outcome.energy_delta < 0.0);
         assert!(0.1 + outcome.energy_delta >= -1.0e-10);
@@ -577,13 +708,7 @@ mod tests {
                 reservoir[element] = rng.range(0.0, 3.0) * area;
             }
             let env = ReactionEnv::internal(local_enval, area, body);
-            let Some(outcome) = compute_flux(
-                &enzyme,
-                reservoir,
-                energy,
-                0.01,
-                env,
-            ) else {
+            let Some(outcome) = compute_flux(&enzyme, reservoir, energy, 0.01, env) else {
                 continue;
             };
 
@@ -670,14 +795,7 @@ mod tests {
         enzyme.enval_throughput = 0.0;
         enzyme.enval_sigma = 1000.0;
         let reservoir = ElementAmounts::new([0.0, 100.0, 0.0, 0.0, 0.0, 0.0]);
-        let rich = compute_flux(
-            &enzyme,
-            reservoir,
-            100.0,
-            0.01,
-            environment(0.25),
-        )
-        .unwrap();
+        let rich = compute_flux(&enzyme, reservoir, 100.0, 0.01, environment(0.25)).unwrap();
         let extent = f64::from(rich.executed_extent);
         assert!((rich.pump_cost - 0.5 * extent).abs() <= 1.0e-7 * rich.pump_cost);
         assert!((rich.energy_delta + rich.pump_cost).abs() <= 1.0e-12);
@@ -685,27 +803,11 @@ mod tests {
             (f64::from(rich.enval_output.abs()) - 0.5 * extent).abs() <= 1.0e-6,
             "pumped enval must match the paid amount"
         );
-        let poor = compute_flux(
-            &enzyme,
-            reservoir,
-            0.01,
-            0.01,
-            environment(0.25),
-        )
-        .unwrap();
+        let poor = compute_flux(&enzyme, reservoir, 0.01, 0.01, environment(0.25)).unwrap();
         assert!(poor.executed_extent < poor.requested_extent);
         assert!(poor.pump_cost <= 0.01 + 1.0e-12);
         assert!(0.01 + poor.energy_delta >= -1.0e-12);
-        assert!(
-            compute_flux(
-                &enzyme,
-                reservoir,
-                0.0,
-                0.01,
-                environment(0.25),
-            )
-            .is_none()
-        );
+        assert!(compute_flux(&enzyme, reservoir, 0.0, 0.01, environment(0.25),).is_none());
     }
 
     #[test]
@@ -723,14 +825,7 @@ mod tests {
         enzyme.enval_release_fraction = 0.0;
         enzyme.enval_sigma = 1000.0;
         let reservoir = ElementAmounts::new([0.0, 100.0, 0.0, 0.0, 0.0, 0.0]);
-        let outcome = compute_flux(
-            &enzyme,
-            reservoir,
-            0.0,
-            0.01,
-            environment(5.0),
-        )
-        .unwrap();
+        let outcome = compute_flux(&enzyme, reservoir, 0.0, 0.01, environment(5.0)).unwrap();
         assert!(outcome.pump_cost > 0.0);
         assert!(outcome.enval_energy > outcome.pump_cost);
         assert!(outcome.energy_delta > 0.0);

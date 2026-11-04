@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::fingerprint::Fingerprint;
+
 const UINT32_RANGE: f64 = 4_294_967_296.0;
 const MAX_F32_BELOW_ONE: f32 = f32::from_bits(0x3f7f_ffff);
 
@@ -47,7 +49,7 @@ impl Rng {
     }
 
     pub fn chance(&mut self, probability: f32) -> bool {
-        if !(probability > 0.0) {
+        if probability.is_nan() || probability <= 0.0 {
             return false;
         }
         if probability >= 1.0 {
@@ -58,10 +60,6 @@ impl Rng {
 
     pub fn range(&mut self, min: f32, max: f32) -> f32 {
         min + (max - min) * self.next_f32()
-    }
-
-    pub fn range_f64(&mut self, min: f64, max: f64) -> f64 {
-        min + (max - min) * self.next_f64()
     }
 
     pub fn usize(&mut self, upper: usize) -> usize {
@@ -98,14 +96,18 @@ impl Rng {
         center + magnitude * theta.cos() * sigma
     }
 
-    pub fn shuffle_in_place<T>(&mut self, values: &mut [T]) {
-        if values.len() < 2 {
-            return;
+    pub(crate) fn hash_state(&self, fingerprint: &mut Fingerprint) {
+        let Self {
+            a,
+            b,
+            c,
+            d,
+            gaussian_spare,
+        } = self;
+        for word in [a, b, c, d] {
+            fingerprint.u32(*word);
         }
-        for i in (1..values.len()).rev() {
-            let j = self.usize(i + 1);
-            values.swap(i, j);
-        }
+        fingerprint.optional_f64(*gaussian_spare);
     }
 }
 

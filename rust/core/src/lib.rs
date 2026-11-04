@@ -3,6 +3,7 @@ pub mod cell;
 pub mod chem;
 pub mod config;
 pub mod environment;
+mod fingerprint;
 pub mod genome;
 pub mod interaction;
 pub mod render_buffers;
@@ -27,27 +28,26 @@ pub use genome::{
     GENOME_PATCH_SCHEMA, Genome, GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId,
     MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
+pub use interaction::Contact;
 pub use render_buffers::{RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState};
 pub use rng::Rng;
 pub use snapshot::{
     SNAPSHOT_EXTENSION, SNAPSHOT_VERSION, SnapshotError, load_from_path, save_to_path,
 };
 pub use spatial::{
-    BilinearSample, BilinearStencil, REFERENCE_CELL_AREA, REFERENCE_CELL_RADIUS, Position, SpatialIndex,
-    minimum_image_delta, minimum_image_displacement, toroidal_distance, toroidal_distance_squared,
-    wrap_coordinate,
+    BilinearSample, BilinearStencil, Position, REFERENCE_CELL_AREA, REFERENCE_CELL_RADIUS,
+    SpatialIndex, minimum_image_delta, minimum_image_displacement, toroidal_distance,
+    toroidal_distance_squared, wrap_coordinate,
 };
 pub use stats::{
-    ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger, InteractionCounters,
-    MIXED_POLARITY_THRESHOLD, OperationCounters, ReactionCounters, StepProfile, WorldStats,
-    renewable_coverage,
+    ENZYME_COUNT_HISTOGRAM_LEN, EXPOSED_CELL_THRESHOLD, EnergyLedger, EnvalLedger,
+    InteractionCounters, MIXED_POLARITY_THRESHOLD, OperationCounters, ReactionCounters,
+    StepProfile, WorldStats, renewable_coverage,
 };
-pub use interaction::Contact;
 pub use world::{
-    CellDetailInspection, CellInspection, ContactInspection, EnzymeDetailInspection, FluxLogInspection,
-    GenomeDetailInspection, GenomeEditResult, InvariantError, LineageCounters,
-    LineageListInspection, LineageSummaryInspection, NeighborIndices, TileId, TileInspection,
-    World, WorldError,
+    CellDetailInspection, CellInspection, ContactInspection, EnzymeDetailInspection,
+    FluxLogInspection, GenomeDetailInspection, GenomeEditResult, InvariantError, LineageCounters,
+    LineageListInspection, LineageSummaryInspection, TileId, TileInspection, World, WorldError,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
