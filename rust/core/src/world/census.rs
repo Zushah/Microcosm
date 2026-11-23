@@ -329,13 +329,6 @@ impl World {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn build_render_buffers(&self) -> RenderBuffers {
-        let mut buffers = RenderBuffers::default();
-        self.write_render_buffers(&mut buffers);
-        buffers
-    }
-
     pub fn write_render_buffers(&self, buffers: &mut RenderBuffers) {
         self.write_render_buffers_with_visual(buffers, &RenderVisualState::default());
     }
@@ -385,8 +378,7 @@ impl World {
             .tile_cell_count
             .extend_from_slice(&self.tile_cell_counts);
 
-        for tile_index in 0..self.tile_count {
-            let amounts = self.element_fields[tile_index];
+        for amounts in &self.element_fields[..self.tile_count] {
             buffers.tile_mass_density.push(amounts.mass() as f32);
             buffers.tile_total_elements.push(amounts.total() as f32);
             buffers

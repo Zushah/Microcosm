@@ -456,14 +456,6 @@ impl World {
         );
     }
 
-    #[cfg(test)]
-    pub(super) fn transport_elements(&mut self, slot: usize, position: Position) -> (f64, f64) {
-        let Some(stencil) = self.tile_stencil(position) else {
-            return (0.0, 0.0);
-        };
-        self.transport_elements_with(slot, &stencil)
-    }
-
     pub(super) fn transport_elements_with(
         &mut self,
         slot: usize,

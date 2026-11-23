@@ -1,12 +1,29 @@
+[package]
+name = "microcosm-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+autolib = false
+autobins = false
+autoexamples = false
+autobenches = false
+
+[dev-dependencies]
+microcosm-core = { path = "core" }
+microcosm-wasm = { path = "wasm" }
+serde_json = "1"
+
 [workspace]
 members = ["core", "cli", "wasm"]
+default-members = [".", "core", "cli", "wasm"]
 resolver = "2"
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 license = "MPL-2.0"
 publish = false
 
 [workspace.metadata]
-development-rust-version = "1.97.1"
+development-rust-version = "1.100.0"

@@ -29,8 +29,6 @@ mod fields;
 mod inspect;
 mod invariants;
 mod mechanics;
-#[cfg(test)]
-mod tests;
 
 use mechanics::{BinnedCell, CompactCell};
 
@@ -361,8 +359,7 @@ impl World {
         self.total_live_cell_energy() - self.energy_ledger.expected_cell_energy()
     }
 
-    #[cfg(test)]
-    pub(crate) fn enval_ledger_residual(&self) -> f64 {
+    pub fn enval_ledger_residual(&self) -> f64 {
         let field_total = self
             .enval
             .iter()
@@ -413,6 +410,10 @@ impl World {
         self.cells.get(cell_id)
     }
 
+    pub fn cells(&self) -> impl Iterator<Item = &Cell> + '_ {
+        self.cells.iter()
+    }
+
     pub fn pick_cell(&self, position: Position) -> Option<CellId> {
         let position = position.wrapped(self.width as f32, self.height as f32)?;
         let mut nearest: Option<(CellId, f32)> = None;
@@ -458,21 +459,6 @@ impl World {
         let genome = Genome::random_founder(&mut self.rng, self.avg_enval);
         self.spawn_cell_with_genome_at_position(position, genome)
             .map(Some)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spawn_cell_with_genome_at(
-        &mut self,
-        tile_id: TileId,
-        genome: Genome,
-    ) -> Result<CellId, WorldError> {
-        if tile_id.index() >= self.tile_count {
-            return Err(WorldError::InvalidTile(tile_id));
-        }
-        let (x, y) = self
-            .tile_xy(tile_id)
-            .ok_or(WorldError::InvalidTile(tile_id))?;
-        self.spawn_cell_with_genome_at_position(Position::new(x as f32, y as f32), genome)
     }
 
     pub fn spawn_cell_with_genome_at_position(
@@ -703,11 +689,6 @@ impl World {
 
     fn index_xy(&self, x: usize, y: usize) -> usize {
         x * self.height + y
-    }
-
-    #[cfg(test)]
-    fn add_unledgered_energy(&mut self, cell_id: CellId, delta: f64) {
-        self.cells[cell_id].energy += delta;
     }
 
     fn random_non_overlapping_position(&mut self, max_attempts: usize) -> Option<Position> {

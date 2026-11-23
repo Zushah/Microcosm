@@ -1,9 +1,3 @@
-//! A stable 64-bit digest of the simulation state, used to prove that refactors
-//! and optimizations leave a trajectory bit-identical. Integers are hashed as
-//! little-endian `u64`s and floats by their bit patterns, so the digest does not
-//! depend on the platform or on how structs are laid out in memory. Structs are
-//! destructured exhaustively so a new field cannot be left out by accident.
-
 use crate::cell::Cell;
 use crate::chem::ElementAmounts;
 use crate::config::{
@@ -357,33 +351,5 @@ impl Fingerprint {
         ] {
             self.f64(*value);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Fingerprint;
-
-    #[test]
-    fn fnv1a_matches_the_published_test_vectors() {
-        let digest = |bytes: &[u8]| {
-            let mut fingerprint = Fingerprint::new();
-            fingerprint.write(bytes);
-            fingerprint.finish()
-        };
-        assert_eq!(digest(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(digest(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(digest(b"foobar"), 0x8594_4171_f739_67e8);
-    }
-
-    #[test]
-    fn floats_hash_by_bit_pattern() {
-        let digest = |value: f32| {
-            let mut fingerprint = Fingerprint::new();
-            fingerprint.f32(value);
-            fingerprint.finish()
-        };
-        assert_ne!(digest(0.0), digest(-0.0));
-        assert_eq!(digest(1.5), digest(1.5));
     }
 }

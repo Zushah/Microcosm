@@ -8,6 +8,8 @@ license.workspace = true
 name = "microcosmwasm"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
+test = false
+doctest = false
 
 [dependencies]
 microcosm-core = { path = "../core" }

@@ -21,31 +21,6 @@ impl World {
         self.element_fields.get(tile_id.index()).copied()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_tile_element_amounts(
-        &mut self,
-        tile_id: TileId,
-        amounts: ElementAmounts,
-    ) -> Result<(), WorldError> {
-        if tile_id.index() >= self.tile_count {
-            return Err(WorldError::InvalidTile(tile_id));
-        }
-        amounts.validate_nonnegative("tile_element_amounts")?;
-        self.element_fields[tile_id.index()] = amounts;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn element_field_totals(&self) -> [f64; ELEMENT_COUNT] {
-        let mut totals = [0.0_f64; ELEMENT_COUNT];
-        for amounts in &self.element_fields {
-            for element in ELEMENT_ORDER {
-                totals[element.index()] += f64::from(amounts[element]);
-            }
-        }
-        totals
-    }
-
     pub fn set_tile_enval(&mut self, tile_id: TileId, value: f32) -> Result<(), WorldError> {
         if tile_id.index() >= self.tile_count {
             return Err(WorldError::InvalidTile(tile_id));
@@ -98,34 +73,6 @@ impl World {
         let applied = f64::from(value) - f64::from(old);
         self.enval_sum += applied;
         Ok(applied)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_all_enval(&mut self, value: f32) -> Result<(), WorldError> {
-        if !value.is_finite() {
-            return Err(WorldError::NonFiniteEnvalInput(value));
-        }
-        let before = self
-            .enval
-            .iter()
-            .map(|value| f64::from(*value))
-            .sum::<f64>();
-        self.enval.fill(value);
-        self.enval_sum = f64::from(value) * self.tile_count as f64;
-        self.avg_enval = (self.enval_sum / self.tile_count as f64) as f32;
-        self.enval_ledger.edits += self.enval_sum - before;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn sample_enval_at(&self, position: Position) -> Option<f32> {
-        let stencil = BilinearStencil::new(position, self.width, self.height)?;
-        let mut value = 0.0_f64;
-        for sample in stencil.samples {
-            value +=
-                f64::from(self.enval[self.index_xy(sample.x, sample.y)]) * f64::from(sample.weight);
-        }
-        Some(value as f32)
     }
 
     pub fn sample_element_fields_at(&self, position: Position) -> Option<ElementAmounts> {
@@ -198,23 +145,6 @@ impl World {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn adjust_enval_at(
-        &mut self,
-        position: Position,
-        delta: f32,
-    ) -> Result<f64, WorldError> {
-        if !delta.is_finite() || delta == 0.0 {
-            return Ok(0.0);
-        }
-        let stencil = self
-            .tile_stencil(position)
-            .ok_or(WorldError::NonFiniteEnvalInput(delta))?;
-        let applied = self.adjust_enval_with(&stencil, delta);
-        self.refresh_average_enval();
-        applied
-    }
-
     pub(super) fn refresh_average_enval(&mut self) {
         self.avg_enval = (self.enval_sum / self.tile_count as f64) as f32;
     }
@@ -272,52 +202,6 @@ impl World {
             return 0.0;
         }
         1.0 - (-rate * self.config.dt_seconds).exp()
-    }
-
-    #[cfg(test)]
-    pub(super) fn apply_recharge(&mut self) -> bool {
-        let recharge_rate = f64::from(self.config.enval_recharge.rate_per_second);
-        if recharge_rate <= 0.0 {
-            return false;
-        }
-        let outcome = environment::recharge(
-            &mut self.enval,
-            &mut self.element_fields,
-            recharge_rate,
-            self.config.dt_seconds,
-        );
-        self.enval_ledger.recharge += outcome.enval_delta;
-        self.enval_ledger.recharge_amount += outcome.amount;
-        self.enval_ledger.recharge_energy += outcome.energy;
-        true
-    }
-
-    #[cfg(test)]
-    pub(super) fn relax_enval_landscape(&mut self) -> bool {
-        let kappa = self.landscape_kappa();
-        if kappa <= 0.0 {
-            return false;
-        }
-        self.enval_ledger.source_inflow +=
-            environment::relax_enval(&mut self.enval, &self.enval_landscape, kappa);
-        true
-    }
-
-    #[cfg(test)]
-    pub(super) fn refresh_enval_sum(&mut self) {
-        let sum = self
-            .enval
-            .iter()
-            .map(|value| f64::from(*value))
-            .sum::<f64>();
-        self.enval_sum = sum;
-        self.avg_enval = (sum / self.tile_count as f64) as f32;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn diffuse_enval(&mut self) {
-        self.diffuse_enval_field();
-        self.refresh_enval_sum();
     }
 
     pub(super) fn diffuse_enval_field(&mut self) {

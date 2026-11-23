@@ -215,11 +215,8 @@ fn print_inspect_summary(world: &World, stats: &WorldStats) {
         world.config().dt_seconds,
     );
     println!("enzyme_histogram:");
-    for count in 1..stats.enzyme_count_histogram.len() {
-        println!(
-            "  enzymes={} cells={}",
-            count, stats.enzyme_count_histogram[count]
-        );
+    for (count, cells) in stats.enzyme_count_histogram.iter().enumerate().skip(1) {
+        println!("  enzymes={count} cells={cells}");
     }
     println!("lineages_top:");
     for (lineage, counters) in world.top_lineages(10) {

@@ -206,35 +206,3 @@ impl fmt::Display for ElementAmountsError {
 }
 
 impl Error for ElementAmountsError {}
-
-#[cfg(test)]
-mod tests {
-    use super::{Element, ElementAmounts};
-
-    fn approx_eq(a: f32, b: f32) {
-        assert!((a - b).abs() <= 1.0e-6, "{a} != {b}");
-    }
-
-    #[test]
-    fn continuous_element_amounts_are_indexed_and_accumulated_in_element_order() {
-        let mut amounts = ElementAmounts::new([1.0, 0.65, 0.5, 0.12, 0.08, 0.05]);
-        approx_eq(amounts[Element::C], 0.5);
-        amounts[Element::C] = 0.75;
-        approx_eq(amounts.get(Element::C), 0.75);
-        assert!((amounts.total() - 2.65).abs() <= 1.0e-6);
-        assert!((amounts.mass() - 3.16).abs() <= 1.0e-6);
-        assert!((amounts.intrinsic_energy() - 2.535).abs() <= 1.0e-6);
-        amounts.validate_nonnegative("amounts").unwrap();
-    }
-
-    #[test]
-    fn continuous_element_amounts_reject_negative_and_nonfinite_values() {
-        let negative = ElementAmounts::new([0.0, 0.0, -0.01, 0.0, 0.0, 0.0]);
-        let error = negative.validate_nonnegative("amounts").unwrap_err();
-        assert_eq!(error.element, Element::C);
-
-        let nonfinite = ElementAmounts::new([0.0, 0.0, 0.0, f32::INFINITY, 0.0, 0.0]);
-        let error = nonfinite.validate_nonnegative("amounts").unwrap_err();
-        assert_eq!(error.element, Element::D);
-    }
-}

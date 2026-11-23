@@ -1,8 +1,3 @@
-//! The one table of world statistics. Each row names a stat, says how to read it,
-//! and states where it appears: rows with a CSV format are columns in table order,
-//! rows with a JSON path are keys of the JSON record, and the text lines below are
-//! templates that refer to rows by name. Adding a stat means adding one row.
-
 use microcosmcore::WorldStats;
 use serde_json::{Map, Value as Json};
 
@@ -398,26 +393,4 @@ pub fn render_text(template: &str, stats: &WorldStats, interval: &StatsInterval)
     }
     line.push_str(rest);
     line
-}
-
-#[cfg(test)]
-pub fn template_placeholders(template: &str) -> Vec<(&str, &str)> {
-    template
-        .split('{')
-        .skip(1)
-        .map(|part| {
-            let inner = &part[..part.find('}').expect("closed placeholder")];
-            inner.split_once(':').unwrap_or((inner, ""))
-        })
-        .collect()
-}
-
-#[cfg(test)]
-pub fn format_is_valid(spec: &str) -> bool {
-    parse_format(spec).is_some()
-}
-
-#[cfg(test)]
-pub fn has_field(name: &str) -> bool {
-    field_named(name).is_some()
 }

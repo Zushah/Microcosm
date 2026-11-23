@@ -3,8 +3,6 @@ mod bench;
 mod output;
 mod run;
 mod stats_table;
-#[cfg(test)]
-mod tests;
 mod viability;
 
 use std::env;

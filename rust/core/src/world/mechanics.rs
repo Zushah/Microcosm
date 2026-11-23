@@ -432,15 +432,6 @@ impl World {
         self.contact_loose_threshold = threshold;
     }
 
-    #[cfg(test)]
-    pub(super) fn sync_spatial_index(&mut self) {
-        if !self.spatial_sync_pending {
-            return;
-        }
-        self.refresh_compact_cells();
-        self.sync_spatial_index_from_compact();
-    }
-
     fn sync_spatial_index_from_compact(&mut self) {
         if !self.spatial_sync_pending {
             return;
@@ -454,12 +445,6 @@ impl World {
         self.spatial_index
             .write_bucket_counts(&mut self.tile_cell_counts);
         self.spatial_sync_pending = false;
-    }
-
-    #[cfg(test)]
-    pub(super) fn drift_cells(&mut self) {
-        self.drift_cells_unsynced();
-        self.sync_spatial_index();
     }
 
     pub(super) fn drift_cells_unsynced(&mut self) {
