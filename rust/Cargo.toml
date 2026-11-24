@@ -27,3 +27,9 @@ publish = false
 
 [workspace.metadata]
 development-rust-version = "1.100.0"
+
+[profile.wasm]
+inherits = "release"
+strip = true
+lto = "fat"
+codegen-units = 1

@@ -3,7 +3,8 @@
 All committed changes to the [`Zushah/Microcosm`](https://github.com/Zushah/Microcosm) code repository are recorded here.
 
 ## 18. [`v0.14.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-11-23&until=2026-11-24) 2026-11-24
-- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Recreate logo
+- [`current`](https://github.com/Zushah/Microcosm/commit/HEAD) Add scripts for building and testing
+- [`f15efb7`](https://github.com/Zushah/Microcosm/commit/f15efb7) Recreate logo
 - [`c06c684`](https://github.com/Zushah/Microcosm/commit/c06c684) Bump Rust from v1.97.1 to v1.100.0
 
 ## 17. [`v0.13.0`](https://github.com/Zushah/Microcosm/commits/main/?since=2026-09-15&until=2026-11-04) 2026-11-04

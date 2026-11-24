@@ -40,25 +40,17 @@ jobs:
         uses: actions/checkout@v7
 
       -
-        name: Setup
+        name: Setup Rust
         run: |
           rustup toolchain install
           rustup target add wasm32-unknown-unknown
 
       -
-        name: Build
-        run: |
-          cargo build --manifest-path rust/Cargo.toml --all-targets
-          cargo build --manifest-path rust/Cargo.toml --target wasm32-unknown-unknown
-
-      -
-        name: Format
-        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
-
-      -
-        name: Clippify
-        run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+        name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
 
       -
         name: Test
-        run: cargo test --manifest-path rust/Cargo.toml -- --test-threads=1
+        run: python scripts/test.py

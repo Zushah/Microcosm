@@ -1,4 +1,3 @@
-rust/Cargo.lock
 rust/target/
 rust/out/
 *.log
