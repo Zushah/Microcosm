@@ -1,8 +1,11 @@
 mod args;
 mod bench;
+mod census;
 mod output;
 mod run;
+mod seeds;
 mod stats_table;
+mod table;
 mod viability;
 
 use std::env;
@@ -16,6 +19,7 @@ fn main() -> ExitCode {
         Ok(Some(Command::Bench(options))) => bench::bench_command(options),
         Ok(Some(Command::Inspect(options))) => run::inspect_command(options),
         Ok(Some(Command::Viability(options))) => viability::viability_command(options),
+        Ok(Some(Command::Census(options))) => census::census_command(options),
         Ok(None) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");

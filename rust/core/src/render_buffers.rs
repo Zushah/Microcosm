@@ -103,6 +103,7 @@ pub struct RenderBuffers {
     pub cell_lineage: Vec<u32>,
     pub cell_flags: Vec<u32>,
     pub cell_enzyme_count: Vec<u32>,
+    pub cell_generation: Vec<u32>,
     pub cell_age_seconds: Vec<f32>,
 }
 
@@ -137,6 +138,7 @@ impl RenderBuffers {
         self.cell_lineage.clear();
         self.cell_flags.clear();
         self.cell_enzyme_count.clear();
+        self.cell_generation.clear();
         self.cell_age_seconds.clear();
     }
 

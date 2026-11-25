@@ -167,3 +167,35 @@ fn invariants_hold_every_tick() {
         assert!(world.reaction_counters().successes > 0);
     }
 }
+
+#[test]
+fn fission_increments_generation_of_both_daughters() {
+    let mut world = founded_world("generation", 32, 32, 6);
+    assert!(world.cells().all(|cell| cell.generation == 0));
+    let mut fission_tick = None;
+    for tick in 1..=3_000 {
+        let deaths_before = world.compact_stats().deaths;
+        world.step();
+        let stats = world.compact_stats();
+        if stats.fissions > 0 {
+            assert_eq!(stats.fissions, 1, "two divisions in tick {tick}");
+            fission_tick = Some((tick, stats.deaths == deaths_before));
+            break;
+        }
+    }
+    let (tick, no_deaths) = fission_tick.expect("no division within 3,000 ticks");
+    let generations = world
+        .cells()
+        .map(|cell| cell.generation)
+        .collect::<Vec<_>>();
+    let daughters = generations.iter().filter(|g| **g == 1).count();
+    assert!(
+        generations.iter().all(|g| *g <= 1),
+        "tick {tick}: {generations:?}"
+    );
+    if no_deaths {
+        assert_eq!(daughters, 2, "tick {tick}: {generations:?}");
+    } else {
+        assert!((1..=2).contains(&daughters), "tick {tick}: {generations:?}");
+    }
+}

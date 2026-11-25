@@ -3,8 +3,8 @@ mod common;
 use common::*;
 use microcosmcore::snapshot::{self, SnapshotError};
 use microcosmcore::{
-    Config, ElementAmounts, Position, RenderBuffers, SNAPSHOT_VERSION, TileId, World,
-    load_from_path, save_to_path,
+    Config, ELEMENT_ORDER, ENZYME_GENE_NAMES, Element, ElementAmounts, Enzyme, GENOME_GENE_NAMES,
+    Position, RenderBuffers, SNAPSHOT_VERSION, TileId, World, load_from_path, save_to_path,
 };
 
 const GOLDEN_FINGERPRINT: &str = "893a85bdd472ea31";
@@ -330,4 +330,240 @@ fn config_validation_rejects_impossible_worlds() {
         assert!(config.validate().is_err(), "{name} was accepted");
         assert!(World::new(config).is_err(), "{name} made a world");
     }
+}
+
+fn dominant(amounts: &ElementAmounts) -> Option<Element> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, value) in amounts.as_array().iter().enumerate() {
+        if *value > 0.0 && best.is_none_or(|(_, best)| *value > best) {
+            best = Some((index, *value));
+        }
+    }
+    best.map(|(index, _)| ELEMENT_ORDER[index])
+}
+
+#[test]
+fn founder_census_matches_founder_design() {
+    let world = founded_world("census-founders", 64, 48, 12);
+    let founders = world.cell_count();
+    assert_eq!(founders, 12);
+    let census = world.census();
+    assert_eq!(census.tick, 0);
+    assert_eq!(census.live_cells, founders);
+
+    let genomes = world.cells().map(|cell| &cell.genome).collect::<Vec<_>>();
+    for (gene, spread) in census.enzyme_genes.iter().enumerate() {
+        let values = genomes
+            .iter()
+            .flat_map(|genome| genome.enzymes.iter())
+            .map(|enzyme| f64::from(enzyme.gene_values()[gene]))
+            .collect::<Vec<_>>();
+        let spread = spread.spread.as_ref().expect("founders have enzymes");
+        assert_eq!(
+            spread.min,
+            values.iter().copied().fold(f64::INFINITY, f64::min)
+        );
+        assert_eq!(
+            spread.max,
+            values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        );
+    }
+    let design = &genomes[0].enzymes;
+    for (index, gene) in ENZYME_GENE_NAMES.iter().enumerate() {
+        if *gene == "enval_optimum" {
+            continue;
+        }
+        let spread = census.enzyme_genes[index].spread.as_ref().unwrap();
+        let design_values = design
+            .iter()
+            .map(|enzyme| f64::from(enzyme.gene_values()[index]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spread.min,
+            design_values.iter().copied().fold(f64::INFINITY, f64::min),
+            "{gene}"
+        );
+        assert_eq!(
+            spread.max,
+            design_values
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max),
+            "{gene}"
+        );
+    }
+
+    let mut expected = std::collections::BTreeMap::new();
+    for genome in &genomes {
+        for enzyme in &genome.enzymes {
+            assert!(enzyme.enval_throughput > 0.0);
+            let coupling = enzyme.enval_optimum.signum() as i8;
+            let key = (
+                dominant(&enzyme.reactants).map(Element::index),
+                dominant(&enzyme.products).map(Element::index),
+                coupling,
+            );
+            let entry = expected.entry(key).or_insert((0_usize, 0_usize));
+            entry.0 += 1;
+            entry.1 += 1;
+        }
+    }
+    let mut by_design = std::collections::BTreeMap::new();
+    for kind in &census.reaction_kinds {
+        let key = (
+            kind.reactant.map(Element::index),
+            kind.product.map(Element::index),
+            kind.coupling,
+        );
+        assert_eq!(
+            expected.remove(&key),
+            Some((kind.enzymes, kind.cells)),
+            "{kind:?}"
+        );
+        *by_design.entry((key.0, key.1)).or_insert(0) += kind.enzymes;
+    }
+    assert!(expected.is_empty(), "missing kinds {expected:?}");
+    assert_eq!(by_design.len(), design.len());
+    assert!(by_design.values().all(|enzymes| *enzymes == founders));
+
+    let generation = census.generation.as_ref().unwrap();
+    assert_eq!((generation.min, generation.max), (0.0, 0.0));
+    let exposed = design.iter().any(|enzyme| enzyme.exposure > 0.0);
+    assert_eq!(
+        census.exposed_cell_fraction,
+        if exposed { 1.0 } else { 0.0 }
+    );
+}
+
+#[test]
+fn census_is_pure_observation() {
+    let mut observed = golden_world();
+    let mut unobserved = golden_world();
+    for tick in 1..=1_000 {
+        observed.step();
+        unobserved.step();
+        if tick % 100 == 0 {
+            let _ = observed.census();
+        }
+    }
+    assert_eq!(observed.state_fingerprint(), unobserved.state_fingerprint());
+}
+
+#[test]
+fn census_agrees_with_compact_stats() {
+    let mut world = founded_world("census-stats", 64, 48, 8);
+    world.step_many(400);
+    let census = world.census();
+    let stats = world.compact_stats();
+    assert_eq!(census.live_cells, stats.live_cell_count);
+    assert_eq!(census.births, stats.births);
+    assert_eq!(census.deaths, stats.deaths);
+    assert_eq!(census.fissions, stats.fissions);
+    assert_eq!(census.extant_lineages, stats.extant_lineage_count);
+    for (mean, total) in census
+        .field_mean_per_tile
+        .iter()
+        .zip(stats.extracellular_element_amounts)
+    {
+        let from_census = mean * world.tile_count() as f64;
+        assert!((from_census - total).abs() <= 1.0e-9 * total.abs().max(1.0));
+    }
+    assert_eq!(census.in_cells, stats.intracellular_element_amounts);
+    assert_eq!(census.energy_ledger, stats.energy_ledger);
+    assert_eq!(census.enval_ledger, stats.enval_ledger);
+    assert_eq!(census.energy_residual, stats.energy_ledger_residual);
+    assert_eq!(census.total_matter, world.total_matter());
+    assert_eq!(census.matter_drift, world.matter_drift());
+}
+
+#[test]
+fn census_is_deterministic() {
+    let mut first = founded_world("census-determinism", 48, 36, 8);
+    let mut second = founded_world("census-determinism", 48, 36, 8);
+    first.step_many(600);
+    second.step_many(600);
+    assert_eq!(first.census(), second.census());
+}
+
+#[test]
+fn census_of_empty_world_has_no_spreads() {
+    let mut world = World::new(small_config("census-empty", 32, 24)).unwrap();
+    world.step_many(10);
+    let census = world.census();
+    assert_eq!(census.live_cells, 0);
+    assert!(census.generation.is_none());
+    assert!(census.enzymes_per_genome.is_none());
+    assert!(census.stoichiometric_entries_per_enzyme.is_none());
+    assert!(census.enzyme_genes.iter().all(|gene| gene.spread.is_none()));
+    assert!(census.genome_genes.iter().all(|gene| gene.spread.is_none()));
+    assert!(census.reaction_kinds.is_empty());
+    assert_eq!(census.zero_exposure_enzyme_fraction, 0.0);
+    assert_eq!(census.exposed_cell_fraction, 0.0);
+    fn null_paths(value: &serde_json::Value, path: String, found: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Null => found.push(path),
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    null_paths(item, format!("{path}[{index}]"), found);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    null_paths(item, format!("{path}.{key}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let value = serde_json::to_value(&census).unwrap();
+    let mut nulls = Vec::new();
+    null_paths(&value, String::new(), &mut nulls);
+    nulls.retain(|path| {
+        ![
+            ".generation",
+            ".enzymes_per_genome",
+            ".stoichiometric_entries_per_enzyme",
+        ]
+        .contains(&path.as_str())
+            && !(path.starts_with(".enzyme_genes[") || path.starts_with(".genome_genes["))
+    });
+    assert!(nulls.is_empty(), "unexpected nulls at {nulls:?}");
+    assert!(!serde_json::to_string(&census).unwrap().contains("NaN"));
+}
+
+#[test]
+fn gene_tables_are_consistent() {
+    let enzyme = Enzyme::founder_downhill();
+    assert_eq!(ENZYME_GENE_NAMES.len(), enzyme.gene_values().len());
+    let unique = ENZYME_GENE_NAMES
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), ENZYME_GENE_NAMES.len());
+    let genome = founder_genome("gene-tables");
+    assert_eq!(GENOME_GENE_NAMES.len(), genome.gene_values().len());
+    let unique = GENOME_GENE_NAMES
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), GENOME_GENE_NAMES.len());
+    assert_eq!(
+        genome.gene_values(),
+        [
+            f64::from(genome.mutation_rate),
+            genome.maintenance_cost_per_area
+        ]
+    );
+    let values = enzyme.gene_values();
+    let named = |name: &str| {
+        values[ENZYME_GENE_NAMES
+            .iter()
+            .position(|gene| *gene == name)
+            .unwrap()]
+    };
+    assert_eq!(named("rate"), enzyme.rate);
+    assert_eq!(
+        named("energy_harvest_fraction"),
+        enzyme.energy_harvest_fraction
+    );
+    assert_eq!(named("enval_sigma"), enzyme.enval_sigma);
+    assert_eq!(named("exposure"), enzyme.exposure);
 }

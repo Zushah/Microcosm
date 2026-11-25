@@ -557,6 +557,7 @@ impl World {
         let axis = Position::new(angle.cos(), angle.sin());
         let old_position = parent.position;
         let lineage = parent.lineage_id;
+        let generation = parent.generation.saturating_add(1);
         let genome = parent.genome.mutate(&mut self.rng);
         let child_energy = parent.energy * fraction;
         let mut body = ElementAmounts::ZERO;
@@ -572,6 +573,7 @@ impl World {
             parent.internal_elements[element] -= free[element];
         }
         parent.energy -= child_energy;
+        parent.generation = generation;
         parent.refresh_radius(self.config.cell_body.body_density);
         let parent_radius = parent.radius;
         let mut child = Cell::new(
@@ -584,6 +586,7 @@ impl World {
             self.config.cell_body.body_density,
         );
         child.internal_elements = free;
+        child.generation = generation;
         let parent_position = Position::new(
             old_position.x - axis.x * child.radius,
             old_position.y - axis.y * child.radius,

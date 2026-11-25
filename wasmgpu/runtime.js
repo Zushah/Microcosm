@@ -41,6 +41,7 @@ const CELL_VIEW_DEFINITIONS = Object.freeze([
     { key: "cellLineage", ptr: "microcosm_cell_lineage_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_lineage" },
     { key: "cellFlags", ptr: "microcosm_cell_flags_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_flags" },
     { key: "cellEnzymeCount", ptr: "microcosm_cell_enzyme_count_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_enzyme_count" },
+    { key: "cellGeneration", ptr: "microcosm_cell_generation_ptr", length: "microcosm_cell_count", dtype: "u32", name: "microcosm.cell_generation" },
     { key: "cellAgeSeconds", ptr: "microcosm_cell_age_seconds_ptr", length: "microcosm_cell_count", dtype: "f32", name: "microcosm.cell_age_seconds" }
 ]);
 

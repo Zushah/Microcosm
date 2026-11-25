@@ -7,6 +7,21 @@ use crate::cell::CellId;
 use crate::chem::{ELEMENT_ORDER, Element};
 use crate::genome::{LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES};
 
+pub const MATTER_CONSERVATION_TOLERANCE: f64 = 1.0e-3;
+
+pub fn check_matter_conservation(initial: f64, current: f64) -> Result<(), InvariantError> {
+    let relative_drift = (current - initial).abs() / initial.abs().max(1.0);
+    if current.is_finite() && relative_drift <= MATTER_CONSERVATION_TOLERANCE {
+        Ok(())
+    } else {
+        Err(InvariantError::MatterNotConserved {
+            initial,
+            current,
+            relative_drift,
+        })
+    }
+}
+
 impl World {
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
         if self.enval.len() != self.tile_count
@@ -151,6 +166,8 @@ impl World {
             });
         }
 
+        check_matter_conservation(self.initial_matter, self.total_matter())?;
+
         Ok(())
     }
 }
@@ -195,6 +212,11 @@ pub enum InvariantError {
         expected: f64,
         actual: f64,
         tolerance: f64,
+    },
+    MatterNotConserved {
+        initial: f64,
+        current: f64,
+        relative_drift: f64,
     },
 }
 
@@ -281,6 +303,14 @@ impl fmt::Display for InvariantError {
                 f,
                 "live cell energy {actual} does not match the energy ledger balance {expected} (residual {}, tolerance {tolerance})",
                 actual - expected
+            ),
+            Self::MatterNotConserved {
+                initial,
+                current,
+                relative_drift,
+            } => write!(
+                f,
+                "matter not conserved: initial {initial}, current {current}, relative drift {relative_drift:.3e} exceeds {MATTER_CONSERVATION_TOLERANCE:.0e}"
             ),
         }
     }

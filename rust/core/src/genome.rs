@@ -52,7 +52,43 @@ pub struct Enzyme {
     pub exposure: f32,
 }
 
+pub const ENZYME_GENE_NAMES: [&str; 13] = [
+    "rate",
+    "half_saturation",
+    "energy_harvest_fraction",
+    "secretion_fraction",
+    "body_fraction",
+    "boundary_fraction",
+    "enval_optimum",
+    "enval_sigma",
+    "enval_throughput",
+    "enval_energy_fraction",
+    "enval_release_fraction",
+    "enval_pump",
+    "exposure",
+];
+
+pub const GENOME_GENE_NAMES: [&str; 2] = ["mutation_rate", "maintenance_cost_per_area"];
+
 impl Enzyme {
+    pub fn gene_values(&self) -> [f32; 13] {
+        [
+            self.rate,
+            self.half_saturation,
+            self.energy_harvest_fraction,
+            self.secretion_fraction,
+            self.body_fraction,
+            self.boundary_fraction,
+            self.enval_optimum,
+            self.enval_sigma,
+            self.enval_throughput,
+            self.enval_energy_fraction,
+            self.enval_release_fraction,
+            self.enval_pump,
+            self.exposure,
+        ]
+    }
+
     pub fn metabolic(
         reactants: ElementAmounts,
         products: ElementAmounts,
@@ -322,6 +358,13 @@ pub struct Genome {
 }
 
 impl Genome {
+    pub fn gene_values(&self) -> [f64; 2] {
+        [
+            f64::from(self.mutation_rate),
+            self.maintenance_cost_per_area,
+        ]
+    }
+
     pub fn random_founder(rng: &mut Rng, average_enval: f32) -> Self {
         let enval_optimum = average_enval + (rng.next_f32() - 0.5) * 0.20;
         let mut enzymes = vec![

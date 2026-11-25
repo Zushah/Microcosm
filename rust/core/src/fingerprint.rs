@@ -178,6 +178,7 @@ impl Fingerprint {
             birth_sim_time,
             maintenance_cost_per_area,
             last_digested_tick,
+            generation: _,
         } = cell;
         self.usize(id.index());
         self.f32(position.x);

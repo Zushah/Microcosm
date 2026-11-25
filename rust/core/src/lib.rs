@@ -1,5 +1,6 @@
 pub mod bio;
 pub mod cell;
+pub mod census;
 pub mod chem;
 pub mod config;
 pub mod environment;
@@ -14,6 +15,7 @@ pub mod stats;
 pub mod world;
 
 pub use cell::{CELL_FLUX_LOG_CAPACITY, Cell, CellId, CellStore, FluxRecord, ReactionSite};
+pub use census::{Census, GeneSpread, ReactionKind, Spread};
 pub use chem::{
     ELEMENT_COUNT, ELEMENT_ORDER, Element, ElementAmounts, ElementAmountsError, ElementProperties,
 };
@@ -24,9 +26,9 @@ pub use config::{
 };
 pub use environment::{ENVAL_PER_RECHARGE_ENERGY, RechargeOutcome};
 pub use genome::{
-    CatalystError, ENVAL_OPTIMUM_MUTATION_SIGMA, Enzyme, EnzymeFieldPatch, EnzymePatchOperation,
-    GENOME_PATCH_SCHEMA, Genome, GenomeFieldPatch, GenomePatch, GenomePatchError, LineageId,
-    MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
+    CatalystError, ENVAL_OPTIMUM_MUTATION_SIGMA, ENZYME_GENE_NAMES, Enzyme, EnzymeFieldPatch,
+    EnzymePatchOperation, GENOME_GENE_NAMES, GENOME_PATCH_SCHEMA, Genome, GenomeFieldPatch,
+    GenomePatch, GenomePatchError, LineageId, MAX_CELL_ENZYMES, MIN_CELL_ENZYMES,
 };
 pub use interaction::Contact;
 pub use render_buffers::{RenderBrushPreview, RenderBuffers, RenderDisplayMode, RenderVisualState};
@@ -47,7 +49,8 @@ pub use stats::{
 pub use world::{
     CellDetailInspection, CellInspection, ContactInspection, EnzymeDetailInspection,
     FluxLogInspection, GenomeDetailInspection, GenomeEditResult, InvariantError, LineageCounters,
-    LineageListInspection, LineageSummaryInspection, TileId, TileInspection, World, WorldError,
+    LineageListInspection, LineageSummaryInspection, MATTER_CONSERVATION_TOLERANCE, TileId,
+    TileInspection, World, WorldError, check_matter_conservation,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

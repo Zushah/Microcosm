@@ -33,7 +33,8 @@ const ANALYSIS_QUANTITIES = Object.freeze({
     radius: { label: "Radius", view: "cellRadius" },
     energy: { label: "Energy", view: "cellEnergy" },
     age: { label: "Age (s)", view: "cellAgeSeconds" },
-    enzymes: { label: "Enzyme count", view: "cellEnzymeCount" }
+    enzymes: { label: "Enzyme count", view: "cellEnzymeCount" },
+    generation: { label: "Generation", view: "cellGeneration" }
 });
 const ANALYSIS_SERIES = Object.freeze([
     { label: "Live cells", key: "live_cell_count", color: "#111111" },
@@ -754,6 +755,7 @@ export class MicrocosmGUI {
                 ["Strain", cell.strain],
                 ["Membrane polarity", cell.membrane_polarity],
                 ["Lineage", cell.lineage_id],
+                ["Generation", cell.generation],
                 ["Energy", cell.energy],
                 ["Age", `${displayValue(cell.age_seconds)}s`],
                 ["Mean enval optimum", cell.mean_enval_optimum],
@@ -821,6 +823,7 @@ export class MicrocosmGUI {
             ["Strain", cell.strain],
             ["Membrane polarity", cell.membrane_polarity],
             ["Lineage", cell.lineage_id],
+            ["Generation", cell.generation],
             ["Energy", cell.energy],
             ["Age", `${displayValue(cell.age_seconds)}s`],
             ["Mean enval optimum", cell.mean_enval_optimum],

@@ -226,6 +226,32 @@ impl EnvalLedger {
     pub fn net_change(&self) -> f64 {
         self.source_inflow + self.cell_uptake + self.cell_emission + self.recharge + self.edits
     }
+
+    pub fn magnitude(&self) -> f64 {
+        self.initial_total.abs()
+            + self.source_inflow.abs()
+            + self.cell_uptake.abs()
+            + self.cell_emission.abs()
+            + self.recharge.abs()
+            + self.edits.abs()
+    }
+
+    pub fn closure_tolerance(&self) -> f64 {
+        1.0e-4 * self.magnitude() + 1.0e-6
+    }
+
+    pub fn terms(&self) -> [(&'static str, f64); 8] {
+        [
+            ("initial_total", self.initial_total),
+            ("source_inflow", self.source_inflow),
+            ("cell_uptake", self.cell_uptake),
+            ("cell_emission", self.cell_emission),
+            ("recharge", self.recharge),
+            ("edits", self.edits),
+            ("recharge_amount", self.recharge_amount),
+            ("recharge_energy", self.recharge_energy),
+        ]
+    }
 }
 
 pub fn renewable_coverage(energy: &EnergyLedger, enval: &EnvalLedger) -> f64 {

@@ -1,7 +1,13 @@
 mod common;
 
 use common::*;
-use microcosmcore::{ELEMENT_COUNT, ELEMENT_ORDER, Element, Position, World};
+use microcosmcore::{
+    ELEMENT_COUNT, ELEMENT_ORDER, Element, InvariantError, MATTER_CONSERVATION_TOLERANCE, Position,
+    World, check_matter_conservation,
+};
+
+/// Founders take their material from the field in f32 arithmetic, so total matter moves by rounding only.
+const FOUNDER_MATTER_REL_TOL: f64 = 1.0e-9;
 
 #[test]
 fn matter_is_conserved_in_a_living_world() {
@@ -185,4 +191,51 @@ fn elements_cross_faster_the_closer_their_polarity_is_to_the_membrane() {
         );
     }
     assert_eq!(world.reaction_counters().successes, 0);
+}
+
+#[test]
+fn initial_matter_is_recorded_at_creation() {
+    let mut world = World::new(small_config("initial-matter", 48, 36)).unwrap();
+    let relative = |a: f64, b: f64| (a - b).abs() / a.abs().max(1.0);
+    assert!(relative(world.initial_matter(), world.total_matter()) <= 1.0e-12);
+    world.spawn_founder_cells(8).unwrap();
+    assert_eq!(world.cell_count(), 8);
+    let drift = relative(world.initial_matter(), world.total_matter());
+    assert!(
+        drift <= FOUNDER_MATTER_REL_TOL,
+        "founders moved total matter by {drift:e}"
+    );
+    let system = world.compact_stats().system_element_amounts.iter().sum();
+    assert!(relative(world.total_matter(), system) <= 1.0e-12);
+}
+
+#[test]
+fn matter_law_helper_accepts_and_rejects() {
+    assert!(check_matter_conservation(1000.0, 1000.5).is_ok());
+    assert!(matches!(
+        check_matter_conservation(1000.0, 1002.0),
+        Err(InvariantError::MatterNotConserved { .. })
+    ));
+    assert!(check_matter_conservation(0.0, 0.0005).is_ok());
+    assert!(check_matter_conservation(0.0, 0.002).is_err());
+    assert!(check_matter_conservation(1000.0, f64::NAN).is_err());
+    assert!(check_matter_conservation(1000.0, f64::INFINITY).is_err());
+    const { assert!(MATTER_CONSERVATION_TOLERANCE > MATTER_REL_TOL) };
+}
+
+#[test]
+fn matter_law_holds_over_a_living_run() {
+    let mut world = founded_world("matter-law", 64, 48, 8);
+    for tick in 1..=2_000 {
+        world.step();
+        if tick % 250 == 0 {
+            world.check_invariants().unwrap();
+        }
+    }
+    assert!(world.compact_stats().fissions > 0, "no divisions");
+    let drift = world.matter_drift();
+    assert!(
+        drift.abs() <= MATTER_REL_TOL,
+        "matter drifted by {drift:e} over 2,000 ticks"
+    );
 }

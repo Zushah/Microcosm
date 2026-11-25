@@ -29,6 +29,7 @@ mod fields;
 mod inspect;
 mod invariants;
 mod mechanics;
+mod stats;
 
 use mechanics::{BinnedCell, CompactCell};
 
@@ -37,7 +38,7 @@ pub use inspect::{
     FluxLogInspection, GenomeDetailInspection, GenomeEditResult, LineageListInspection,
     LineageSummaryInspection, TileInspection,
 };
-pub use invariants::InvariantError;
+pub use invariants::{InvariantError, MATTER_CONSERVATION_TOLERANCE, check_matter_conservation};
 
 const LOCAL_ENVAL_RADIUS: usize = 2;
 const LOCAL_ENVAL_WINDOW_DIAMETER: usize = LOCAL_ENVAL_RADIUS * 2 + 1;
@@ -164,6 +165,7 @@ pub struct World {
     cross_lineage_contact_pair_count: u64,
     energy_ledger: EnergyLedger,
     enval_ledger: EnvalLedger,
+    initial_matter: f64,
     #[serde(skip, default)]
     spatial_index: SpatialIndex,
     #[serde(skip, default)]
@@ -190,7 +192,7 @@ impl World {
         let enval = enval_landscape.clone();
         let enval_sum = enval.iter().map(|value| f64::from(*value)).sum::<f64>();
 
-        let world = Self {
+        let mut world = Self {
             width: config.width,
             height: config.height,
             tile_count,
@@ -251,11 +253,13 @@ impl World {
                 initial_total: enval_sum,
                 ..EnvalLedger::default()
             },
+            initial_matter: 0.0,
             spatial_index: SpatialIndex::new(config.width, config.height),
             max_cell_radius: 0.0,
             rng,
             config,
         };
+        world.initial_matter = world.total_matter();
         Ok(world)
     }
 
@@ -366,6 +370,36 @@ impl World {
             .map(|value| f64::from(*value))
             .sum::<f64>();
         field_total - self.enval_ledger.initial_total - self.enval_ledger.net_change()
+    }
+
+    pub fn total_matter(&self) -> f64 {
+        let mut extracellular = [0.0_f64; ELEMENT_COUNT];
+        for amounts in &self.element_fields {
+            for element in ELEMENT_ORDER {
+                extracellular[element.index()] += f64::from(amounts[element]);
+            }
+        }
+        let mut intracellular = [0.0_f64; ELEMENT_COUNT];
+        for cell in self.cells.iter() {
+            for element in ELEMENT_ORDER {
+                intracellular[element.index()] += f64::from(cell.internal_elements[element])
+                    + f64::from(cell.body[element])
+                    + f64::from(cell.boundary[element]);
+            }
+        }
+        extracellular
+            .iter()
+            .zip(&intracellular)
+            .map(|(outside, inside)| outside + inside)
+            .sum()
+    }
+
+    pub fn initial_matter(&self) -> f64 {
+        self.initial_matter
+    }
+
+    pub fn matter_drift(&self) -> f64 {
+        (self.total_matter() - self.initial_matter) / self.initial_matter.abs().max(1.0)
     }
 
     pub fn set_all_live_cell_energy(&mut self, energy: f64) -> Result<(), WorldError> {

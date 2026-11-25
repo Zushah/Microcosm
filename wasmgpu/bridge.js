@@ -60,6 +60,7 @@ export const REQUIRED_MICROCOSM_EXPORTS = Object.freeze([
     "microcosm_cell_lineage_ptr",
     "microcosm_cell_flags_ptr",
     "microcosm_cell_enzyme_count_ptr",
+    "microcosm_cell_generation_ptr",
     "microcosm_cell_age_seconds_ptr"
 ]);
 

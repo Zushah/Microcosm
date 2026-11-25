@@ -4,12 +4,16 @@ use microcosmcore::Config;
 
 use crate::viability::{VIABILITY_DEFAULT_SEEDS, VIABILITY_DEFAULT_STEPS};
 
+pub const CENSUS_DEFAULT_EVERY: u64 = 5_000;
+pub const CENSUS_DEFAULT_TOP: usize = 12;
+
 #[derive(Debug, Clone)]
 pub enum Command {
     Run(RunOptions),
     Bench(BenchOptions),
     Inspect(InspectOptions),
     Viability(ViabilityOptions),
+    Census(CensusOptions),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,18 +128,53 @@ impl Default for ViabilityOptions {
     fn default() -> Self {
         Self {
             config: Config::default(),
-            seeds: VIABILITY_DEFAULT_SEEDS
-                .iter()
-                .map(|seed| (*seed).to_owned())
-                .collect(),
+            seeds: default_seeds(),
             steps: VIABILITY_DEFAULT_STEPS,
-            jobs: std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1),
+            jobs: default_jobs(),
             json: false,
             quiet: false,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CensusOptions {
+    pub config: Config,
+    pub seeds: Vec<String>,
+    pub steps: u64,
+    pub every: u64,
+    pub jobs: usize,
+    pub top: usize,
+    pub json: bool,
+    pub quiet: bool,
+}
+
+impl Default for CensusOptions {
+    fn default() -> Self {
+        Self {
+            config: Config::default(),
+            seeds: default_seeds(),
+            steps: VIABILITY_DEFAULT_STEPS,
+            every: CENSUS_DEFAULT_EVERY,
+            jobs: default_jobs(),
+            top: CENSUS_DEFAULT_TOP,
+            json: false,
+            quiet: false,
+        }
+    }
+}
+
+fn default_seeds() -> Vec<String> {
+    VIABILITY_DEFAULT_SEEDS
+        .iter()
+        .map(|seed| (*seed).to_owned())
+        .collect()
+}
+
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
 }
 
 pub fn parse_args<I>(args: I) -> Result<Option<Command>, String>
@@ -163,6 +202,10 @@ where
         Some("viability") => {
             args.next();
             parse_viability(args)
+        }
+        Some("census") => {
+            args.next();
+            parse_census(args)
         }
         Some("inspect") => {
             args.next();
@@ -343,49 +386,136 @@ where
 {
     let mut options = ViabilityOptions::default();
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print_usage();
-                return Ok(None);
-            }
-            "--seeds" => {
-                options.seeds = next_value(&mut args, "--seeds")?
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|seed| !seed.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-                if options.seeds.is_empty() {
-                    return Err("--seeds requires at least one seed".to_owned());
-                }
-            }
-            "--steps" => options.steps = parse_value(&mut args, "--steps")?,
-            "--jobs" => {
-                options.jobs = parse_value(&mut args, "--jobs")?;
-                if options.jobs == 0 {
-                    return Err("--jobs must be at least 1".to_owned());
-                }
-            }
-            "--json" => options.json = true,
-            "--quiet" => options.quiet = true,
-            "--width" => options.config.width = parse_value(&mut args, "--width")?,
-            "--height" => options.config.height = parse_value(&mut args, "--height")?,
-            "--initial-cells" => {
-                options.config.initial_founder_count = parse_value(&mut args, "--initial-cells")?;
-            }
-            "--dt-seconds" => options.config.dt_seconds = parse_value(&mut args, "--dt-seconds")?,
-            "--enval-diffusivity" => {
-                options.config.enval_diffusivity_per_second =
-                    parse_value(&mut args, "--enval-diffusivity")?;
-            }
-            other => {
-                if !parse_environment_flag(other, &mut args, &mut options.config)? {
-                    return Err(format!("unrecognized argument '{other}'"));
-                }
+        let parsed = parse_seed_run_flag(
+            &arg,
+            &mut args,
+            SeedRunFlags {
+                config: &mut options.config,
+                seeds: &mut options.seeds,
+                steps: &mut options.steps,
+                jobs: &mut options.jobs,
+                json: &mut options.json,
+                quiet: &mut options.quiet,
+            },
+        )?;
+        match parsed {
+            FlagOutcome::Parsed => {}
+            FlagOutcome::Help => return Ok(None),
+            FlagOutcome::Unrecognized => {
+                return Err(format!("unrecognized argument '{arg}'"));
             }
         }
     }
     Ok(Some(Command::Viability(options)))
+}
+
+pub fn parse_census<I>(mut args: std::iter::Peekable<I>) -> Result<Option<Command>, String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut options = CensusOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--every" => {
+                options.every = parse_value(&mut args, "--every")?;
+                if options.every == 0 {
+                    return Err("--every must be at least 1".to_owned());
+                }
+                continue;
+            }
+            "--top" => {
+                options.top = parse_value(&mut args, "--top")?;
+                continue;
+            }
+            _ => {}
+        }
+        let parsed = parse_seed_run_flag(
+            &arg,
+            &mut args,
+            SeedRunFlags {
+                config: &mut options.config,
+                seeds: &mut options.seeds,
+                steps: &mut options.steps,
+                jobs: &mut options.jobs,
+                json: &mut options.json,
+                quiet: &mut options.quiet,
+            },
+        )?;
+        match parsed {
+            FlagOutcome::Parsed => {}
+            FlagOutcome::Help => return Ok(None),
+            FlagOutcome::Unrecognized => {
+                return Err(format!("unrecognized argument '{arg}'"));
+            }
+        }
+    }
+    Ok(Some(Command::Census(options)))
+}
+
+struct SeedRunFlags<'a> {
+    config: &'a mut Config,
+    seeds: &'a mut Vec<String>,
+    steps: &'a mut u64,
+    jobs: &'a mut usize,
+    json: &'a mut bool,
+    quiet: &'a mut bool,
+}
+
+enum FlagOutcome {
+    Parsed,
+    Help,
+    Unrecognized,
+}
+
+fn parse_seed_run_flag<I>(
+    arg: &str,
+    args: &mut std::iter::Peekable<I>,
+    flags: SeedRunFlags<'_>,
+) -> Result<FlagOutcome, String>
+where
+    I: Iterator<Item = String>,
+{
+    match arg {
+        "-h" | "--help" => {
+            print_usage();
+            return Ok(FlagOutcome::Help);
+        }
+        "--seeds" => {
+            *flags.seeds = next_value(args, "--seeds")?
+                .split(',')
+                .map(str::trim)
+                .filter(|seed| !seed.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if flags.seeds.is_empty() {
+                return Err("--seeds requires at least one seed".to_owned());
+            }
+        }
+        "--steps" => *flags.steps = parse_value(args, "--steps")?,
+        "--jobs" => {
+            *flags.jobs = parse_value(args, "--jobs")?;
+            if *flags.jobs == 0 {
+                return Err("--jobs must be at least 1".to_owned());
+            }
+        }
+        "--json" => *flags.json = true,
+        "--quiet" => *flags.quiet = true,
+        "--width" => flags.config.width = parse_value(args, "--width")?,
+        "--height" => flags.config.height = parse_value(args, "--height")?,
+        "--initial-cells" => {
+            flags.config.initial_founder_count = parse_value(args, "--initial-cells")?;
+        }
+        "--dt-seconds" => flags.config.dt_seconds = parse_value(args, "--dt-seconds")?,
+        "--enval-diffusivity" => {
+            flags.config.enval_diffusivity_per_second = parse_value(args, "--enval-diffusivity")?;
+        }
+        other => {
+            if !parse_environment_flag(other, args, flags.config)? {
+                return Ok(FlagOutcome::Unrecognized);
+            }
+        }
+    }
+    Ok(FlagOutcome::Parsed)
 }
 
 pub fn parse_environment_flag<I>(
@@ -479,7 +609,8 @@ pub fn print_usage() {
   microcosm bench [--seed S] [--width W] [--height H] [--initial-cells N] [--steps N] [--stats-every N] [--stats-mode compact|full] [--json] [--profile|--profile-json] [--trace off]
   microcosm inspect snapshot.micosm
   microcosm viability [--seeds 42,1,2,3,7] [--steps 60000] [--jobs N] [--json] [--quiet] [--width W] [--height H] [--initial-cells N]
-environment flags (run, bench, viability):
+  microcosm census [--seeds 42,1,2,3,7] [--steps 60000] [--every 5000] [--jobs N] [--top 12] [--json] [--quiet] [--width W] [--height H] [--initial-cells N]
+environment flags (run, bench, viability, census):
   [--permeability P] [--catalyst-upkeep U] [--landscape-magnitude M] [--landscape-scale S] [--landscape-relaxation K] [--recharge-rate K] [--heterogeneity H] [--heterogeneity-scale S] [--drift D] [--contact-gap G]"
     );
 }

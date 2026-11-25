@@ -176,3 +176,17 @@ fn enval_edits_are_ledgered() {
     assert_eq!(bits(&enval_field(&world)), bits(&field));
     assert_eq!(world.enval_ledger(), ledger);
 }
+
+#[test]
+fn enval_ledger_closes_within_its_tolerance() {
+    let mut world = founded_world("enval-ledger-tolerance", 64, 48, 8);
+    world.step_many(1_500);
+    let ledger = world.enval_ledger();
+    assert!(ledger.magnitude() > 0.0);
+    let residual = world.enval_ledger_residual();
+    assert!(
+        residual.abs() <= ledger.closure_tolerance(),
+        "enval ledger residual {residual:e} exceeds {:e}",
+        ledger.closure_tolerance()
+    );
+}

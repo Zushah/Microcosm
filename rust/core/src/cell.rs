@@ -105,6 +105,7 @@ pub struct Cell {
     pub birth_sim_time: f64,
     pub maintenance_cost_per_area: f64,
     pub last_digested_tick: Option<u64>,
+    pub generation: u32,
 }
 
 impl Cell {
@@ -132,6 +133,7 @@ impl Cell {
             birth_sim_time,
             maintenance_cost_per_area,
             last_digested_tick: None,
+            generation: 0,
         }
     }
 

@@ -851,6 +851,7 @@ pub extern "C" fn microcosm_inspect_cell(handle: u32, cell_id: u32) -> u32 {
                     "radius": info.radius,
                     "energy": info.energy,
                     "lineage_id": info.lineage_id.raw(),
+                    "generation": info.generation,
                     "enzyme_count": info.enzyme_count,
                     "total_internal_elements": info.total_internal_elements,
                     "age_seconds": info.age_seconds,
@@ -1364,4 +1365,5 @@ ptr_fn!(microcosm_cell_energy_ptr, cell_energy, f32);
 ptr_fn!(microcosm_cell_lineage_ptr, cell_lineage, u32);
 ptr_fn!(microcosm_cell_flags_ptr, cell_flags, u32);
 ptr_fn!(microcosm_cell_enzyme_count_ptr, cell_enzyme_count, u32);
+ptr_fn!(microcosm_cell_generation_ptr, cell_generation, u32);
 ptr_fn!(microcosm_cell_age_seconds_ptr, cell_age_seconds, f32);
